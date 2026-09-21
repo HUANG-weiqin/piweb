@@ -1,0 +1,2152 @@
+/* Gate 5: workbench shell and topbar integration */
+
+.workbench {
+  background: var(--scheme-rebel-black);
+}
+
+@media (min-width: 1921px) {
+  .workbench {
+    width: 1920px;
+    margin-right: auto;
+    margin-left: auto;
+  }
+
+  .drawer {
+    right: calc((100vw - 1920px) / 2);
+  }
+
+  .toast-stack {
+    right: calc((100vw - 1920px) / 2 + 20px);
+  }
+}
+
+.app-shell .topbar {
+  grid-template-columns: minmax(150px, 158px) minmax(0, 1fr) minmax(148px, 164px);
+  gap: 0;
+  padding: 10px 12px 9px 18px;
+  border-bottom-width: 1px;
+  background:
+    linear-gradient(90deg, var(--rebel-black), var(--rebel-raised) 58%, var(--rebel-black));
+}
+
+.app-shell .topbar::after {
+  right: var(--mission-command-width, 0px);
+  bottom: -1px;
+  width: clamp(120px, 12vw, 184px);
+  height: 5px;
+  clip-path: polygon(0 42%, 92% 0, 100% 100%, 5% 82%);
+}
+
+.app-shell .brand {
+  position: relative;
+  grid-column: 1;
+  height: 72px;
+  padding-right: 14px;
+  overflow: hidden;
+}
+
+.app-shell .brand > span:last-child {
+  display: grid;
+  align-content: center;
+  gap: 1px;
+  line-height: 1;
+}
+
+.app-shell .brand > span:last-child::before {
+  color: var(--rebel-red);
+  content: "PROJECT";
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 8px;
+  font-weight: 900;
+  letter-spacing: 0.16em;
+}
+
+.app-shell .brand small {
+  max-width: 100px;
+  font-size: 9px;
+  line-height: 1.2;
+}
+
+.app-shell .topbar-conversation-context {
+  position: relative;
+  grid-column: 2;
+  height: 72px;
+  padding: 0 10px 0 6px;
+  background:
+    linear-gradient(104deg, rgb(185 79 67 / 13%) 0 84px, transparent 85px),
+    linear-gradient(90deg, rgb(32 37 38 / 88%), rgb(23 26 27 / 72%));
+  box-shadow:
+    inset 1px 0 var(--rebel-line),
+    inset -1px 0 var(--rebel-line),
+    inset 0 1px var(--rebel-line),
+    inset 0 -1px var(--rebel-line);
+}
+
+.app-shell .topbar-conversation-copy,
+.app-shell .topbar-conversation-status {
+  position: relative;
+  z-index: 1;
+}
+
+.app-shell .topbar-conversation-status {
+  min-width: 136px;
+  min-height: 58px;
+}
+
+.app-shell .topbar-controls {
+  grid-column: 3;
+  height: 72px;
+  padding: 8px 0 8px 12px;
+  box-shadow:
+    inset 0 1px var(--rebel-line),
+    inset 0 -1px var(--rebel-line);
+}
+
+.app-shell .model-button {
+  position: relative;
+  width: 100%;
+  max-width: 164px;
+  min-height: 56px;
+  padding: 20px 26px 7px 11px;
+  border-color: var(--rebel-line);
+  box-shadow: inset 3px 0 var(--rebel-red);
+  font-size: 10px;
+  text-align: left;
+}
+
+.app-shell .model-button::before {
+  position: absolute;
+  top: 7px;
+  left: 11px;
+  color: var(--rebel-red);
+  content: "SETTINGS";
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 8px;
+  font-weight: 900;
+  letter-spacing: 0.16em;
+  line-height: 1;
+}
+
+.app-shell .model-button span {
+  position: absolute;
+  top: 50%;
+  right: 10px;
+  margin: 0;
+  color: var(--rebel-paper);
+  transform: translateY(-18%);
+}
+
+@media (min-width: 601px) and (max-width: 1199px) {
+  .app-shell .topbar {
+    height: 84px;
+    grid-template-columns: minmax(0, 1fr) 70px;
+    gap: 8px;
+    padding: 7px 8px;
+  }
+
+  .app-shell .topbar::after,
+  .app-shell .brand,
+  .app-shell .topbar-conversation-status {
+    display: none;
+  }
+
+  .app-shell .topbar-conversation-context {
+    grid-column: 1;
+    height: 70px;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 7px;
+    padding: 0 8px;
+  }
+
+  .app-shell .topbar-conversation-context.has-ordinal {
+    grid-template-columns: 38px minmax(0, 1fr);
+  }
+
+  .app-shell .topbar-conversation-context.has-current .topbar-conversation-root,
+  .app-shell .topbar-conversation-context.has-current .topbar-conversation-separator,
+  .topbar-conversation-metadata > span + span {
+    display: none;
+  }
+
+  .app-shell .topbar-conversation-context.has-current .topbar-conversation-current {
+    max-width: 100%;
+  }
+
+  .topbar-session-ordinal {
+    font-size: 35px;
+    text-shadow: 2px 2px 0 var(--rebel-paper);
+  }
+
+  .topbar-conversation-title {
+    gap: 4px;
+    font-size: clamp(14px, 2vw, 20px);
+  }
+
+  .topbar-conversation-metadata {
+    gap: 5px;
+    font-size: 7px;
+    letter-spacing: 0.03em;
+  }
+
+  .app-shell .topbar-controls {
+    grid-column: 2;
+    height: 70px;
+    padding: 7px 0;
+    box-shadow: none;
+  }
+
+  .app-shell .model-button {
+    width: 70px;
+    max-width: 70px;
+    min-height: 56px;
+    padding: 20px 17px 6px 7px;
+    font-size: 8px;
+  }
+
+  .app-shell .model-button::before {
+    top: 7px;
+    left: 7px;
+    font-size: 7px;
+  }
+
+  .app-shell .model-button span {
+    right: 6px;
+  }
+}
+
+@media (max-width: 960px) {
+  .app-shell .topbar {
+    height: 84px;
+    grid-template-columns: minmax(0, 1fr) 58px;
+    gap: 8px;
+    padding: 8px 8px 8px 58px;
+  }
+
+  .app-shell .topbar::after {
+    display: none;
+  }
+
+  .app-shell .topbar-conversation-context {
+    grid-column: 1;
+    height: 68px;
+    padding: 0 6px;
+  }
+
+  .app-shell .topbar-controls {
+    grid-column: 2;
+    height: 68px;
+    padding: 7px 0;
+    box-shadow: none;
+  }
+
+  .app-shell .model-button {
+    width: 58px;
+    max-width: 58px;
+    min-height: 54px;
+    padding: 20px 13px 5px 6px;
+    font-size: 7px;
+  }
+
+  .app-shell .model-button::before {
+    top: 7px;
+    left: 6px;
+    font-size: 7px;
+    letter-spacing: 0.08em;
+  }
+
+  .app-shell .model-button span {
+    right: 4px;
+  }
+}
+
+/* Gate 6: short, state-owned motion for primary shell surfaces only */
+
+.workspace-rail,
+.conversation-sidebar,
+.app-shell {
+  --motion-punch-duration: 110ms;
+  --motion-slash-duration: 150ms;
+  --motion-stamp-duration: 130ms;
+  --motion-hit-easing: cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.workspace-rail-item,
+.workspace-rail-item.active::before,
+.workspace-rail-close,
+.conversation-sidebar-resize-handle::after,
+.conversation-sidebar-item,
+.conversation-sidebar-conversation,
+.conversation-sidebar-actions,
+.conversation-group-disclosure,
+.app-shell .model-button,
+.app-shell .send {
+  transition-duration: var(--motion-punch-duration);
+  transition-timing-function: var(--motion-hit-easing);
+}
+
+.app-shell .model-button,
+.app-shell .send {
+  transition-property: color, background-color, border-color, box-shadow, transform;
+}
+
+.app-shell .model-button:not(:disabled):active,
+.app-shell .send:not(:disabled):active {
+  transform: translateY(1px) scale(0.98);
+}
+
+.conversation-group-chevron,
+.conversation-group-chevron::before {
+  transition-duration: var(--motion-slash-duration);
+  transition-timing-function: steps(3, end);
+}
+
+.transcript .compaction-state {
+  position: relative;
+}
+
+.transcript .compaction-state::after {
+  position: absolute;
+  inset: -4px -6px;
+  border: 2px solid currentColor;
+  content: "";
+  opacity: 0;
+  pointer-events: none;
+  transform: rotate(-2deg);
+  animation: rebel-motion-stamp var(--motion-stamp-duration) steps(3, end);
+}
+
+@keyframes rebel-motion-stamp {
+  0% {
+    opacity: 0;
+    transform: scale(0.72) rotate(-7deg);
+  }
+
+  34% {
+    opacity: 0.88;
+    transform: scale(1.05) rotate(-2deg);
+  }
+
+  68% {
+    opacity: 0.38;
+    transform: scale(1) rotate(-2deg);
+  }
+
+  100% {
+    opacity: 0;
+    transform: scale(1) rotate(-2deg);
+  }
+}
+
+/* Gate 7: secondary surfaces — dossiers, signals, and lifecycle posters */
+
+:is(
+  .drawer,
+  .modal,
+  .role-selection-page,
+  .setup-shell,
+  .workspace-setup-dialog,
+  .workspace-placeholder,
+  .toast-stack
+) {
+  --rebel-black: var(--scheme-rebel-black);
+  --rebel-raised: var(--scheme-rebel-overlay-raised);
+  --rebel-paper: var(--scheme-rebel-paper);
+  --rebel-paper-muted: var(--scheme-rebel-paper-muted);
+  --rebel-on-oxide: var(--scheme-rebel-on-oxide);
+  --rebel-red: var(--scheme-rebel-red);
+  --rebel-red-dark: var(--scheme-rebel-red-dark);
+  --rebel-line: var(--scheme-rebel-line);
+}
+
+/* Lifecycle pages are posters, not detached application cards. */
+
+.setup-shell,
+.workspace-placeholder,
+.role-selection-page {
+  position: relative;
+  color: var(--rebel-paper);
+  background:
+    linear-gradient(116deg, transparent 0 69%, var(--rebel-red-dark) 69% 71%, transparent 71%),
+    repeating-linear-gradient(135deg, rgb(216 209 193 / 2%) 0 1px, transparent 1px 13px),
+    var(--rebel-black);
+}
+
+.setup-shell::before,
+.workspace-placeholder::before,
+.role-selection-page::before {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 9px;
+  background: var(--rebel-red);
+  content: "";
+  pointer-events: none;
+}
+
+.setup-card {
+  position: relative;
+  width: min(520px, 100%);
+  gap: 21px;
+  padding: 36px 38px 34px;
+  border: 3px solid var(--rebel-black);
+  border-radius: 0;
+  color: var(--rebel-black);
+  background: var(--rebel-paper);
+  box-shadow: 14px 14px 0 var(--rebel-red);
+  clip-path: polygon(0 0, calc(100% - 18px) 0, 100% 18px, 100% 100%, 12px 100%, 0 calc(100% - 12px));
+  backdrop-filter: none;
+}
+
+.setup-card::before {
+  position: absolute;
+  top: 0;
+  right: 36px;
+  padding: 4px 9px 5px;
+  color: var(--rebel-paper);
+  background: var(--rebel-black);
+  content: "LOCAL // WORKSPACE";
+  font: 850 8px/1.2 "Cascadia Code", Consolas, monospace;
+  letter-spacing: 0.12em;
+}
+
+.setup-brand {
+  gap: 17px;
+}
+
+.logo,
+.empty > div,
+.workspace-placeholder-mark {
+  border: 0;
+  border-radius: 0;
+  color: var(--rebel-on-oxide);
+  background: var(--rebel-red);
+  box-shadow: 5px 5px 0 var(--rebel-black);
+  clip-path: polygon(7px 0, 100% 5px, calc(100% - 5px) 100%, 0 calc(100% - 7px));
+  font-family: Georgia, serif;
+  font-style: italic;
+  font-weight: 900;
+}
+
+.setup-brand h1,
+.empty h1,
+.workspace-placeholder-content h1,
+.role-selection-header h1 {
+  font-style: italic;
+  font-weight: 950;
+  letter-spacing: -0.055em;
+  text-transform: uppercase;
+}
+
+.setup-card .eyebrow,
+.workspace-placeholder .eyebrow,
+.role-selection-page .eyebrow {
+  color: var(--rebel-red);
+  font-family: "Cascadia Code", Consolas, monospace;
+}
+
+.setup-intro,
+.setup-directory-hint,
+.setup-footnote {
+  color: color-mix(in srgb, var(--rebel-black) 68%, var(--rebel-paper));
+}
+
+.setup-intro code,
+.setup-card > pre,
+.workspace-placeholder-content code {
+  border: 0;
+  border-radius: 0;
+  color: inherit;
+  background: color-mix(in srgb, var(--rebel-black) 10%, var(--rebel-paper));
+}
+
+.setup-card input,
+.setup-card textarea,
+.setup-card select {
+  border: 2px solid var(--rebel-black);
+  border-radius: 0;
+  color: var(--rebel-black);
+  background: color-mix(in srgb, var(--rebel-paper) 92%, white);
+  box-shadow: none;
+}
+
+.setup-card input:focus,
+.setup-card textarea:focus,
+.setup-card select:focus {
+  border-color: var(--rebel-red);
+  box-shadow: 4px 4px 0 color-mix(in srgb, var(--rebel-red) 24%, transparent);
+}
+
+.setup-card button,
+.workspace-placeholder button,
+.role-selection-page button {
+  border: 2px solid var(--rebel-black);
+  border-radius: 0;
+  color: var(--rebel-paper);
+  background: var(--rebel-black);
+  box-shadow: 4px 4px 0 var(--rebel-red);
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 11px;
+  font-style: italic;
+  font-weight: 900;
+  letter-spacing: 0.04em;
+}
+
+.setup-card button:not(:disabled):hover,
+.workspace-placeholder button:not(:disabled):hover,
+.role-selection-page button:not(:disabled):hover {
+  color: var(--rebel-on-oxide);
+  background: var(--rebel-red);
+  box-shadow: 4px 4px 0 var(--rebel-black);
+}
+
+.setup-card button.ghost,
+.workspace-placeholder button.ghost,
+.role-selection-page button.ghost {
+  color: var(--rebel-black);
+  background: var(--rebel-paper);
+}
+
+.setup-card .status-dot {
+  border-radius: 0;
+  background: color-mix(in srgb, var(--rebel-black) 45%, var(--rebel-paper));
+  transform: rotate(45deg);
+}
+
+.setup-card .status-dot.online {
+  background: var(--rebel-red);
+  box-shadow: none;
+}
+
+.workspace-placeholder-content {
+  width: min(610px, 100%);
+  gap: 14px;
+  padding: 35px 38px 38px;
+  border-top: 3px solid var(--rebel-paper);
+  border-bottom: 3px solid var(--rebel-paper);
+  color: var(--rebel-paper-muted);
+  background: var(--rebel-raised);
+  box-shadow: 13px 13px 0 var(--rebel-red-dark);
+  clip-path: polygon(0 10px, 98% 0, 100% calc(100% - 13px), 8px 100%);
+}
+
+.workspace-placeholder-content h1,
+.workspace-placeholder-content strong {
+  color: var(--rebel-paper);
+}
+
+.workspace-placeholder-content code {
+  color: var(--rebel-paper);
+  background: var(--rebel-black);
+  font-family: "Cascadia Code", Consolas, monospace;
+}
+
+.workspace-placeholder-mark.warning {
+  color: var(--rebel-on-oxide);
+  background: var(--rebel-red);
+  font-family: Inter, sans-serif;
+}
+
+.workspace-opening-spinner,
+.conversation-deletion-spinner {
+  color: var(--rebel-red);
+}
+
+.workspace-opening-spinner .activity-spinner-track,
+.conversation-deletion-spinner .activity-spinner-track {
+  stroke: var(--rebel-paper-muted);
+  stroke-opacity: 0.38;
+}
+
+/* Role selection is a dispatch board. */
+
+.role-selection-page {
+  gap: 34px;
+  padding: clamp(36px, 5vw, 68px) clamp(30px, 6vw, 96px);
+}
+
+.role-selection-header {
+  position: relative;
+  padding: 0 0 22px 20px;
+  border-bottom: 3px solid var(--rebel-paper);
+}
+
+.role-selection-header::before {
+  position: absolute;
+  top: 2px;
+  bottom: 22px;
+  left: 0;
+  width: 7px;
+  background: var(--rebel-red);
+  content: "";
+  transform: skewY(-10deg);
+}
+
+.role-selection-header h1 {
+  max-width: 760px;
+  color: var(--rebel-paper);
+  font-size: clamp(32px, 4.6vw, 58px);
+}
+
+.role-selection-header p:not(.eyebrow) {
+  max-width: 700px;
+  color: var(--rebel-paper-muted);
+  line-height: 1.55;
+}
+
+.role-card-grid {
+  grid-template-columns: repeat(auto-fit, minmax(255px, 1fr));
+  gap: 18px;
+}
+
+.role-card {
+  position: relative;
+  min-height: 206px;
+  gap: 13px;
+  padding: 23px 22px 20px;
+  overflow: hidden;
+  border: 0;
+  border-left: 7px solid var(--rebel-red);
+  border-radius: 0;
+  color: var(--rebel-black);
+  background: var(--rebel-paper);
+  box-shadow: 8px 8px 0 var(--rebel-red-dark);
+  clip-path: polygon(0 5px, 100% 0, calc(100% - 6px) 100%, 5px calc(100% - 2px));
+}
+
+.role-card::before {
+  position: absolute;
+  top: 0;
+  right: 12px;
+  width: 54px;
+  height: 5px;
+  background: var(--rebel-black);
+  content: "";
+  transform: skewX(-28deg);
+}
+
+.role-card:not(.role-card-add):hover,
+.role-card-add:not(:disabled):hover {
+  border-color: var(--rebel-red);
+  color: var(--rebel-black);
+  background: color-mix(in srgb, var(--rebel-paper) 92%, white);
+  box-shadow: 8px 8px 0 var(--rebel-red);
+  transform: translateY(-2px);
+}
+
+.role-card.unavailable {
+  border-color: var(--rebel-paper-muted);
+  background: color-mix(in srgb, var(--rebel-paper) 82%, var(--rebel-black));
+  opacity: 0.72;
+}
+
+.role-card-heading {
+  color: var(--rebel-black);
+  font-size: 20px;
+  font-style: italic;
+  font-weight: 950;
+  text-transform: uppercase;
+}
+
+.role-card-description,
+.role-card-model {
+  color: color-mix(in srgb, var(--rebel-black) 68%, var(--rebel-paper));
+}
+
+.role-card-model {
+  padding-top: 9px;
+  border-top: 1px solid color-mix(in srgb, var(--rebel-black) 28%, var(--rebel-paper));
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.role-card-add {
+  border: 2px dashed var(--rebel-paper-muted);
+  border-left: 7px solid var(--rebel-paper-muted);
+  color: var(--rebel-paper);
+  background: var(--rebel-raised);
+  box-shadow: none;
+}
+
+.role-card-add::before {
+  background: var(--rebel-red);
+}
+
+.role-card-action {
+  border: 2px solid var(--rebel-black) !important;
+  border-radius: 0 !important;
+  color: var(--rebel-black) !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+.role-card-action:not(:disabled):hover {
+  color: var(--rebel-on-oxide) !important;
+  background: var(--rebel-red) !important;
+}
+
+/* Shared overlay frame: hard veil, paper dossier, no lifecycle animation. */
+
+.drawer-backdrop,
+.modal-backdrop {
+  background: rgb(0 0 0 / 78%);
+  backdrop-filter: none;
+}
+
+.drawer {
+  padding: 0 30px 34px;
+  border-left: 3px solid var(--rebel-red);
+  color: var(--rebel-paper);
+  background:
+    repeating-linear-gradient(135deg, rgb(216 209 193 / 2%) 0 1px, transparent 1px 12px),
+    var(--rebel-black);
+  box-shadow: -14px 0 0 rgb(185 79 67 / 36%);
+}
+
+.drawer-header {
+  margin: 0 -30px 25px;
+  padding: 25px 30px 19px;
+  border-bottom: 3px solid var(--rebel-paper);
+  background: var(--rebel-black);
+  backdrop-filter: none;
+}
+
+.drawer-header h2 {
+  color: var(--rebel-paper);
+  font-size: 27px;
+  font-style: italic;
+  font-weight: 950;
+  letter-spacing: -0.045em;
+  text-transform: uppercase;
+}
+
+.drawer-header p:last-child,
+.drawer .setting-note,
+.drawer .step-heading p,
+.drawer .provider-identity small,
+.drawer .model small {
+  color: var(--rebel-paper-muted);
+}
+
+.drawer .eyebrow,
+.modal .eyebrow {
+  color: var(--rebel-red);
+  font-family: "Cascadia Code", Consolas, monospace;
+}
+
+.drawer .icon-button {
+  border: 2px solid var(--rebel-paper);
+  border-radius: 0;
+  color: var(--rebel-paper);
+  background: transparent;
+}
+
+.drawer .icon-button:not(:disabled):hover {
+  color: var(--rebel-on-oxide);
+  background: var(--rebel-red);
+}
+
+.drawer .settings-section {
+  gap: 14px;
+  padding: 25px 0;
+  border-top: 1px solid var(--rebel-line);
+}
+
+.drawer .current-model,
+.drawer .provider-summary,
+.drawer .model-list {
+  border: 1px solid var(--rebel-line);
+  border-radius: 0;
+  color: var(--rebel-paper);
+  background: var(--rebel-raised);
+  box-shadow: none;
+}
+
+.drawer .current-model {
+  padding: 17px;
+  border-left: 6px solid var(--rebel-red);
+}
+
+.drawer .status-badge,
+.modal .status-badge {
+  border: 1px solid currentColor;
+  border-radius: 0;
+  color: var(--rebel-paper-muted);
+  background: transparent;
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 9px;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.drawer .status-badge.success {
+  color: var(--rebel-black);
+  background: var(--rebel-paper);
+}
+
+.drawer .step-number {
+  border: 0;
+  border-radius: 0;
+  color: var(--rebel-on-oxide);
+  background: var(--rebel-red);
+  clip-path: polygon(4px 0, 100% 2px, calc(100% - 3px) 100%, 0 calc(100% - 4px));
+}
+
+.drawer .provider-actions button,
+.drawer > button,
+.drawer .model,
+.drawer input,
+.drawer select {
+  border-radius: 0;
+}
+
+.drawer .provider-actions button,
+.drawer > button {
+  border: 1px solid var(--rebel-paper);
+  color: var(--rebel-paper);
+  background: transparent;
+}
+
+.drawer .provider-actions button:not(:disabled):hover,
+.drawer > button:not(:disabled):hover {
+  border-color: var(--rebel-red);
+  color: var(--rebel-on-oxide);
+  background: var(--rebel-red);
+}
+
+.drawer input,
+.drawer select {
+  border-color: var(--rebel-line);
+  color: var(--rebel-paper);
+  background: var(--rebel-raised);
+}
+
+.drawer input:focus,
+.drawer select:focus {
+  border-color: var(--rebel-red);
+  box-shadow: 3px 3px 0 var(--rebel-red-dark);
+}
+
+.drawer .model {
+  border-bottom-color: var(--rebel-line);
+  color: var(--rebel-paper);
+}
+
+.drawer .model:not(:disabled):hover,
+.drawer .model.selected {
+  color: var(--rebel-paper);
+  background: color-mix(in srgb, var(--rebel-red) 28%, var(--rebel-raised));
+}
+
+.drawer .model b,
+.drawer .inline-status.success {
+  color: var(--rebel-paper);
+}
+
+.drawer .inline-status,
+.modal .inline-status,
+.directory-browser-error {
+  border-radius: 0;
+}
+
+.drawer .inline-status.success {
+  border-left: 4px solid var(--rebel-paper);
+  background: color-mix(in srgb, var(--rebel-paper) 12%, var(--rebel-black));
+}
+
+.drawer .inline-status.error,
+.drawer .credential-confirm {
+  border: 1px solid var(--rebel-red);
+  border-radius: 0;
+  color: var(--rebel-paper);
+  background: var(--rebel-red-dark);
+}
+
+.modal {
+  position: relative;
+  gap: 16px;
+  padding: 27px;
+  border: 3px solid var(--rebel-black);
+  border-radius: 0;
+  color: var(--rebel-black);
+  background: var(--rebel-paper);
+  box-shadow: 12px 12px 0 var(--rebel-red);
+  clip-path: polygon(0 0, calc(100% - 16px) 0, 100% 16px, 100% 100%, 10px 100%, 0 calc(100% - 10px));
+}
+
+.modal::before {
+  position: absolute;
+  top: 0;
+  right: 42px;
+  width: 74px;
+  height: 5px;
+  background: var(--rebel-red);
+  content: "";
+  transform: skewX(-28deg);
+}
+
+.modal-header {
+  min-height: 54px;
+  flex: 0 0 auto;
+  margin: -27px -27px 2px;
+  padding: 18px 21px 14px 27px;
+  color: var(--rebel-paper);
+  background: var(--rebel-black);
+}
+
+.modal-header h2 {
+  color: var(--rebel-paper);
+  font-size: 23px;
+  font-style: italic;
+  font-weight: 950;
+  letter-spacing: -0.04em;
+  text-transform: uppercase;
+}
+
+.modal .modal-description,
+.modal .progress,
+.modal small,
+.modal .directory-browser-note {
+  color: color-mix(in srgb, var(--rebel-black) 64%, var(--rebel-paper));
+}
+
+.modal .modal-header .modal-description,
+.modal .modal-header .progress,
+.modal .modal-header small {
+  color: var(--rebel-paper-muted);
+}
+
+.modal .icon-button {
+  border: 1px solid var(--rebel-paper);
+  border-radius: 0;
+  color: var(--rebel-paper);
+  background: transparent;
+}
+
+.modal .icon-button:not(:disabled):hover {
+  color: var(--rebel-on-oxide);
+  background: var(--rebel-red);
+}
+
+.modal button,
+.modal .primary-link {
+  border: 2px solid var(--rebel-black);
+  border-radius: 0;
+  color: var(--rebel-paper);
+  background: var(--rebel-black);
+  box-shadow: 3px 3px 0 var(--rebel-red);
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 11px;
+  font-weight: 850;
+}
+
+.modal button:not(:disabled):hover,
+.modal .primary-link:hover {
+  border-color: var(--rebel-red);
+  color: var(--rebel-on-oxide);
+  background: var(--rebel-red);
+  box-shadow: 3px 3px 0 var(--rebel-black);
+}
+
+.modal button.ghost,
+.modal .option-button {
+  color: var(--rebel-black);
+  background: transparent;
+  box-shadow: none;
+}
+
+.modal button.ghost:not(:disabled):hover,
+.modal .option-button:not(:disabled):hover {
+  color: var(--rebel-paper);
+  background: var(--rebel-black);
+}
+
+.modal input,
+.modal textarea,
+.modal select,
+.modal .device-code,
+.modal .directory-browser-location code,
+.modal .directory-browser-list {
+  border: 2px solid var(--rebel-black);
+  border-radius: 0;
+  color: var(--rebel-black);
+  background: color-mix(in srgb, var(--rebel-paper) 92%, white);
+  box-shadow: none;
+}
+
+.modal input:focus,
+.modal textarea:focus,
+.modal select:focus {
+  border-color: var(--rebel-red);
+  box-shadow: 3px 3px 0 color-mix(in srgb, var(--rebel-red) 24%, transparent);
+}
+
+.modal .directory-browser-list {
+  padding: 8px;
+  background: color-mix(in srgb, var(--rebel-black) 8%, var(--rebel-paper));
+}
+
+.modal .directory-browser-entry {
+  border: 0;
+  color: var(--rebel-black);
+  background: transparent;
+  box-shadow: none;
+}
+
+.modal .directory-browser-entry:not(:disabled):hover {
+  color: var(--rebel-paper);
+  background: var(--rebel-black);
+}
+
+.modal .directory-browser-error {
+  border: 0;
+  border-left: 5px solid var(--rebel-red);
+  color: var(--rebel-paper);
+  background: var(--rebel-red-dark);
+}
+
+.modal .device-code {
+  padding: 17px;
+  color: var(--rebel-paper);
+  background: var(--rebel-black);
+  font-weight: 900;
+}
+
+.modal.role-manager-dialog {
+  width: min(1000px, 96vw);
+}
+
+.role-manager-layout {
+  gap: 23px;
+}
+
+.modal .role-manager-list {
+  gap: 4px;
+  padding-right: 13px;
+  border-right: 2px solid var(--rebel-black);
+}
+
+.modal .role-manager-list button {
+  border: 0;
+  border-left: 4px solid transparent;
+  color: var(--rebel-black);
+  background: transparent;
+  box-shadow: none;
+}
+
+.modal .role-manager-list button:not(:disabled):hover,
+.modal .role-manager-list button.selected {
+  border-left-color: var(--rebel-red);
+  color: var(--rebel-paper);
+  background: var(--rebel-black);
+}
+
+.modal .role-manager-list button.selected small {
+  color: var(--rebel-paper-muted);
+}
+
+.modal .role-capability-switch {
+  border: 2px solid var(--rebel-black);
+  border-radius: 0;
+  background: color-mix(in srgb, var(--rebel-black) 8%, var(--rebel-paper));
+}
+
+.modal .role-capability-switch input {
+  border: 2px solid var(--rebel-black);
+  border-radius: 0;
+  background: var(--rebel-paper);
+}
+
+.modal .role-capability-switch input::after {
+  border-radius: 0;
+  background: var(--rebel-black);
+}
+
+.modal .role-capability-switch input:checked {
+  border-color: var(--rebel-red);
+  background: var(--rebel-red);
+}
+
+.modal .role-capability-switch input:checked::after {
+  background: var(--rebel-on-oxide);
+}
+
+.workspace-setup-dialog .setup-shell {
+  color: var(--rebel-black);
+  background: transparent;
+}
+
+.workspace-setup-dialog .setup-shell::before,
+.workspace-setup-dialog .setup-card::before {
+  display: none;
+}
+
+.workspace-setup-dialog .setup-card {
+  border-color: var(--rebel-black);
+  color: var(--rebel-black);
+  background: var(--rebel-paper);
+  box-shadow: 14px 14px 0 var(--rebel-red);
+}
+
+.workspace-setup-close {
+  top: 18px;
+  right: 19px;
+  border: 1px solid var(--rebel-black) !important;
+  border-radius: 0;
+  color: var(--rebel-paper) !important;
+  background: var(--rebel-black) !important;
+  box-shadow: 3px 3px 0 var(--rebel-red) !important;
+}
+
+/* Feedback stays a signal strip and never takes focus ownership. */
+
+.banner {
+  padding: 8px 14px;
+  border: 0;
+  border-left: 7px solid var(--rebel-paper);
+  color: var(--rebel-paper);
+  background: var(--rebel-red-dark);
+  font: 850 10px/1.4 "Cascadia Code", Consolas, monospace;
+  letter-spacing: 0.07em;
+  text-align: center;
+  text-transform: uppercase;
+}
+
+.transition-status-overlay {
+  top: 96px;
+}
+
+.toast-stack {
+  gap: 10px;
+}
+
+.toast {
+  position: relative;
+  padding: 13px 43px 13px 16px;
+  border: 2px solid var(--rebel-paper);
+  border-left: 7px solid var(--rebel-red);
+  border-radius: 0;
+  color: var(--rebel-paper);
+  background: var(--rebel-black);
+  box-shadow: 7px 7px 0 rgb(185 79 67 / 44%);
+  clip-path: polygon(0 3px, 100% 0, calc(100% - 5px) 100%, 3px 100%);
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.notice-toast.warning {
+  border-color: var(--rebel-paper);
+  border-left-color: var(--rebel-red);
+  color: var(--rebel-paper);
+  background: var(--rebel-raised);
+}
+
+.error-toast,
+.notice-toast.error {
+  border-color: var(--rebel-paper);
+  border-left-color: var(--rebel-paper);
+  color: var(--rebel-paper);
+  background: var(--rebel-red-dark);
+}
+
+.toast-close {
+  position: absolute;
+  top: 8px;
+  right: 9px;
+  border: 1px solid currentColor;
+  border-radius: 0;
+  color: inherit;
+  background: transparent;
+  box-shadow: none;
+}
+
+/* Native disclosure owners keep their DOM and scroll behavior; only their
+   secondary visual rhythm is narrowed here. */
+
+.app-shell .token-tooltip {
+  border-left: 4px solid var(--rebel-red);
+  box-shadow: 5px 5px 0 rgb(0 0 0 / 42%);
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 9px;
+}
+
+.transcript .assistant-activity-group > summary,
+.transcript .tool > summary,
+.transcript .commitment-card > summary,
+.transcript .session-message-toggle {
+  cursor: pointer;
+}
+
+@media (max-width: 600px) {
+  .setup-shell,
+  .workspace-placeholder,
+  .role-selection-page {
+    background:
+      linear-gradient(125deg, transparent 0 82%, var(--rebel-red-dark) 82%),
+      var(--rebel-black);
+  }
+
+  .setup-card {
+    padding: 30px 23px 27px;
+    box-shadow: 8px 8px 0 var(--rebel-red);
+  }
+
+  .setup-card::before {
+    right: 24px;
+  }
+
+  .setup-directory-row {
+    grid-template-columns: 1fr;
+  }
+
+  .workspace-placeholder-content {
+    padding: 28px 22px 31px;
+    box-shadow: 8px 8px 0 var(--rebel-red-dark);
+  }
+
+  .workspace-placeholder-actions {
+    width: 100%;
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+
+  .role-selection-page {
+    gap: 25px;
+    padding: 82px 17px 26px 64px;
+  }
+
+  .role-selection-header {
+    gap: 17px;
+    padding-left: 14px;
+  }
+
+  .role-selection-header h1 {
+    font-size: 31px;
+  }
+
+  .role-card-grid {
+    gap: 15px;
+  }
+
+  .role-card {
+    min-height: 184px;
+    box-shadow: 6px 6px 0 var(--rebel-red-dark);
+  }
+
+  .drawer {
+    border-left: 0;
+    border-top: 5px solid var(--rebel-red);
+    box-shadow: none;
+  }
+
+  .modal-backdrop {
+    align-items: end;
+  }
+
+  .modal {
+    padding: 23px 19px 21px;
+    border-width: 2px;
+    box-shadow: 0 -7px 0 var(--rebel-red);
+    clip-path: polygon(0 0, calc(100% - 13px) 0, 100% 13px, 100% 100%, 0 100%);
+  }
+
+  .modal-header {
+    margin: -23px -19px 1px;
+    padding: 17px 18px 14px 19px;
+  }
+
+  .modal::before {
+    right: 28px;
+  }
+
+  .role-manager-layout {
+    min-height: auto;
+  }
+
+  .modal .role-manager-list {
+    padding-right: 0;
+    padding-bottom: 10px;
+    border-right: 0;
+    border-bottom: 2px solid var(--rebel-black);
+  }
+
+  .conversation-role-switch,
+  .directory-browser-actions,
+  .extension-actions {
+    grid-template-columns: 1fr;
+  }
+
+  .toast-stack {
+    top: 76px;
+  }
+
+  .toast {
+    box-shadow: 5px 5px 0 rgb(185 79 67 / 44%);
+  }
+
+  .transition-status-overlay {
+    top: 64px;
+  }
+}
+
+/* Phone workbench projection: one local page at a time, backed by App state. */
+.mobile-page-header,
+.mobile-chat-header,
+.mobile-composer-launchers,
+.mobile-sheet-header {
+  display: none;
+}
+
+@media (max-width: 600px) {
+  .workbench {
+    width: 100%;
+    height: 100vh;
+    height: 100dvh;
+    display: block;
+    overflow: hidden;
+  }
+
+  .role-selection-page.mobile-lifecycle-page {
+    gap: 25px;
+    padding: 0 17px 26px;
+  }
+
+  .mobile-lifecycle-page > .mobile-page-header {
+    position: sticky;
+    z-index: 2;
+    top: 0;
+    flex: 0 0 auto;
+    margin: 0 -17px;
+  }
+
+  .workbench > [hidden],
+  .app-shell [hidden] {
+    display: none !important;
+  }
+
+  .workspace-rail,
+  .conversation-sidebar,
+  .conversation-sidebar.collapsed,
+  .workbench-main,
+  .workspace-placeholder {
+    position: relative;
+    inset: auto;
+    width: 100%;
+    height: 100%;
+    min-width: 0;
+    max-width: none;
+    margin: 0;
+    border-radius: 0;
+    box-shadow: none;
+  }
+
+  .mobile-page-header,
+  .mobile-chat-header {
+    min-height: 64px;
+    display: grid;
+    grid-template-columns: minmax(64px, auto) minmax(0, 1fr) minmax(64px, auto);
+    align-items: center;
+    gap: 8px;
+    padding: max(8px, env(safe-area-inset-top)) max(10px, env(safe-area-inset-right)) 8px max(10px, env(safe-area-inset-left));
+    border-bottom: 2px solid var(--rebel-red);
+    background: var(--rebel-black);
+  }
+
+  .mobile-page-header > div,
+  .mobile-chat-identity {
+    min-width: 0;
+    text-align: center;
+  }
+
+  .mobile-page-header h1,
+  .mobile-page-header small,
+  .mobile-chat-identity strong,
+  .mobile-chat-identity small {
+    display: block;
+    margin: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .mobile-page-header h1,
+  .mobile-chat-identity strong {
+    color: var(--rebel-paper);
+    font: 800 16px/1.2 "Cascadia Code", Consolas, monospace;
+  }
+
+  .mobile-page-header small,
+  .mobile-chat-identity small {
+    margin-bottom: 3px;
+    color: var(--rebel-red);
+    font: 800 11px/1 Inter, sans-serif;
+    letter-spacing: 0.08em;
+  }
+
+  .mobile-page-header button,
+  .mobile-chat-header button,
+  .mobile-composer-launchers button,
+  .mobile-sheet-header button {
+    min-height: 44px;
+    border: 1px solid var(--rebel-line-strong);
+    border-radius: 0;
+    color: var(--rebel-paper);
+    background: var(--rebel-raised);
+    font: 800 11px/1 "Cascadia Code", Consolas, monospace;
+  }
+
+  .workspace-rail {
+    z-index: auto;
+    display: flex;
+    align-items: stretch;
+    gap: 0;
+    padding: 0 0 max(10px, env(safe-area-inset-bottom));
+    border-right: 0;
+    background: var(--rebel-black);
+  }
+
+  .workspace-rail > .workspace-rail-brand {
+    display: none;
+  }
+
+  .workspace-rail-list {
+    width: 100%;
+    flex: 1 1 auto;
+    gap: 7px;
+    margin-right: 0;
+    padding: 14px 12px;
+    overflow-y: auto;
+  }
+
+  .workspace-rail-entry,
+  .workspace-rail-item,
+  .workspace-rail-add {
+    width: 100%;
+  }
+
+  .workspace-rail-entry,
+  .workspace-rail-item {
+    min-height: 62px;
+  }
+
+  .workspace-rail-item {
+    grid-template-columns: 46px minmax(0, 1fr) auto;
+    grid-template-rows: 1fr;
+    gap: 10px;
+    padding: 8px 50px 8px 10px;
+    border: 1px solid var(--rebel-line);
+    text-align: left;
+  }
+
+  .workspace-rail-item.active {
+    transform: none;
+  }
+
+  .workspace-rail-item.active::before {
+    inset: 0 auto 0 0;
+    width: 5px;
+  }
+
+  .workspace-rail-monogram {
+    display: grid;
+    width: 42px;
+    height: 42px;
+    place-items: center;
+    font-size: 25px !important;
+    transform: none !important;
+  }
+
+  .workspace-rail-name {
+    min-width: 0;
+    display: block;
+    overflow: hidden;
+    color: var(--rebel-paper);
+    font: 800 15px/1.2 "Cascadia Code", Consolas, monospace;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .workspace-rail-state {
+    max-width: none;
+    padding: 4px 5px;
+    font-size: 11px;
+  }
+
+  .workspace-rail-close {
+    top: 50%;
+    right: 5px;
+    width: 44px;
+    height: 44px;
+    opacity: 1;
+    pointer-events: auto;
+    transform: translateY(-50%);
+  }
+
+  .workspace-rail-add {
+    min-height: 48px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    margin: 0 12px;
+    width: calc(100% - 24px);
+    border: 0;
+    font-family: "Cascadia Code", Consolas, monospace;
+    font-size: 13px;
+    font-weight: 800;
+    letter-spacing: 0.05em;
+  }
+
+  .workspace-rail-add::after {
+    display: block;
+    content: "添加工作区";
+  }
+
+  .conversation-sidebar,
+  .conversation-sidebar.collapsed {
+    z-index: auto;
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0;
+    border-right: 0;
+    background: var(--rebel-black);
+  }
+
+  .conversation-sidebar > .conversation-sidebar-header,
+  .conversation-sidebar-resize-handle {
+    display: none;
+  }
+
+  .conversation-sidebar-navigation {
+    flex: 1 1 auto;
+    padding: 12px 10px;
+    overflow-y: auto;
+  }
+
+  .conversation-sidebar-navigation > .conversation-sidebar-list {
+    gap: 10px;
+  }
+
+  .conversation-sidebar-item,
+  .conversation-sidebar-item.selected {
+    width: 100%;
+  }
+
+  .conversation-sidebar-conversation,
+  .conversation-sidebar-item.selected .conversation-sidebar-conversation {
+    min-height: 72px;
+    padding-top: 10px;
+    padding-bottom: 10px;
+  }
+
+  .conversation-sidebar-kind,
+  .conversation-sidebar-role,
+  .conversation-sidebar-updated,
+  .conversation-sidebar-handle,
+  .conversation-sidebar-activity,
+  .conversation-sidebar-truncated {
+    font-size: 11px;
+  }
+
+  .conversation-sidebar-rename,
+  .conversation-sidebar-delete,
+  .conversation-group-toggle,
+  .conversation-group-reveal {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  .conversation-sidebar-footer,
+  .conversation-sidebar.collapsed .conversation-sidebar-footer {
+    min-height: 0;
+    display: flex;
+    padding: 7px 10px max(7px, env(safe-area-inset-bottom));
+  }
+
+  .conversation-sidebar-create {
+    width: 100%;
+    min-height: 44px;
+  }
+
+  .app-shell {
+    height: 100%;
+    grid-template-rows: auto auto minmax(0, 1fr) auto;
+  }
+
+  .app-shell > .topbar {
+    height: auto;
+    min-height: 64px;
+    grid-template-columns: minmax(0, 1fr);
+    padding: 0;
+    border-bottom: 0;
+  }
+
+  .app-shell > .topbar > .brand,
+  .app-shell > .topbar > .topbar-conversation-context,
+  .app-shell > .topbar > .topbar-controls {
+    display: none;
+  }
+
+  .mobile-chat-header {
+    width: 100%;
+  }
+
+  .mobile-settings-button {
+    min-width: 72px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 5px;
+    padding: 0 9px;
+  }
+
+  .mobile-settings-button > span:first-child {
+    font-size: 16px;
+    line-height: 1;
+  }
+
+  .app-shell .transcript {
+    padding: 12px 12px calc(var(--composer-inset, 118px) + 18px);
+  }
+
+  .app-shell > .composer-wrap {
+    display: flex;
+    flex-direction: column;
+    padding: 7px max(9px, env(safe-area-inset-right)) max(7px, env(safe-area-inset-bottom)) max(9px, env(safe-area-inset-left));
+    background: linear-gradient(transparent, var(--rebel-black) 16%);
+  }
+
+  .app-shell .composer {
+    grid-template-rows: minmax(56px, auto);
+    padding: 0;
+    clip-path: none;
+  }
+
+  .app-shell .composer-command-label {
+    display: none;
+  }
+
+  .app-shell .composer textarea {
+    grid-row: 1;
+    min-height: 56px;
+    max-height: 124px;
+    padding: 11px 10px 9px 12px;
+    font-size: 16px;
+    line-height: 1.4;
+  }
+
+  .app-shell .composer-actions {
+    grid-row: 1;
+    padding: 4px;
+  }
+
+  .app-shell .send,
+  .app-shell .send.stop {
+    min-width: 54px;
+    min-height: 48px;
+  }
+
+  .mobile-composer-launchers {
+    display: flex;
+    gap: 6px;
+    padding-top: 4px;
+  }
+
+  .mobile-composer-launchers button {
+    min-height: 44px;
+    flex: 1 1 0;
+    padding: 4px 6px;
+    border: 1px solid var(--rebel-line);
+    border-radius: 0;
+    color: var(--rebel-paper-muted);
+    background: var(--rebel-raised);
+    font-size: 9px;
+    font-weight: 800;
+    letter-spacing: 0.07em;
+  }
+
+  .mobile-composer-launchers button[aria-expanded="true"] {
+    border-color: var(--rebel-red);
+    color: var(--rebel-on-oxide);
+    background: var(--rebel-red);
+  }
+
+  .mobile-composer-launchers span {
+    color: var(--rebel-red);
+  }
+
+  .mobile-composer-launchers button[aria-expanded="true"] span {
+    color: inherit;
+  }
+
+  .mobile-sheet-backdrop {
+    position: fixed;
+    z-index: 30;
+    inset: 0;
+    background: rgb(0 0 0 / 62%);
+  }
+
+  .app-shell .composer,
+  .app-shell .mobile-composer-launchers {
+    position: relative;
+    z-index: 31;
+  }
+
+  .app-shell .mobile-sheet-surface {
+    position: relative;
+    z-index: 31;
+    right: auto;
+    bottom: auto;
+    left: auto;
+    order: -1;
+    width: 100%;
+    max-width: none;
+    max-height: min(55vh, 55dvh);
+    margin: 0 0 8px;
+    padding: 0 max(12px, env(safe-area-inset-right)) max(12px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left));
+    overflow-y: auto;
+    border: 0;
+    border-top: 4px solid var(--rebel-red);
+    border-radius: 0;
+    background: var(--rebel-black);
+    box-shadow: 0 -18px 50px rgb(0 0 0 / 55%);
+  }
+
+  .mobile-sheet-header {
+    position: sticky;
+    z-index: 1;
+    top: 0;
+    min-height: 58px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin: 0 -12px 10px;
+    padding: 7px 12px;
+    border-bottom: 1px solid var(--rebel-line);
+    background: var(--rebel-black);
+  }
+
+  .mobile-sheet-header h2 {
+    margin: 0;
+    color: var(--rebel-paper);
+    font: 800 17px/1 "Cascadia Code", Consolas, monospace;
+  }
+
+  .mobile-sheet-header button {
+    width: 44px;
+    padding: 0;
+    font-size: 20px;
+  }
+
+  .app-shell .mobile-sheet-surface.pending-admissions {
+    display: grid;
+    gap: 8px;
+  }
+
+  .app-shell .mobile-sheet-surface .pending-admission-item {
+    max-width: none;
+  }
+
+  .app-shell .mobile-sheet-surface.loop-list {
+    overflow-y: auto;
+  }
+
+  .app-shell .mobile-sheet-surface .loop-list-items {
+    max-height: none;
+  }
+
+  .app-shell .mobile-sheet-surface.composer-meta {
+    display: flex;
+    flex-direction: column;
+    flex-wrap: nowrap;
+    align-items: stretch;
+    gap: 0;
+    padding-top: 0;
+  }
+
+  .mobile-page-header {
+    width: 100%;
+  }
+
+  .mobile-sheet-surface.composer-meta > .mobile-sheet-header {
+    width: 100%;
+  }
+
+  .transcript .commitment-card.is-edit-budget > .tool-body {
+    padding-left: 12px;
+  }
+
+  .app-shell .mobile-sheet-surface,
+  .app-shell .mobile-sheet-surface button,
+  .app-shell .mobile-sheet-surface select,
+  .app-shell .mobile-sheet-surface input {
+    font-size: max(11px, 0.6875rem);
+  }
+
+  .app-shell .mobile-sheet-surface button,
+  .app-shell .mobile-sheet-surface select,
+  .app-shell .mobile-sheet-surface input[type="range"] {
+    min-height: 44px;
+  }
+
+  .app-shell > .mission-command-surface {
+    display: none;
+  }
+}
+
+/* Quiet Rebel keeps everyday work surfaces dark and reserves oxide for edges
+   and primary actions. Classic Rebel intentionally retains the poster palette. */
+html:not([data-color-scheme="classic-rebel"]) .conversation-sidebar-item.selected::before {
+  background: var(--intent-soft);
+}
+
+html:not([data-color-scheme="classic-rebel"]) .conversation-sidebar-item.selected::after {
+  background: var(--intent);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .conversation-sidebar-item.selected :is(
+    .conversation-sidebar-title,
+    .conversation-sidebar-primary,
+    .conversation-sidebar-identity,
+    .conversation-sidebar-updated
+  ) {
+  color: var(--rebel-paper);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .conversation-sidebar-item.selected .conversation-sidebar-kind {
+  color: var(--rebel-paper-muted);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .conversation-sidebar-item.selected .conversation-sidebar-ordinal {
+  color: var(--intent);
+}
+
+html:not([data-color-scheme="classic-rebel"]) .topbar-conversation-status {
+  color: var(--intent);
+  background: var(--intent-soft);
+}
+
+html:not([data-color-scheme="classic-rebel"]) .topbar-conversation-status > span {
+  color: var(--intent);
+}
+
+html:not([data-color-scheme="classic-rebel"]) .topbar-conversation-status.status-idle {
+  color: var(--rebel-paper);
+  background: var(--rebel-raised);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .topbar-conversation-status.status-idle > span {
+  color: var(--rebel-paper-muted);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .mission-objective.is-active {
+  color: var(--intent);
+  background: var(--intent-soft);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .mission-objective.is-active :is(.mission-objective-mark, .mission-objective-copy small) {
+  border-color: var(--intent);
+  color: var(--intent);
+  background: var(--intent);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .conversation-activity-indicator:is(.activity-running, .activity-queued) {
+  border-color: var(--intent);
+  color: var(--intent);
+  background: var(--intent-soft);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .conversation-activity-indicator.activity-waiting,
+html:not([data-color-scheme="classic-rebel"])
+  .conversation-sidebar-item.activity-waiting.selected .conversation-activity-indicator {
+  border-color: var(--warning);
+  color: var(--warning);
+  background: var(--warning-soft);
+  box-shadow: none;
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .conversation-activity-indicator.activity-cancelling {
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+
+html:not([data-color-scheme="classic-rebel"]) .app-shell .composer,
+html:not([data-color-scheme="classic-rebel"]) .app-shell .composer-actions {
+  color: var(--rebel-paper);
+  background: var(--rebel-raised);
+}
+
+html:not([data-color-scheme="classic-rebel"]) .app-shell .composer textarea {
+  color: var(--rebel-paper);
+  background: var(--rebel-raised);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .app-shell .composer:focus-within textarea {
+  background: var(--soft);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .app-shell .composer textarea::placeholder {
+  color: var(--rebel-paper-muted);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .transcript .commitment-card.is-edit-budget > summary {
+  color: var(--rebel-paper);
+  background: var(--rebel-raised);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .transcript .commitment-card.is-edit-budget > summary strong {
+  color: var(--intent);
+}
+
+html:not([data-color-scheme="classic-rebel"]) .drawer {
+  background:
+    repeating-linear-gradient(135deg, rgb(230 224 213 / 0.7%) 0 1px, transparent 1px 16px),
+    var(--rebel-black);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .modal:not(.role-manager-dialog):not(.conversation-role-dialog) {
+  border-color: var(--rebel-line);
+  color: var(--rebel-paper);
+  background: var(--rebel-raised);
+  box-shadow: 8px 8px 0 color-mix(in srgb, var(--rebel-red) 32%, transparent);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .modal:not(.role-manager-dialog):not(.conversation-role-dialog)
+  :is(.modal-description, .progress, small, .directory-browser-note) {
+  color: var(--rebel-paper-muted);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .modal:not(.role-manager-dialog):not(.conversation-role-dialog)
+  :is(input, textarea, select, .directory-browser-location code, .directory-browser-list) {
+  border-color: var(--rebel-line);
+  color: var(--rebel-paper);
+  background: var(--panel-strong);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .modal:not(.role-manager-dialog):not(.conversation-role-dialog)
+  :is(button.ghost, .option-button, .directory-browser-entry) {
+  color: var(--rebel-paper);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .modal:not(.role-manager-dialog):not(.conversation-role-dialog)
+  .directory-browser-entry:not(:disabled):hover {
+  color: var(--rebel-paper);
+  background: var(--soft-hover);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  :is(.inline-status.success, .status-badge.success) {
+  border-color: var(--success);
+  color: var(--success);
+  background: var(--success-soft);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  :is(.inline-status.error, .credential-confirm, .directory-browser-error) {
+  border-color: var(--danger);
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  :is(.topbar-conversation-status, .mobile-chat-identity small):is(
+    .status-queued,
+    .status-waiting
+  ) {
+  color: var(--warning);
+  background: var(--warning-soft);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .topbar-conversation-status:is(.status-queued, .status-waiting) > span {
+  color: var(--warning);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  :is(.topbar-conversation-status, .mobile-chat-identity small).status-cancelling {
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .topbar-conversation-status.status-cancelling > span {
+  color: var(--danger);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .mobile-chat-identity small:is(
+    .status-in-progress,
+    .status-active,
+    .status-compacting
+  ) {
+  color: var(--intent);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .workspace-rail-item.running:not(.active) {
+  background: var(--intent-soft);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .workspace-rail-item.running:not(.active) :is(.workspace-rail-state, .workspace-rail-busy) {
+  color: var(--intent);
+  background: var(--intent);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .transcript .message-event-header.is-running .message-event-state {
+  color: var(--intent);
+  background: var(--intent-soft);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .transcript .assistant-activity-group.is-active :is(
+    .activity-group-label,
+    .activity-group-status
+  ) {
+  color: var(--intent);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .transcript .assistant-activity-group.is-complete .activity-group-status,
+html:not([data-color-scheme="classic-rebel"])
+  .transcript .tool-done .tool-status {
+  color: var(--success);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .transcript .assistant-activity-group.is-error :is(
+    .activity-group-label,
+    .activity-group-status
+  ),
+html:not([data-color-scheme="classic-rebel"])
+  .transcript .tool-error .tool-status {
+  color: var(--danger);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .transcript .tool-running .tool-status {
+  color: var(--intent);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .transcript .tool-pending .tool-status {
+  color: var(--warning);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .transcript .message.error {
+  border-left-color: var(--danger);
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .transcript .commitment-card > summary {
+  border-color: var(--rebel-line);
+  border-left-color: var(--intent);
+  color: var(--rebel-paper);
+  background: var(--rebel-raised);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .transcript .commitment-card.is-warning > summary {
+  border-left-color: var(--warning);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .transcript .commitment-card.is-error > summary {
+  border-color: var(--rebel-line);
+  border-left-color: var(--danger);
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .transcript .commitment-card > summary:hover {
+  background: var(--soft-hover);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .transcript .commitment-card.is-error > summary:hover {
+  background: color-mix(in srgb, var(--danger-soft) 82%, var(--soft-hover));
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .transcript > .session-message-card:is(.state-failed, .state-aborted) {
+  border-left-color: var(--danger);
+  background: var(--danger-soft);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .app-shell .pending-admission-item {
+  border-left-color: var(--warning);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .app-shell .pending-admission-status {
+  border-color: var(--warning);
+  color: var(--warning);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .app-shell .loop-list-status.executing,
+html:not([data-color-scheme="classic-rebel"])
+  .app-shell .loop-list-item.active .loop-list-item-marker {
+  border-color: var(--intent);
+  color: var(--intent);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .app-shell .loop-list-item.active .loop-list-item-text {
+  color: color-mix(in srgb, var(--intent) 82%, var(--rebel-paper));
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .app-shell .loop-list-status.completed {
+  color: var(--success);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .app-shell .loop-list-item.completed .loop-list-item-marker,
+html:not([data-color-scheme="classic-rebel"])
+  .mission-objective.is-completed .mission-objective-mark {
+  border-color: var(--success);
+  color: var(--on-accent);
+  background: var(--success);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .mobile-chat-header button:not(:disabled):hover,
+html:not([data-color-scheme="classic-rebel"])
+  .mobile-composer-launchers button[aria-expanded="true"] {
+  border-color: var(--intent);
+  color: var(--intent);
+  background: var(--intent-soft);
+}
+
+html:not([data-color-scheme="classic-rebel"])
+  .mobile-composer-launchers button[aria-expanded="true"] span {
+  color: var(--intent);
+}

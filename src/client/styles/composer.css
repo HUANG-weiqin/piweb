@@ -1,0 +1,820 @@
+/* Gate 4: command composer surface */
+
+.app-shell > .composer-wrap {
+  padding-top: 20px;
+  background: linear-gradient(
+    transparent,
+    color-mix(in srgb, var(--rebel-black) 96%, transparent) 27%
+  );
+}
+
+.app-shell > .composer-wrap > .jump-latest {
+  top: -46px;
+  right: max(18px, calc((100% - var(--conversation-content-width)) / 2));
+  left: auto;
+  min-height: 44px;
+  margin: 0;
+  padding: 8px 14px;
+  border: 1px solid var(--rebel-paper);
+  border-top: 4px solid var(--rebel-red);
+  border-radius: 0;
+  color: var(--rebel-paper);
+  background: var(--rebel-black);
+  box-shadow: none;
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: 0.05em;
+}
+
+.app-shell > .composer-wrap > .jump-latest:not(:disabled):hover {
+  border-color: var(--rebel-red);
+  color: var(--rebel-on-oxide);
+  background: var(--rebel-red);
+}
+
+.app-shell > .composer-wrap > .jump-latest:focus-visible {
+  outline: 3px solid var(--rebel-paper);
+  outline-offset: 3px;
+}
+
+.app-shell > .composer-wrap > .pending-admissions {
+  gap: 4px;
+  margin: 0 8px 8px;
+  border-top: 1px solid var(--rebel-line);
+  border-bottom: 1px solid var(--rebel-line);
+  background: var(--rebel-black);
+}
+
+.app-shell .pending-admission-item {
+  max-width: none;
+  margin: 0;
+  padding: 7px 10px;
+  border: 0;
+  border-left: 4px solid var(--rebel-red-dark);
+  border-radius: 0;
+  color: var(--rebel-paper);
+  background: var(--rebel-raised);
+  box-shadow: none;
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.app-shell .pending-admission-status {
+  margin-top: 0;
+  padding: 2px 6px;
+  border: 1px solid var(--rebel-red);
+  border-radius: 0;
+  color: #d66a5a;
+  background: var(--rebel-black);
+  font-size: 8px;
+  font-weight: 900;
+  letter-spacing: 0.06em;
+}
+
+.app-shell .pending-admission-status::before {
+  width: 5px;
+  height: 5px;
+  border-radius: 0;
+  transform: rotate(45deg);
+}
+
+.app-shell > .composer-wrap > .loop-list {
+  margin: 0 8px 8px;
+  border: 1px solid var(--rebel-line);
+  border-left: 4px solid var(--rebel-red-dark);
+  border-radius: 0;
+  color: var(--rebel-paper);
+  background: var(--rebel-black);
+  box-shadow: none;
+}
+
+.app-shell .loop-list-toggle {
+  min-height: 38px;
+  padding: 6px 9px;
+  border-radius: 0;
+  color: var(--rebel-paper);
+  background: transparent;
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 10px;
+}
+
+.app-shell .loop-list-toggle:not(:disabled):hover {
+  color: var(--rebel-paper);
+  background: var(--rebel-raised);
+}
+
+.app-shell .loop-list-toggle:focus-visible {
+  outline: 2px solid var(--rebel-paper);
+  outline-offset: -3px;
+}
+
+.app-shell .loop-list-title {
+  color: var(--rebel-paper);
+  font-weight: 900;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.app-shell .loop-list-status {
+  padding: 2px 6px;
+  border: 1px solid var(--rebel-line);
+  border-radius: 0;
+  color: var(--rebel-paper-muted);
+  background: var(--rebel-raised);
+  font-size: 8px;
+  letter-spacing: 0.05em;
+}
+
+.app-shell .loop-list-status.executing {
+  border-color: var(--rebel-red);
+  color: #d66a5a;
+}
+
+.app-shell .loop-list-status.completed {
+  color: var(--rebel-paper);
+}
+
+.app-shell .loop-list-count {
+  color: var(--rebel-paper-muted);
+  font-size: 9px;
+}
+
+.app-shell .loop-list-items {
+  padding: 3px 9px 8px;
+  border-top: 1px solid var(--rebel-line);
+  scrollbar-color: var(--rebel-line) var(--rebel-black);
+}
+
+.app-shell .loop-list-items li {
+  padding: 5px 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--rebel-line) 58%, transparent);
+  color: var(--rebel-paper);
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 10px;
+}
+
+.app-shell .loop-list-item-marker {
+  border-color: var(--rebel-line);
+  border-radius: 0;
+  color: var(--rebel-paper-muted);
+  background: var(--rebel-black);
+}
+
+.app-shell .loop-list-item.active .loop-list-item-marker {
+  border-color: var(--rebel-red);
+  color: var(--rebel-red);
+  background: var(--rebel-black);
+}
+
+.app-shell .loop-list-item.completed .loop-list-item-marker {
+  border-color: var(--rebel-paper-muted);
+  color: var(--rebel-black);
+  background: var(--rebel-paper-muted);
+}
+
+.app-shell .loop-list-item.active .loop-list-item-text {
+  color: #d6b1a8;
+}
+
+.app-shell .loop-list-item.completed .loop-list-item-text {
+  color: var(--rebel-paper-muted);
+}
+
+.app-shell > .composer-wrap > .composer-notice {
+  margin: 0 8px 8px;
+  padding: 7px 10px;
+  overflow-wrap: anywhere;
+  border: 1px solid var(--rebel-red-dark);
+  border-left: 4px solid var(--rebel-red);
+  border-radius: 0;
+  color: var(--rebel-paper);
+  background: var(--rebel-raised);
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 9px;
+}
+
+.app-shell > .composer-wrap > .composer-notice.pending {
+  border-color: var(--rebel-line);
+  border-left-color: var(--rebel-paper-muted);
+  color: var(--rebel-paper-muted);
+  background: var(--rebel-black);
+}
+
+.app-shell .composer-attachments {
+  display: flex;
+  gap: 8px;
+  padding: 8px;
+  overflow-x: auto;
+  background: var(--rebel-black);
+}
+
+.app-shell .composer-attachment {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.app-shell .composer-attachment img {
+  display: block;
+  width: 72px;
+  height: 54px;
+  object-fit: cover;
+  border: 1px solid var(--rebel-line);
+}
+
+.app-shell .composer-attachment button {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  width: 20px;
+  min-height: 20px;
+  padding: 0;
+  border: 1px solid var(--rebel-paper);
+  border-radius: 50%;
+  color: var(--rebel-paper);
+  background: var(--rebel-red);
+}
+
+.app-shell .composer {
+  position: relative;
+  min-height: 78px;
+  display: grid;
+  grid-template-columns: minmax(206px, 0.22fr) minmax(0, 1fr) auto;
+  align-items: stretch;
+  gap: 0;
+  padding: 0;
+  overflow: hidden;
+  border: 0;
+  border-radius: 0;
+  color: var(--rebel-black);
+  background: var(--rebel-paper);
+  box-shadow: 0 -6px 0 rgb(0 0 0 / 42%);
+  clip-path: polygon(9px 0, 100% 0, calc(100% - 8px) 100%, 0 100%, 0 10px);
+}
+
+.app-shell .composer:focus-within {
+  box-shadow: 0 -6px 0 rgb(0 0 0 / 42%);
+}
+
+.app-shell .composer-command-label {
+  position: relative;
+  z-index: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  padding: 11px 20px 9px 18px;
+  overflow: hidden;
+  color: var(--rebel-paper);
+  background: var(--rebel-black);
+  clip-path: polygon(0 0, 100% 0, calc(100% - 15px) 100%, 0 100%);
+  font-size: clamp(15px, 1.2vw, 19px);
+  font-style: italic;
+  font-weight: 900;
+  letter-spacing: -0.035em;
+  line-height: 1;
+}
+
+.app-shell .composer-command-label::before {
+  width: 6px;
+  height: 34px;
+  flex: 0 0 auto;
+  margin-right: 10px;
+  background: var(--rebel-red);
+  content: "";
+  transform: skewY(-13deg);
+}
+
+.app-shell .composer:focus-within .composer-command-label {
+  color: var(--rebel-on-oxide);
+  background: var(--rebel-red);
+}
+
+.app-shell .composer:focus-within .composer-command-label::before {
+  background: var(--rebel-paper);
+}
+
+.app-shell .composer textarea {
+  min-width: 0;
+  min-height: 78px;
+  max-height: 180px;
+  padding: 18px 18px 15px 20px;
+  border: 0;
+  border-radius: 0;
+  color: var(--rebel-black);
+  background: var(--rebel-paper);
+  box-shadow: none;
+  caret-color: var(--rebel-red);
+  font-size: 15px;
+  font-weight: 650;
+  line-height: 1.45;
+}
+
+.app-shell .composer:focus-within textarea {
+  background: color-mix(in srgb, var(--rebel-paper) 92%, white);
+}
+
+.app-shell .composer textarea:focus-visible {
+  outline: none;
+}
+
+.app-shell .composer textarea::placeholder {
+  color: color-mix(in srgb, var(--rebel-black) 55%, var(--rebel-paper));
+  opacity: 1;
+}
+
+.app-shell .composer-actions {
+  min-width: 0;
+  align-items: stretch;
+  gap: 2px;
+  padding: 6px 8px 6px 0;
+  background: var(--rebel-paper);
+}
+
+.app-shell .send {
+  width: 76px;
+  height: auto;
+  min-height: 56px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 0;
+  color: var(--rebel-on-oxide);
+  background: var(--rebel-red);
+  clip-path: polygon(8px 0, 100% 0, calc(100% - 7px) 100%, 0 100%);
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 12px;
+  font-style: italic;
+  font-weight: 900;
+  letter-spacing: 0.07em;
+}
+
+.app-shell .send:not(:disabled):hover {
+  color: var(--rebel-on-oxide);
+  background: color-mix(in srgb, var(--rebel-red) 88%, var(--rebel-paper));
+}
+
+.app-shell .send.stop {
+  width: 72px;
+  border: 0;
+  color: var(--rebel-paper);
+  background: var(--rebel-black);
+  box-shadow: none;
+  clip-path: polygon(6px 0, 100% 0, calc(100% - 6px) 100%, 0 100%);
+  font-size: 10px;
+}
+
+.app-shell .send.stop:not(:disabled):hover {
+  color: var(--rebel-paper);
+  background: var(--rebel-raised);
+}
+
+.app-shell .composer-meta {
+  min-height: 40px;
+  align-items: stretch;
+  justify-content: flex-start;
+  gap: 0;
+  margin: 0;
+  padding: 4px 2px 0;
+  border: 0;
+  color: var(--rebel-paper-muted);
+  background: var(--rebel-black);
+}
+
+.app-shell .composer-meta-key {
+  flex: 0 0 auto;
+  color: var(--rebel-red);
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 9px;
+  font-weight: 950;
+  letter-spacing: 0.11em;
+  line-height: 1;
+}
+
+.app-shell .composer-meta-value {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--rebel-paper);
+  font-weight: 850;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.app-shell .composer-meta .conversation-role-pill {
+  min-width: 0;
+  max-width: 248px;
+  min-height: 34px;
+  gap: 7px;
+  padding: 5px 11px;
+  overflow: hidden;
+  border: 0;
+  border-right: 1px solid var(--rebel-line);
+  border-radius: 0;
+  color: var(--rebel-paper);
+  background: transparent;
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 10px;
+}
+
+.app-shell .composer-meta .conversation-role-pill:not(:disabled):hover {
+  color: var(--rebel-paper);
+  background: var(--rebel-raised);
+}
+
+.app-shell .composer-meta .conversation-role-pill > small {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  overflow: hidden;
+  color: color-mix(in srgb, var(--rebel-paper) 74%, var(--rebel-paper-muted));
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-shell .composer-meta .thinking-level-control,
+.app-shell .composer-meta .service-tier-control {
+  min-height: 38px;
+  gap: 7px;
+  padding: 4px 8px 4px 11px;
+  border: 0;
+  border-right: 1px solid var(--rebel-line);
+  border-radius: 0;
+  color: var(--rebel-paper-muted);
+  background: transparent;
+}
+
+.app-shell .composer-meta .thinking-level-control select,
+.app-shell .composer-meta .service-tier-control select {
+  min-width: 0;
+  min-height: 25px;
+  padding: 3px 20px 3px 6px;
+  border: 0;
+  border-radius: 0;
+  color: var(--rebel-paper);
+  background-color: var(--rebel-raised);
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 10px;
+}
+
+.app-shell .composer-meta .context-management {
+  min-width: 0;
+  flex: 1 1 auto;
+  align-content: center;
+  gap: 0;
+  padding-left: 0;
+  border-left: 0;
+}
+
+.app-shell .composer-meta .context-management-actions {
+  min-width: 0;
+  align-items: stretch;
+  gap: 0;
+}
+
+.app-shell .composer-meta .session-stats,
+.app-shell .composer-meta .compaction-threshold-toggle {
+  min-height: 38px;
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 10px;
+  border: 0;
+  border-right: 1px solid var(--rebel-line);
+  border-radius: 0;
+  color: var(--rebel-paper-muted);
+  background: transparent;
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 9px;
+}
+
+.app-shell .composer-meta .context-summary::before {
+  margin-right: 6px;
+  color: var(--rebel-red);
+  font-size: 9px;
+  font-weight: 950;
+  letter-spacing: 0.1em;
+  content: "CONTEXT";
+}
+
+.app-shell .composer-meta .compaction-threshold-toggle:not(:disabled):hover {
+  color: var(--rebel-paper);
+  background: var(--rebel-raised);
+}
+
+.app-shell .composer-meta .compaction-threshold-control {
+  grid-template-columns: max-content minmax(120px, 1fr) 38px;
+  margin: 0;
+  padding: 7px 9px 5px;
+  border-top: 1px solid var(--rebel-line);
+  color: var(--rebel-paper-muted);
+  background: var(--rebel-black);
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 9px;
+}
+
+.app-shell .composer-meta .compaction-threshold-value {
+  color: var(--rebel-paper);
+}
+
+.app-shell .composer-meta .token-tooltip {
+  border: 1px solid var(--rebel-line);
+  border-radius: 0;
+  color: var(--rebel-paper);
+  background: var(--rebel-raised);
+}
+
+@media (max-width: 960px) {
+  .app-shell .composer {
+    min-height: 0;
+  }
+
+  .app-shell .composer-command-label {
+    grid-row: 1;
+    grid-column: 1 / -1;
+    padding: 5px 16px 4px 14px;
+    letter-spacing: -0.025em;
+  }
+
+  .app-shell .composer-command-label::before {
+    width: 4px;
+    margin-right: 7px;
+  }
+
+  .app-shell .composer textarea {
+    grid-row: 2;
+    grid-column: 1;
+    font-size: 14px;
+  }
+
+  .app-shell .composer-actions {
+    grid-row: 2;
+    grid-column: 2;
+    padding: 4px 6px 5px 0;
+  }
+}
+
+@media (min-width: 601px) and (max-width: 960px) {
+  .app-shell > .composer-wrap {
+    padding-right: 8px;
+    padding-left: 8px;
+  }
+
+  .app-shell .composer {
+    grid-template-columns: minmax(0, 1fr) 58px;
+    grid-template-rows: 28px minmax(108px, auto);
+  }
+
+  .app-shell .composer-command-label {
+    width: 132px;
+    font-size: 14px;
+  }
+
+  .app-shell .composer-command-label::before {
+    height: 16px;
+  }
+
+  .app-shell .composer textarea {
+    min-height: 108px;
+    padding: 12px 10px 10px 14px;
+  }
+
+  .app-shell .composer-actions {
+    flex-direction: column;
+  }
+
+  .app-shell .send,
+  .app-shell .send.stop {
+    width: 52px;
+    min-height: 49px;
+    flex: 1 1 0;
+    padding: 0 4px;
+    font-size: 8px;
+  }
+}
+
+@media (min-width: 601px) and (max-width: 760px) {
+  .app-shell .composer-meta .conversation-role-pill,
+  .app-shell .composer-meta .thinking-level-control,
+  .app-shell .composer-meta .service-tier-control,
+  .app-shell .composer-meta .context-management {
+    width: 100%;
+    max-width: none;
+    flex: 1 1 100%;
+    border-right: 0;
+    border-bottom: 1px solid var(--rebel-line);
+  }
+
+  .app-shell .composer-meta .thinking-level-control select,
+  .app-shell .composer-meta .service-tier-control select {
+    min-width: 0;
+    flex: 1 1 auto;
+  }
+
+  .app-shell .composer-meta .context-management-actions {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .app-shell .composer-meta .session-stats,
+  .app-shell .composer-meta .compaction-threshold-toggle {
+    width: 100%;
+    justify-content: center;
+    border-right: 0;
+    border-bottom: 1px solid var(--rebel-line);
+  }
+}
+
+@media (max-width: 600px) {
+  .app-shell > .composer-wrap {
+    padding-top: 18px;
+  }
+
+  .app-shell > .composer-wrap > .jump-latest {
+    top: -46px;
+    right: 10px;
+    max-width: calc(100vw - 72px);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .app-shell .pending-admission-item {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 7px;
+    padding: 6px 8px;
+  }
+
+  .app-shell > .composer-wrap > .loop-list,
+  .app-shell > .composer-wrap > .composer-notice,
+  .app-shell > .composer-wrap > .pending-admissions {
+    margin-right: 0;
+    margin-left: 0;
+  }
+
+  .app-shell .composer {
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-rows: 26px minmax(62px, auto);
+    clip-path: polygon(7px 0, 100% 0, calc(100% - 6px) 100%, 0 100%, 0 8px);
+  }
+
+  .app-shell .composer-command-label {
+    width: 122px;
+    font-size: 13px;
+  }
+
+  .app-shell .composer-command-label::before {
+    height: 15px;
+  }
+
+  .app-shell .composer textarea {
+    min-height: 62px;
+    padding: 11px 12px 10px 14px;
+  }
+
+  .app-shell .send {
+    width: 63px;
+    min-height: 53px;
+    padding: 0 7px;
+    font-size: 10px;
+  }
+
+  .app-shell .send.stop {
+    width: 54px;
+    font-size: 8px;
+  }
+
+  .app-shell .composer-meta {
+    gap: 0;
+    padding-top: 3px;
+  }
+
+  .app-shell .composer-meta .conversation-role-pill {
+    width: 100%;
+    max-width: none;
+    flex: 1 1 100%;
+    border-right: 0;
+    border-bottom: 1px solid var(--rebel-line);
+  }
+
+  .app-shell .composer-meta .thinking-level-control,
+  .app-shell .composer-meta .service-tier-control {
+    min-width: 0;
+    flex: 1 1 auto;
+  }
+
+  .app-shell .composer-meta .thinking-level-control select,
+  .app-shell .composer-meta .service-tier-control select {
+    max-width: 112px;
+  }
+
+  .app-shell .composer-meta .context-management {
+    flex: 1 1 100%;
+    border-top: 1px solid var(--rebel-line);
+  }
+
+  .app-shell .composer-meta .context-management-actions {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+
+  .app-shell .composer-meta .session-stats {
+    grid-column: 1 / -1;
+    border-bottom: 1px solid var(--rebel-line);
+  }
+
+  .app-shell .composer-meta .compaction-threshold-toggle {
+    width: 100%;
+    justify-content: center;
+    border-right: 1px solid var(--rebel-line);
+    white-space: nowrap;
+  }
+
+  .app-shell .composer-meta .compaction-threshold-toggle:last-child {
+    border-right: 0;
+  }
+
+  .app-shell .composer-meta .compaction-threshold-control {
+    grid-template-columns: max-content minmax(80px, 1fr) 34px;
+  }
+}
+
+@media (max-height: 900px) {
+  .app-shell > .composer-wrap:has(> .pending-admissions:not(.mobile-sheet-surface)):has(> .loop-list:not(.mobile-sheet-surface) .loop-list-items) .pending-admissions:not(.mobile-sheet-surface) {
+    max-height: min(96px, 12dvh);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-width: thin;
+  }
+
+  .app-shell > .composer-wrap:has(> .pending-admissions:not(.mobile-sheet-surface)):has(> .loop-list:not(.mobile-sheet-surface) .loop-list-items) .loop-list-items {
+    max-height: min(104px, 13dvh);
+  }
+}
+
+@media (max-width: 600px) and (max-height: 680px) {
+  .app-shell > .composer-wrap:has(> .pending-admissions:not(.mobile-sheet-surface)):has(> .loop-list:not(.mobile-sheet-surface) .loop-list-items) .pending-admissions:not(.mobile-sheet-surface) {
+    max-height: 40px;
+  }
+
+  .app-shell > .composer-wrap:has(> .pending-admissions:not(.mobile-sheet-surface)):has(> .loop-list:not(.mobile-sheet-surface) .loop-list-items) .loop-list-items {
+    max-height: 20px;
+  }
+
+  .app-shell .composer-meta {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 82px 82px;
+  }
+
+  .app-shell .composer-meta .conversation-role-pill {
+    width: auto;
+    max-width: none;
+    min-height: 38px;
+    flex: none;
+    border-right: 1px solid var(--rebel-line);
+    border-bottom: 0;
+  }
+
+  .app-shell .composer-meta .thinking-level-control,
+  .app-shell .composer-meta .service-tier-control {
+    min-height: 38px;
+    display: grid;
+    grid-template-rows: auto 1fr;
+    gap: 1px;
+    padding: 2px 4px;
+    border-bottom: 0;
+  }
+
+  .app-shell .composer-meta .thinking-level-control select,
+  .app-shell .composer-meta .service-tier-control select {
+    width: 100%;
+    max-width: none;
+    min-height: 20px;
+    padding: 1px 15px 1px 3px;
+    font-size: 8px;
+  }
+
+  .app-shell .composer-meta .context-management {
+    grid-column: 1 / -1;
+    width: auto;
+    flex: none;
+  }
+
+  .app-shell .composer-meta .context-management-actions {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .app-shell .composer-meta .session-stats {
+    grid-row: auto;
+    grid-column: auto;
+    width: 100%;
+    min-width: 0;
+    overflow: hidden;
+    border-right: 1px solid var(--rebel-line);
+    border-bottom: 0;
+    font-size: 8px;
+    white-space: nowrap;
+  }
+}
+

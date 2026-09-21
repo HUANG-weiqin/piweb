@@ -1,0 +1,1442 @@
+/* First-class cross-session message cards */
+
+.session-message-card {
+  max-width: 760px;
+  margin: 0 auto 10px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+}
+
+.session-message-card.is-expanded {
+  margin-bottom: 24px;
+  border-radius: 16px;
+  box-shadow: var(--shadow-sm);
+}
+
+.session-message-card.direction-incoming {
+  border-left: 3px solid var(--success);
+}
+
+.session-message-card.direction-outgoing {
+  border-left: 3px solid var(--focus);
+}
+
+.session-message-card.state-failed,
+.session-message-card.state-aborted {
+  border-left-color: var(--danger);
+}
+
+.session-message-header,
+.session-message-route,
+.session-message-result {
+  align-items: center;
+}
+
+.session-message-header {
+  display: flex;
+  background: var(--soft);
+}
+
+.session-message-card.is-expanded .session-message-header {
+  border-bottom: 1px solid var(--line);
+}
+
+.session-message-toggle {
+  display: grid;
+  width: 100%;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 9px;
+  padding: 8px 11px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.session-message-toggle:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}
+
+.session-message-direction,
+.session-message-status {
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.session-message-peer {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-message-summary-preview {
+  display: -webkit-box;
+  overflow: hidden;
+  margin: 0;
+  padding: 0 14px 12px;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.45;
+  text-overflow: ellipsis;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.session-message-status {
+  color: var(--muted);
+}
+
+.session-message-chevron {
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1;
+  transition: transform 120ms ease;
+}
+
+.session-message-card.is-expanded .session-message-chevron {
+  transform: rotate(180deg);
+}
+
+.session-message-route {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  gap: 12px;
+  padding: 14px;
+}
+
+.session-message-endpoint {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.session-message-endpoint-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-message-endpoint-role,
+.session-message-endpoint-handle,
+.session-message-updated {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.session-message-endpoint-handle {
+  font-family: "Cascadia Code", Consolas, monospace;
+}
+
+.session-message-route-arrow {
+  color: var(--muted);
+}
+
+.session-message-summary {
+  display: grid;
+  gap: 5px;
+  margin: 0 14px 14px;
+  padding: 12px;
+  border-left: 3px solid var(--focus);
+  background: var(--soft);
+}
+
+.session-message-summary-label {
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.session-message-summary-copy {
+  margin: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.session-message-body {
+  padding: 0 14px 14px;
+  white-space: pre-wrap;
+}
+
+.session-message-result {
+  display: grid;
+  gap: 5px;
+  margin: 0 14px 14px;
+  padding: 12px;
+  border-radius: 10px;
+  background: var(--success-soft);
+  white-space: pre-wrap;
+}
+
+.session-message-updated {
+  display: block;
+}
+
+.session-message-footer {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  padding: 0 14px 12px;
+}
+
+.session-message-open {
+  background: transparent;
+  border: 0;
+  color: var(--accent);
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+  padding: 2px 0;
+}
+
+.session-message-open:hover {
+  text-decoration: underline;
+}
+
+/* Rebel conversation identity and command-event timeline */
+
+.app-shell {
+  --rebel-black: var(--scheme-rebel-black);
+  --rebel-raised: var(--scheme-rebel-app-raised);
+  --rebel-paper: var(--scheme-rebel-paper);
+  --rebel-paper-muted: var(--scheme-rebel-paper-muted);
+  --rebel-on-oxide: var(--scheme-rebel-on-oxide);
+  --rebel-red: var(--scheme-rebel-red);
+  --rebel-red-dark: var(--scheme-rebel-red-dark);
+  --rebel-line: var(--scheme-rebel-line);
+  isolation: isolate;
+  background: var(--rebel-black);
+}
+
+.app-shell .topbar {
+  height: 96px;
+  display: grid;
+  grid-template-columns: minmax(112px, 148px) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 18px;
+  padding: 12px 24px 10px;
+  overflow: hidden;
+  border-bottom: 2px solid var(--rebel-paper);
+  color: var(--rebel-paper);
+  background: var(--rebel-black);
+  backdrop-filter: none;
+}
+
+.app-shell .topbar::after {
+  position: absolute;
+  right: 18%;
+  bottom: -1px;
+  width: 132px;
+  height: 7px;
+  content: "";
+  background: var(--rebel-red);
+  clip-path: polygon(0 38%, 88% 0, 100% 100%, 7% 82%);
+}
+
+.app-shell .brand {
+  min-width: 0;
+  align-self: center;
+  gap: 9px;
+  color: var(--rebel-paper);
+  font-size: 12px;
+  font-weight: 900;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.app-shell .brand > span:first-child {
+  width: 40px;
+  height: 40px;
+  border-radius: 0;
+  color: var(--rebel-on-oxide);
+  background: var(--rebel-red);
+  clip-path: polygon(10% 0, 100% 12%, 86% 100%, 0 84%);
+  font-family: Georgia, serif;
+  font-size: 25px;
+  font-style: italic;
+  font-weight: 900;
+  transform: rotate(-3deg);
+}
+
+.app-shell .brand small {
+  max-width: 92px;
+  margin-top: 2px;
+  color: var(--rebel-paper-muted);
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 8px;
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.app-shell .topbar-conversation-context {
+  height: 100%;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(126px, 154px);
+  align-items: center;
+  gap: 18px;
+  margin: 0;
+  color: var(--rebel-paper);
+  white-space: normal;
+}
+
+.app-shell .topbar-conversation-context.has-ordinal {
+  grid-template-columns: 74px minmax(0, 1fr) minmax(126px, 154px);
+}
+
+.topbar-session-ordinal {
+  position: relative;
+  z-index: 1;
+  align-self: center;
+  color: var(--rebel-red);
+  font-size: clamp(54px, 4.3vw, 70px);
+  font-style: italic;
+  font-weight: 950;
+  letter-spacing: -0.1em;
+  line-height: 0.8;
+  text-shadow: 3px 3px 0 var(--rebel-paper);
+  transform: rotate(-4deg) skewX(-7deg);
+}
+
+.topbar-conversation-copy {
+  min-width: 0;
+  display: grid;
+  align-content: center;
+  gap: 4px;
+}
+
+.topbar-conversation-eyebrow {
+  color: var(--rebel-red);
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 9px;
+  font-weight: 900;
+  letter-spacing: 0.16em;
+  line-height: 1;
+}
+
+.topbar-conversation-title {
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  overflow: hidden;
+  color: var(--rebel-paper);
+  font-size: clamp(24px, 2.05vw, 33px);
+  font-style: italic;
+  font-weight: 950;
+  letter-spacing: -0.055em;
+  line-height: 1.08;
+}
+
+.app-shell .topbar-conversation-root,
+.app-shell .topbar-conversation-current {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  color: inherit;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-shell .topbar-conversation-context.has-current .topbar-conversation-root {
+  max-width: 34%;
+  color: var(--rebel-paper-muted);
+  font-size: 0.47em;
+  font-style: normal;
+  font-weight: 750;
+  letter-spacing: -0.02em;
+}
+
+.app-shell .topbar-conversation-context.has-current .topbar-conversation-current {
+  max-width: 62%;
+  color: var(--rebel-paper);
+}
+
+.app-shell .topbar-conversation-separator {
+  color: var(--rebel-red);
+  font-size: 0.72em;
+  font-style: normal;
+}
+
+.topbar-conversation-metadata {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  overflow: hidden;
+  color: var(--rebel-paper-muted);
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 9px;
+  font-weight: 750;
+  letter-spacing: 0.08em;
+  line-height: 1.2;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.topbar-conversation-metadata > span + span::before {
+  margin-right: 8px;
+  color: var(--rebel-red);
+  content: "/";
+}
+
+.topbar-conversation-status {
+  min-width: 126px;
+  min-height: 60px;
+  display: grid;
+  align-content: center;
+  justify-items: start;
+  padding: 8px 13px 8px 17px;
+  color: var(--rebel-on-oxide);
+  background: var(--rebel-red);
+  clip-path: polygon(8px 0, 100% 0, calc(100% - 9px) 100%, 0 calc(100% - 6px));
+  transform: rotate(-1deg);
+}
+
+.topbar-conversation-status > span {
+  color: var(--rebel-on-oxide);
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 8px;
+  font-weight: 950;
+  letter-spacing: 0.15em;
+}
+
+.topbar-conversation-status strong {
+  max-width: 100%;
+  overflow: hidden;
+  font-size: 14px;
+  font-style: italic;
+  font-weight: 950;
+  letter-spacing: -0.035em;
+  line-height: 1.05;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.topbar-conversation-status.status-idle {
+  color: var(--rebel-black);
+  background: var(--rebel-paper);
+}
+
+.topbar-conversation-status.status-idle > span {
+  color: var(--rebel-red);
+}
+
+.app-shell .topbar-controls {
+  align-self: center;
+  gap: 0;
+}
+
+.app-shell .model-button {
+  max-width: 156px;
+  min-height: 34px;
+  padding: 7px 10px;
+  overflow: hidden;
+  border: 1px solid var(--rebel-line);
+  border-radius: 0;
+  color: var(--rebel-paper-muted);
+  background: var(--rebel-raised);
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-shell .model-button:not(:disabled):hover {
+  border-color: var(--rebel-red);
+  color: var(--rebel-paper);
+  background: var(--rebel-raised);
+}
+
+.app-shell .transcript {
+  padding-top: 10px;
+  color: var(--rebel-paper);
+  background: var(--rebel-black);
+  scrollbar-color: var(--rebel-line) var(--rebel-black);
+}
+
+.app-shell .transcript.has-content {
+  padding-bottom: calc(var(--composer-inset, 138px) + 96px);
+}
+
+.transcript .message {
+  position: relative;
+  margin: 0 0 32px;
+  padding-left: 112px;
+  color: var(--rebel-paper);
+  line-height: 1.72;
+}
+
+.transcript .message-event-header {
+  position: relative;
+  width: calc(100% + 112px);
+  min-height: 24px;
+  display: grid;
+  grid-template-columns: 88px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  margin: 0 0 8px -112px;
+  padding: 0 0 5px;
+  border-bottom: 1px solid var(--rebel-line);
+  color: var(--rebel-paper-muted);
+  line-height: 1;
+  white-space: normal;
+}
+
+.transcript .message-event-header::before {
+  position: absolute;
+  left: 0;
+  width: 4px;
+  height: 13px;
+  content: "";
+  background: var(--rebel-red);
+  transform: skewY(-18deg);
+}
+
+.transcript .message-event-kind {
+  padding-left: 12px;
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 8px;
+  font-weight: 850;
+  letter-spacing: 0.14em;
+}
+
+.transcript .message-event-actor {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--rebel-paper);
+  font-size: 13px;
+  font-style: italic;
+  font-weight: 900;
+  letter-spacing: -0.015em;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.transcript .message-event-state {
+  padding: 3px 6px;
+  color: var(--rebel-paper-muted);
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 8px;
+  font-weight: 850;
+  letter-spacing: 0.1em;
+}
+
+.transcript .message-event-header.is-running .message-event-state {
+  color: var(--rebel-on-oxide);
+  background: var(--rebel-red);
+  clip-path: polygon(4px 0, 100% 0, calc(100% - 3px) 100%, 0 82%);
+}
+
+.transcript .message.user {
+  width: auto;
+  max-width: none;
+  margin-left: 0;
+  padding: 0 0 0 112px;
+  border: 0;
+  border-radius: 0;
+  color: var(--rebel-paper);
+  background: transparent;
+  font-size: 15px;
+  font-weight: 650;
+}
+
+.transcript .message.user .message-event-actor {
+  color: var(--rebel-red);
+  font-size: 15px;
+}
+
+.transcript .message.assistant {
+  padding-left: 112px;
+}
+
+.transcript .message.error {
+  margin-left: 112px;
+  padding: 9px 12px;
+  border: 0;
+  border-left: 5px solid var(--rebel-red);
+  border-radius: 0;
+  color: var(--rebel-paper);
+  background: var(--rebel-red-dark);
+  font-weight: 750;
+}
+
+.transcript .message-actions {
+  bottom: -25px;
+}
+
+.transcript .assistant-message-actions {
+  right: auto;
+  left: 112px;
+}
+
+.transcript .message-action {
+  border-radius: 0;
+  color: var(--rebel-paper-muted);
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 9px;
+}
+
+.transcript .message-action:not(:disabled):hover {
+  border-color: var(--rebel-line);
+  color: var(--rebel-paper);
+  background: var(--rebel-raised);
+}
+
+.transcript .compaction-marker {
+  display: grid;
+  grid-template-columns: 88px 92px minmax(0, 1fr) auto 52px;
+  align-items: center;
+  gap: 12px;
+  margin: 2px 0 10px;
+  padding: 7px 10px 7px 12px;
+  border-top: 1px solid var(--rebel-line);
+  border-bottom: 1px solid var(--rebel-line);
+  color: var(--rebel-paper-muted);
+  background: var(--rebel-raised);
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+}
+
+.transcript .compaction-marker::before,
+.transcript .compaction-marker::after {
+  display: none;
+}
+
+.transcript .compaction-time {
+  color: var(--rebel-paper-muted);
+}
+
+.transcript .compaction-actor {
+  color: var(--rebel-paper);
+  font-style: italic;
+  font-weight: 900;
+}
+
+.transcript .compaction-label {
+  overflow: hidden;
+  color: var(--rebel-paper);
+  font-weight: 750;
+  text-overflow: ellipsis;
+}
+
+.transcript .compaction-metric {
+  color: var(--rebel-paper-muted);
+}
+
+.transcript .compaction-state {
+  color: var(--rebel-red);
+  font-weight: 900;
+  text-align: right;
+}
+
+.transcript .compaction-progress {
+  margin: 12px 0 26px 112px;
+  padding: 10px 12px;
+  border: 0;
+  border-left: 5px solid var(--rebel-red);
+  border-radius: 0;
+  color: var(--rebel-paper);
+  background: var(--rebel-raised);
+}
+
+.transcript .compaction-progress-copy small {
+  color: var(--rebel-paper-muted);
+}
+
+.transcript .markdown {
+  color: color-mix(in srgb, var(--rebel-paper) 92%, var(--rebel-paper-muted));
+  font-size: 14px;
+  line-height: 1.76;
+}
+
+.transcript .markdown h1,
+.transcript .markdown h2,
+.transcript .markdown h3,
+.transcript .markdown h4,
+.transcript .markdown h5,
+.transcript .markdown h6 {
+  color: var(--rebel-paper);
+}
+
+.transcript .markdown h1,
+.transcript .markdown h2 {
+  border-bottom-color: var(--rebel-line);
+}
+
+.transcript .markdown blockquote {
+  border-left-color: var(--rebel-red);
+  color: var(--rebel-paper-muted);
+}
+
+.transcript .markdown a {
+  color: color-mix(in srgb, var(--rebel-red) 68%, var(--rebel-paper));
+}
+
+.transcript .message-image-link {
+  min-width: 0;
+  min-height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin: 2px 3px;
+  padding: 4px 8px;
+  border: 1px solid var(--rebel-line);
+  border-left: 2px solid var(--rebel-red);
+  border-radius: 0;
+  color: var(--rebel-paper);
+  background: transparent;
+  box-shadow: none;
+  transform: none;
+  transition: none;
+  font: 800 9px/1 "Cascadia Code", Consolas, monospace;
+  letter-spacing: 0.07em;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+.transcript .message-image-link:not(:disabled):hover {
+  border-color: var(--rebel-red);
+  color: var(--rebel-on-oxide);
+  background: var(--rebel-red);
+}
+
+.transcript .message-image-link:not(:disabled):active {
+  border-color: var(--rebel-red-dark);
+  color: var(--rebel-paper);
+  background: color-mix(
+    in srgb,
+    var(--rebel-red-dark) 82%,
+    var(--rebel-black)
+  );
+  transform: none;
+}
+
+.transcript .message-image-link:focus-visible {
+  outline: 2px solid var(--rebel-paper);
+  outline-offset: 2px;
+}
+
+.transcript .markdown :not(pre) > code {
+  border-radius: 0;
+  color: var(--rebel-black);
+  background: var(--rebel-paper);
+}
+
+.transcript .markdown pre {
+  padding: 13px 15px;
+  border: 0;
+  border-left: 4px solid var(--rebel-red);
+  border-radius: 0;
+  color: var(--rebel-paper);
+  background: var(--rebel-raised);
+}
+
+.transcript .markdown th,
+.transcript .markdown td {
+  border-color: var(--rebel-line);
+}
+
+.transcript .markdown th {
+  background: var(--rebel-raised);
+}
+
+.transcript .markdown .mermaid-diagram {
+  border-color: var(--rebel-line);
+  border-radius: 0;
+  background: var(--rebel-raised);
+}
+
+.transcript .assistant-activity-group {
+  margin: 10px 0 14px;
+  overflow: visible;
+  border: 1px solid var(--rebel-line);
+  border-left: 5px solid var(--rebel-red-dark);
+  border-radius: 0;
+  color: var(--rebel-paper-muted);
+  background: var(--rebel-raised);
+}
+
+.transcript .assistant-activity-group.is-active {
+  border-left-color: var(--rebel-red);
+}
+
+.transcript .assistant-activity-group.is-error {
+  border-color: var(--rebel-red-dark);
+  border-left-color: var(--rebel-red);
+}
+
+.transcript .assistant-activity-group > summary {
+  grid-template-columns: minmax(0, 1fr) auto 14px;
+  gap: 10px;
+  min-height: 44px;
+  padding: 6px 10px 6px 8px;
+  color: var(--rebel-paper-muted);
+  background: var(--rebel-black);
+}
+
+.transcript .assistant-activity-group > summary:hover,
+.transcript .assistant-activity-group[open] > summary {
+  color: var(--rebel-paper);
+  background: color-mix(in srgb, var(--rebel-raised) 84%, var(--rebel-black));
+}
+
+.transcript .assistant-activity-group > summary:focus-visible,
+.transcript .assistant-response > summary:focus-visible,
+.transcript .tool > summary:focus-visible,
+.transcript .thinking > summary:focus-visible,
+.transcript .tools > summary:focus-visible {
+  outline: 2px solid var(--rebel-paper);
+  outline-offset: -3px;
+}
+
+.transcript .assistant-activity-group > summary:focus-visible {
+  text-decoration: none;
+}
+
+.transcript .activity-group-copy {
+  grid-column: 1;
+  grid-row: 1;
+  gap: 9px;
+}
+
+.transcript .activity-group-copy strong {
+  flex: 0 0 auto;
+  padding: 3px 7px;
+  border: 1px solid var(--rebel-red);
+  color: var(--rebel-paper);
+  background: transparent;
+  clip-path: none;
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 8px;
+  font-style: normal;
+  font-weight: 900;
+  letter-spacing: 0.11em;
+}
+
+.transcript .activity-group-label {
+  color: var(--rebel-paper);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.transcript .assistant-activity-group.is-active .activity-group-label,
+.transcript .assistant-activity-group.is-error .activity-group-label {
+  color: #d66a5a;
+}
+
+.transcript .activity-group-detail,
+.transcript .activity-group-count {
+  color: var(--rebel-paper-muted);
+}
+
+.transcript .activity-group-status {
+  width: auto;
+  min-width: 22px;
+  height: 22px;
+  display: flex;
+  grid-column: 2;
+  grid-row: 1;
+  align-items: center;
+  gap: 6px;
+  color: var(--rebel-paper-muted);
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 9px;
+}
+
+.transcript .activity-group-status > * {
+  width: 16px;
+  height: 16px;
+  display: grid;
+  flex: 0 0 16px;
+  place-items: center;
+  border: 1px solid currentColor;
+  border-radius: 0;
+  background: var(--rebel-black);
+}
+
+.transcript .activity-group-status::after {
+  font-size: 8px;
+  font-weight: 900;
+  letter-spacing: 0.1em;
+}
+
+.transcript .assistant-activity-group.is-active .activity-group-status {
+  color: #d66a5a;
+}
+
+.transcript .assistant-activity-group.is-active .activity-group-status::after {
+  content: "RUNNING";
+}
+
+.transcript .assistant-activity-group.is-complete .activity-group-status::after {
+  content: "DONE";
+}
+
+.transcript .assistant-activity-group.is-error .activity-group-status {
+  color: #e18475;
+}
+
+.transcript .assistant-activity-group.is-error .activity-group-status::after {
+  content: "FAILED";
+}
+
+.transcript .activity-group-count {
+  grid-column: 1;
+  grid-row: 2;
+  padding-left: 1px;
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 8px;
+  letter-spacing: 0.04em;
+}
+
+.transcript .activity-group-chevron {
+  grid-column: 3;
+  grid-row: 1 / span 2;
+  align-self: center;
+  color: var(--rebel-paper-muted);
+}
+
+.transcript .activity-timeline {
+  padding: 3px 0 9px 30px;
+  border-top: 1px solid var(--rebel-line);
+  background: var(--rebel-raised);
+}
+
+.transcript .activity-timeline::before {
+  display: none;
+}
+
+.transcript .activity-timeline > .thinking,
+.transcript .activity-timeline > .tools {
+  border-bottom: 1px solid var(--rebel-line);
+}
+
+.transcript .activity-timeline > .thinking:last-child,
+.transcript .activity-timeline > .tools:last-child {
+  border-bottom: 0;
+}
+
+.transcript .activity-timeline > .thinking > summary,
+.transcript .activity-timeline > .tools > summary {
+  min-height: 36px;
+  padding: 5px 8px 5px 1px;
+  color: var(--rebel-paper);
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.transcript .activity-timeline > .thinking > summary::after,
+.transcript .activity-timeline > .tools > summary::after {
+  background: var(--rebel-line);
+}
+
+.transcript .activity-timeline > .thinking > summary::before,
+.transcript .activity-timeline > .tools > summary::before {
+  left: -23px;
+  width: 8px;
+  min-width: 8px;
+  height: 8px;
+  border: 1px solid var(--rebel-paper-muted);
+  border-radius: 0;
+  background: var(--rebel-black);
+  transform: translateY(-50%) rotate(45deg);
+}
+
+.transcript .activity-timeline > .thinking.is-active > summary::before {
+  border-color: var(--rebel-red);
+  background: var(--rebel-red);
+}
+
+.transcript .thinking > .thinking-body,
+.transcript .activity-timeline .tool-stack {
+  padding-right: 10px;
+  padding-left: 1px;
+}
+
+.transcript .assistant-response {
+  margin: 10px 0 14px;
+  border-top: 1px solid var(--rebel-line);
+  border-bottom: 1px solid var(--rebel-line);
+  color: var(--rebel-paper-muted);
+}
+
+.transcript .assistant-response > summary {
+  min-height: 40px;
+  padding: 5px 8px;
+  color: var(--rebel-paper-muted);
+  background: var(--rebel-raised);
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 10px;
+  font-weight: 850;
+  letter-spacing: 0.05em;
+}
+
+.transcript .assistant-response > summary::before,
+.transcript .assistant-response > summary::after {
+  background: var(--rebel-line);
+}
+
+.transcript .assistant-response-body {
+  padding: 12px 10px 8px;
+  border-top: 1px solid var(--rebel-line);
+  color: var(--rebel-paper);
+  background: var(--rebel-black);
+}
+
+.transcript .tool-stack {
+  scrollbar-color: var(--rebel-line) var(--rebel-raised);
+}
+
+.transcript .tool {
+  border-bottom: 1px solid var(--rebel-line);
+  color: var(--rebel-paper-muted);
+  background: transparent;
+}
+
+.transcript .tool > summary {
+  min-height: 42px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto 14px;
+  gap: 10px;
+  padding: 6px 4px 6px 1px;
+}
+
+.transcript .tool > summary:hover {
+  color: var(--rebel-paper);
+  background: var(--rebel-black);
+}
+
+.transcript .tool-summary {
+  grid-column: 1;
+  grid-row: 1;
+}
+
+.transcript .tool-summary strong {
+  color: var(--rebel-paper);
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 10px;
+  font-weight: 850;
+  letter-spacing: 0.04em;
+}
+
+.transcript .tool-status {
+  width: auto;
+  min-width: 20px;
+  display: flex;
+  grid-column: 2;
+  grid-row: 1;
+  align-items: center;
+  gap: 6px;
+  border-radius: 0;
+  color: var(--rebel-paper-muted);
+  background: transparent;
+  font-family: "Cascadia Code", Consolas, monospace;
+}
+
+.transcript .tool-status > * {
+  width: 16px;
+  height: 16px;
+  display: grid;
+  flex: 0 0 16px;
+  place-items: center;
+  border: 1px solid currentColor;
+  background: var(--rebel-black);
+}
+
+.transcript .tool-status::after {
+  font-size: 8px;
+  font-weight: 900;
+  letter-spacing: 0.09em;
+}
+
+.transcript .tool-running .tool-status,
+.transcript .tool-pending .tool-status {
+  color: var(--rebel-red);
+}
+
+.transcript .tool-error .tool-status {
+  color: #e18475;
+}
+
+.transcript .tool-running .tool-status::after {
+  content: "RUNNING";
+}
+
+.transcript .tool-pending .tool-status::after {
+  content: "QUEUED";
+}
+
+.transcript .tool-done .tool-status::after {
+  content: "DONE";
+}
+
+.transcript .tool-error .tool-status::after {
+  content: "FAILED";
+}
+
+.transcript .tool-chevron {
+  grid-column: 3;
+  grid-row: 1;
+}
+
+.transcript .tool-body {
+  min-width: 0;
+  padding: 0 8px 9px 24px;
+  color: var(--rebel-paper-muted);
+  background: var(--rebel-black);
+}
+
+.transcript .tool-section {
+  min-width: 0;
+  padding: 9px 0 7px;
+}
+
+.transcript .tool-section + .tool-section {
+  margin-top: 0;
+  border-top-color: var(--rebel-line);
+}
+
+.transcript .tool-section h4,
+.transcript .tool-result-details h5 {
+  color: var(--rebel-red);
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 8px;
+  font-weight: 900;
+  letter-spacing: 0.12em;
+}
+
+.transcript .tool-field {
+  min-width: 0;
+  grid-template-columns: minmax(88px, 0.22fr) minmax(0, 1fr);
+  gap: 10px;
+  padding: 4px 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--rebel-line) 70%, transparent);
+}
+
+.transcript .tool-field dt {
+  color: var(--rebel-paper-muted);
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 9px;
+  letter-spacing: 0.04em;
+}
+
+.transcript .tool-field dd {
+  min-width: 0;
+  color: var(--rebel-paper);
+  font-size: 10px;
+}
+
+.transcript .tool-value-list .tool-fields {
+  border: 1px solid var(--rebel-line);
+  border-radius: 0;
+  background: var(--rebel-raised);
+}
+
+.transcript .tool-text {
+  max-height: min(280px, 38vh);
+  min-width: 0;
+  overflow: auto;
+  border: 0;
+  border-left: 4px solid var(--rebel-red-dark);
+  border-radius: 0;
+  color: var(--rebel-paper);
+  background: var(--rebel-raised);
+  scrollbar-color: var(--rebel-line) var(--rebel-black);
+}
+
+.transcript .tool-toggle {
+  border: 1px solid var(--rebel-line);
+  border-radius: 0;
+  color: var(--rebel-paper);
+  background: var(--rebel-black);
+  box-shadow: none;
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 9px;
+  font-weight: 850;
+  letter-spacing: 0.05em;
+}
+
+.transcript .commitment-card {
+  position: relative;
+  margin: 12px 0 16px;
+  overflow: visible;
+  border: 0;
+  border-radius: 0;
+  color: var(--rebel-black);
+  background: transparent;
+  clip-path: none;
+}
+
+.transcript .commitment-card > summary {
+  position: relative;
+  min-height: 66px;
+  grid-template-columns: 16px minmax(0, 1fr) auto 12px;
+  gap: 11px;
+  padding: 8px 13px 8px 9px;
+  border: 1px solid var(--rebel-paper);
+  border-left: 7px solid var(--rebel-red);
+  color: var(--rebel-black);
+  background: var(--rebel-paper);
+}
+
+.transcript .commitment-card.is-warning > summary {
+  border-left-color: var(--rebel-red-dark);
+}
+
+.transcript .commitment-card.is-error > summary {
+  border-color: var(--rebel-paper);
+  border-left-color: var(--rebel-paper);
+  color: var(--rebel-paper);
+  background: var(--rebel-red-dark);
+}
+
+.transcript .commitment-card.is-edit-budget > summary {
+  grid-template-columns: 108px minmax(0, 1fr) auto 12px;
+}
+
+.transcript .commitment-card > summary:hover {
+  background: color-mix(in srgb, var(--rebel-paper) 90%, var(--rebel-red));
+}
+
+.transcript .commitment-card.is-error > summary:hover {
+  background: color-mix(in srgb, var(--rebel-red-dark) 88%, var(--rebel-paper));
+}
+
+.transcript .commitment-card > summary:focus-visible {
+  outline: 3px solid var(--rebel-red);
+  outline-offset: 2px;
+}
+
+.transcript .commitment-budget-metric {
+  min-width: 102px;
+  min-height: 56px;
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  padding: 7px 9px;
+  border: 1px solid var(--rebel-line);
+  border-bottom: 4px solid var(--rebel-red);
+  color: var(--rebel-paper);
+  background: var(--rebel-black);
+  clip-path: none;
+  transform: none;
+}
+
+.transcript .commitment-budget-metric > span {
+  display: flex;
+  align-items: baseline;
+  line-height: 0.9;
+}
+
+.transcript .commitment-budget-metric strong {
+  font-size: 38px;
+  font-style: italic;
+  font-weight: 950;
+  letter-spacing: -0.08em;
+}
+
+.transcript .commitment-budget-metric > span > span {
+  color: var(--rebel-red);
+  font-size: 18px;
+  font-weight: 900;
+}
+
+.transcript .commitment-budget-metric small {
+  margin-top: 5px;
+  color: var(--rebel-paper-muted);
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 7px;
+  font-weight: 850;
+  letter-spacing: 0.12em;
+}
+
+.transcript .commitment-node {
+  border-radius: 0;
+  color: var(--rebel-red-dark);
+  background: transparent;
+}
+
+.transcript .commitment-eyebrow {
+  color: var(--rebel-red);
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 9px;
+  letter-spacing: 0.14em;
+}
+
+.transcript .commitment-copy strong {
+  color: var(--rebel-black);
+  font-size: 15px;
+  font-style: italic;
+  font-weight: 900;
+}
+
+.transcript .commitment-card.is-error .commitment-copy strong {
+  color: var(--rebel-paper);
+}
+
+.transcript .commitment-reason {
+  color: color-mix(in srgb, var(--rebel-black) 76%, var(--rebel-paper));
+  font-size: 11px;
+}
+
+.transcript .commitment-card.is-error .commitment-reason {
+  color: var(--rebel-paper-muted);
+}
+
+.transcript .commitment-fact {
+  min-height: 20px;
+  padding: 2px 6px;
+  border: 1px solid currentColor;
+  border-radius: 0;
+  color: var(--rebel-paper);
+  background: var(--rebel-black);
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 8px;
+}
+
+.transcript .commitment-chevron {
+  color: currentColor;
+}
+
+.transcript .commitment-card > .tool-body {
+  min-width: 0;
+  padding: 10px 14px 12px 31px;
+  border: 1px solid var(--rebel-line);
+  border-top: 0;
+  color: var(--rebel-paper-muted);
+  background: var(--rebel-black);
+}
+
+.transcript .commitment-card.is-edit-budget > .tool-body {
+  padding-left: 126px;
+}
+
+.transcript > .session-message-card {
+  max-width: none;
+  margin: 0 0 26px 112px;
+  border: 0;
+  border-top: 1px solid var(--rebel-line);
+  border-bottom: 1px solid var(--rebel-line);
+  border-left: 4px solid var(--rebel-red);
+  border-radius: 0;
+  color: var(--rebel-paper-muted);
+  background: transparent;
+}
+
+.transcript > .session-message-card.is-expanded {
+  margin-bottom: 26px;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.transcript > .session-message-card.direction-incoming {
+  border-left-color: var(--rebel-paper);
+}
+
+.transcript > .session-message-card.state-failed,
+.transcript > .session-message-card.state-aborted {
+  border-left-color: var(--rebel-red);
+  background: var(--rebel-red-dark);
+}
+
+.transcript .session-message-header {
+  background: transparent;
+}
+
+.transcript .session-message-card.is-expanded .session-message-header {
+  border-bottom-color: var(--rebel-line);
+}
+
+.transcript .session-message-toggle {
+  min-height: 42px;
+  border-radius: 0;
+  color: inherit;
+  background: transparent;
+}
+
+.transcript .session-message-direction {
+  color: var(--rebel-red);
+  font-family: "Cascadia Code", Consolas, monospace;
+  letter-spacing: 0.08em;
+}
+
+.transcript .session-message-peer {
+  color: var(--rebel-paper);
+}
+
+.transcript .session-message-status,
+.transcript .session-message-chevron,
+.transcript .session-message-endpoint-role,
+.transcript .session-message-endpoint-handle,
+.transcript .session-message-updated {
+  color: var(--rebel-paper-muted);
+}
+
+.transcript .session-message-summary-preview {
+  color: var(--rebel-paper);
+}
+
+.transcript .session-message-summary {
+  border-left-color: var(--rebel-red);
+  color: var(--rebel-paper);
+  background: var(--rebel-black);
+}
+
+.transcript .session-message-summary-label {
+  color: var(--rebel-paper);
+}
+
+.transcript .session-message-details {
+  background: var(--rebel-raised);
+}
+
+.transcript .session-message-result {
+  border-radius: 0;
+  color: var(--rebel-paper);
+  background: var(--rebel-black);
+}
+
+.transcript .session-message-open {
+  min-height: 32px;
+  padding: 5px 8px;
+  border: 1px solid var(--rebel-red);
+  border-radius: 0;
+  color: var(--rebel-paper);
+  background: var(--rebel-black);
+  box-shadow: none;
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 9px;
+  font-weight: 850;
+  letter-spacing: 0.05em;
+  text-decoration: none;
+}
+
+.transcript .session-message-open:not(:disabled):hover {
+  color: var(--rebel-on-oxide);
+  background: var(--rebel-red);
+  text-decoration: none;
+}
+
+.transcript .session-message-open:focus-visible {
+  outline: 2px solid var(--rebel-paper);
+  outline-offset: 2px;
+}
+
