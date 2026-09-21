@@ -5126,11 +5126,33 @@ describe("ConversationActor", () => {
     await fixture.actor.dispose();
   });
 
+  it("keeps projection sequence monotonic across successive actor runs", async () => {
+    const fixture = await openActor();
 
+    await fixture.actor.startPrompt({
+      runId: RUN_A,
+      text: "first",
+      origin: "browser",
+    });
+    await fixture.actor.startPrompt({
+      runId: RUN_B,
+      text: "second",
+      origin: "browser",
+    });
 
+    const queued = fixture.events.flatMap((event) => (
+      event.type === "session_event" && event.event.type === "run_queued"
+        ? [{ runId: event.runId, projectionSeq: event.projectionSeq }]
+        : []
+    ));
+    expect(queued).toEqual([
+      { runId: RUN_A, projectionSeq: expect.any(Number) },
+      { runId: RUN_B, projectionSeq: expect.any(Number) },
+    ]);
+    expect(queued[1]!.projectionSeq).toBeGreaterThan(queued[0]!.projectionSeq);
 
-
-
+    await fixture.actor.dispose();
+  });
 
   it("steers the exact active run even before the SDK streaming flag catches up", async () => {
     const fixture = await openActor();

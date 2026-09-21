@@ -20,25 +20,18 @@ import {
   type ConversationActivity,
   type ConversationImage,
   type ConversationHistoryItem,
-  type ConversationHistoryMessage,
-  type ConversationHistoryMessagePart,
-  type ConversationHistoryTool,
   type ConversationRoleSnapshot,
   type ConversationWindowCoverage,
   type PublicCompactionAttempt,
   type PromptImage,
   type SessionEvent,
   type ServiceTier,
-  type TokenUsage,
   type LoopList,
   type ThinkingLevel,
   type ToolMode,
 } from "../shared/protocol.js";
 import type { AgentTurnBoundaryCheck } from "./agent-turn-boundary.js";
-import {
-  projectConversationItemSlots,
-  snapshotConversationItems,
-} from "./conversation-history.js";
+import { ConversationProjection } from "./conversation-projection.js";
 import {
   advanceLoopListTiming,
   aggregateReservedConversationEntries,
@@ -765,52 +758,6 @@ function reloadContinuationMessage(
   };
 }
 
-interface LiveConversationProjection {
-  runId: string;
-  currentAssistantId?: string;
-  initialUserItemId?: string;
-  /** Raw SDK message identity, never text/role-derived matching. */
-  rawMessagesByItemId: Map<string, unknown>;
-  items: ConversationHistoryItem[];
-}
-
-function runMessageId(runId: string, role: "user" | "assistant"): string {
-  return role === "user" ? `run-${runId}-user` : `assistant:run-${runId}-assistant`;
-}
-
-function appendHistoryPart(
-  parts: ConversationHistoryMessagePart[],
-  part: ConversationHistoryMessagePart,
-): ConversationHistoryMessagePart[] {
-  if (part.kind !== "tool" && part.length <= 0) return parts;
-  const current = parts;
-  const last = current[current.length - 1];
-  if (
-    part.kind !== "tool"
-    && last?.kind === part.kind
-    && last.offset + last.length === part.offset
-  ) {
-    return [
-      ...current.slice(0, -1),
-      { kind: part.kind, offset: last.offset, length: last.length + part.length },
-    ];
-  }
-  return [...current, part];
-}
-
-function addUsage(
-  current: TokenUsage | undefined,
-  next: TokenUsage,
-): TokenUsage {
-  return {
-    input: (current?.input ?? 0) + next.input,
-    output: (current?.output ?? 0) + next.output,
-    cacheRead: (current?.cacheRead ?? 0) + next.cacheRead,
-    cacheWrite: (current?.cacheWrite ?? 0) + next.cacheWrite,
-    total: (current?.total ?? 0) + next.total,
-  };
-}
-
 function branchThinkingLevel(
   entries: readonly unknown[],
   fallback: ThinkingLevel,
@@ -891,8 +838,7 @@ export class ConversationActor {
   private loopListSnapshot: LoopList;
   private loopListTiming?: LoopListTiming;
   private loopListUpdatedAt?: string;
-  private projectionSeq = 0;
-  private liveProjection?: LiveConversationProjection;
+  private readonly projection = new ConversationProjection();
 
   private created?: CreatedPiSession;
   private unsubscribeSession?: () => void;
@@ -1653,66 +1599,11 @@ export class ConversationActor {
     projectionSeq: number;
     window: ConversationWindowCoverage;
   } {
-    const slots = projectConversationItemSlots(this.sessionManager);
-    const durableItems = slots.map(({ item }) => structuredClone(item));
-    const durableIndexByRawMessage = new Map<unknown, number>();
-    for (const [index, slot] of slots.entries()) {
-      for (const source of slot.sourceMessages ?? []) {
-        durableIndexByRawMessage.set(source.message, index);
-      }
-    }
-
-    const live = this.activeRun === undefined ? undefined : this.liveProjection;
-    if (live) {
-      let sawUnmatchedLiveItem = false;
-      for (const liveItem of live.items) {
-        if (liveItem.kind !== "message") continue;
-        const rawMessage = live.rawMessagesByItemId.get(liveItem.id);
-        const durableIndex = rawMessage === undefined
-          ? undefined
-          : durableIndexByRawMessage.get(rawMessage);
-        if (durableIndex === undefined) {
-          sawUnmatchedLiveItem = true;
-          durableItems.push(structuredClone(liveItem));
-          continue;
-        }
-        if (sawUnmatchedLiveItem) {
-          throw new Error("A durable live message appeared after the live suffix");
-        }
-        const durableItem = durableItems[durableIndex];
-        if (durableItem?.kind !== "message") continue;
-        const ownedDurable = { ...durableItem, runId: live.runId };
-        if (ownedDurable.role !== "assistant" || liveItem.role !== "assistant") {
-          durableItems[durableIndex] = ownedDurable;
-          continue;
-        }
-        const liveTools = new Map(
-          liveItem.tools.map((tool) => [tool.toolCallId, tool]),
-        );
-        durableItems[durableIndex] = {
-          ...ownedDurable,
-          tools: ownedDurable.tools.map((tool) => {
-            const patch = liveTools.get(tool.toolCallId);
-            if (patch === undefined || tool.status !== "pending") return tool;
-            return {
-              ...tool,
-              status: patch.status,
-              ...(patch.result === undefined ? {} : { result: patch.result }),
-            };
-          }),
-        };
-      }
-    }
-
-    const snapshot = snapshotConversationItems(
-      enrich ? enrich(durableItems) : durableItems,
+    return this.projection.projectConversationItems(
+      this.sessionManager,
+      this.activeRun !== undefined,
+      enrich,
     );
-    const projectionSeq = this.projectionSeq;
-    return {
-      items: snapshot.items,
-      projectionSeq,
-      window: snapshot.window,
-    };
   }
 
   subscribe(listener: ConversationActorListener): () => void {
@@ -2455,7 +2346,7 @@ export class ConversationActor {
       turnBoundaryCompactionRequested: false,
     };
     this.activeRun = ticket;
-    this.beginLiveProjection(ticket, input.promptText);
+    this.projection.begin(ticket.id, input.promptText);
     this.emitSessionEvent(ticket, { type: "run_queued" });
     this.emitActivity();
 
@@ -3486,7 +3377,7 @@ export class ConversationActor {
       this.cancelInstalledWaitAttempt(ticket, { kind: "error", error });
       this.activeRun = undefined;
     }
-    if (this.liveProjection?.runId === ticket.id) this.liveProjection = undefined;
+    this.projection.clear(ticket.id);
     for (const guidance of ticket.guidanceDeliveries.splice(0)) {
       guidance.delivery.reject(error);
     }
@@ -3698,17 +3589,12 @@ export class ConversationActor {
       }
     }
 
-    if (
-      event.type === "message_end"
-      && event.message.role === "assistant"
-      && this.liveProjection?.runId === ticket.id
-    ) {
+    if (event.type === "message_end" && event.message.role === "assistant") {
       // pi-agent-core emits a shallow partial clone at message_start, but
       // AgentSession persists the finalized message_end object after listeners
       // return. Rebind the live slot to that eventual durable identity before
       // projecting final text/usage.
-      const assistant = this.ensureLiveAssistant(ticket);
-      this.liveProjection.rawMessagesByItemId.set(assistant.id, event.message);
+      this.projection.rebindFinalAssistant(ticket.id, event.message);
     }
 
     const rawStartedMessage = event.type === "message_start"
@@ -3720,13 +3606,8 @@ export class ConversationActor {
       && event.message.role === "user"
       && ticket.origin === "browser"
       && ticket.expectsInitialPromptRawUserMessage
-      && this.liveProjection?.runId === ticket.id
-      && this.liveProjection.initialUserItemId !== undefined
     ) {
-      this.liveProjection.rawMessagesByItemId.set(
-        this.liveProjection.initialUserItemId,
-        event.message,
-      );
+      this.projection.rebindInitialUser(ticket.id, event.message);
     }
     const guidanceProjectedText =
       event.type === "message_start"
@@ -3913,216 +3794,6 @@ export class ConversationActor {
     return this.session.extensionRunner.getCommand(commandName) !== undefined;
   }
 
-  private resetLiveProjection(ticket: RunTicket): LiveConversationProjection {
-    const live: LiveConversationProjection = {
-      runId: ticket.id,
-      rawMessagesByItemId: new Map(),
-      items: [],
-    };
-    this.liveProjection = live;
-    return live;
-  }
-
-  private requireLiveProjection(ticket: RunTicket): LiveConversationProjection {
-    if (!this.liveProjection || this.liveProjection.runId !== ticket.id) {
-      return this.resetLiveProjection(ticket);
-    }
-    return this.liveProjection;
-  }
-
-  private beginLiveProjection(ticket: RunTicket, promptText: string | undefined): void {
-    const live = this.resetLiveProjection(ticket);
-    const items = live.items;
-    if (promptText !== undefined) {
-      const id = runMessageId(ticket.id, "user");
-      live.initialUserItemId = id;
-      items.push({
-        kind: "message",
-        id,
-        runId: ticket.id,
-        role: "user",
-        text: promptText,
-        thinking: "",
-        tools: [],
-        parts: promptText
-          ? [{ kind: "text", offset: 0, length: promptText.length }]
-          : [],
-      });
-    }
-  }
-
-  private ensureLiveAssistant(ticket: RunTicket): ConversationHistoryMessage {
-    const live = this.requireLiveProjection(ticket);
-    const current = live.currentAssistantId === undefined
-      ? undefined
-      : live.items.find((item) => (
-        item.kind === "message" && item.id === live.currentAssistantId
-      ));
-    if (current?.kind === "message") return current;
-
-    const assistant: ConversationHistoryMessage & { kind: "message" } = {
-      kind: "message",
-      id: runMessageId(ticket.id, "assistant"),
-      runId: ticket.id,
-      role: "assistant",
-      text: "",
-      thinking: "",
-      tools: [],
-      parts: [],
-    };
-    live.currentAssistantId = assistant.id;
-    live.items.push(assistant);
-    return assistant;
-  }
-
-  private appendLiveUser(
-    ticket: RunTicket,
-    projectionId: string,
-    text: string,
-    rawMessage?: unknown,
-  ): void {
-    const live = this.requireLiveProjection(ticket);
-    if (live.items.some((item) => item.kind === "message" && item.id === projectionId)) {
-      if (rawMessage !== undefined) live.rawMessagesByItemId.set(projectionId, rawMessage);
-      return;
-    }
-    live.items.push({
-      kind: "message",
-      id: projectionId,
-      runId: ticket.id,
-      role: "user",
-      text,
-      thinking: "",
-      tools: [],
-      parts: text ? [{ kind: "text", offset: 0, length: text.length }] : [],
-    });
-    if (rawMessage !== undefined) live.rawMessagesByItemId.set(projectionId, rawMessage);
-  }
-
-  private applyLiveSessionEvent(
-    ticket: RunTicket,
-    event: SessionEvent,
-    rawMessage?: unknown,
-  ): void {
-    if (event.type === "user_message") {
-      this.appendLiveUser(ticket, event.projectionId, event.text, rawMessage);
-      return;
-    }
-    if (event.type === "assistant_message_started") {
-      const live = this.requireLiveProjection(ticket);
-      const existingIndex = live.items.findIndex((item) => (
-        item.kind === "message" && item.id === event.projectionId
-      ));
-      if (existingIndex >= 0) {
-        live.currentAssistantId = event.projectionId;
-        if (rawMessage !== undefined) {
-          live.rawMessagesByItemId.set(event.projectionId, rawMessage);
-        }
-        return;
-      }
-      const emptyAssistantIndex = live.items.findIndex((item) => (
-        item.kind === "message"
-        && item.role === "assistant"
-        && item.runId === ticket.id
-        && !item.text
-        && !item.thinking
-        && item.tools.length === 0
-      ));
-      if (emptyAssistantIndex >= 0) {
-        const [removed] = live.items.splice(emptyAssistantIndex, 1);
-        if (removed?.kind === "message") {
-          live.rawMessagesByItemId.delete(removed.id);
-        }
-      }
-      live.currentAssistantId = event.projectionId;
-      live.items.push({
-        kind: "message",
-        id: event.projectionId,
-        runId: ticket.id,
-        role: "assistant",
-        text: "",
-        thinking: "",
-        tools: [],
-        parts: [],
-      });
-      if (rawMessage !== undefined) {
-        live.rawMessagesByItemId.set(event.projectionId, rawMessage);
-      }
-      return;
-    }
-    if (event.type === "text_delta" || event.type === "thinking_delta") {
-      if (!event.delta) return;
-      const assistant = this.ensureLiveAssistant(ticket);
-      if (event.type === "text_delta") {
-        const offset = assistant.text.length;
-        assistant.text += event.delta;
-        assistant.parts = appendHistoryPart(assistant.parts, {
-          kind: "text",
-          offset,
-          length: event.delta.length,
-        });
-      } else {
-        const offset = assistant.thinking.length;
-        assistant.thinking += event.delta;
-        assistant.parts = appendHistoryPart(assistant.parts, {
-          kind: "thinking",
-          offset,
-          length: event.delta.length,
-        });
-      }
-      return;
-    }
-    if (event.type === "text_replaced") {
-      const assistant = this.ensureLiveAssistant(ticket);
-      assistant.text = event.text;
-      assistant.parts = [
-        ...assistant.parts.filter((part) => part.kind !== "text"),
-        ...(event.text ? [{ kind: "text" as const, offset: 0, length: event.text.length }] : []),
-      ];
-      return;
-    }
-    if (event.type === "tool_started") {
-      const assistant = this.ensureLiveAssistant(ticket);
-      const tool: ConversationHistoryTool = {
-        toolCallId: String(event.toolCallId),
-        toolName: String(event.toolName),
-        args: event.args,
-        status: "pending",
-      };
-      assistant.tools = [...assistant.tools, tool];
-      assistant.parts = appendHistoryPart(assistant.parts, {
-        kind: "tool",
-        toolCallId: tool.toolCallId,
-      });
-      return;
-    }
-    if (event.type === "tool_prepared") {
-      const assistant = this.ensureLiveAssistant(ticket);
-      assistant.tools = assistant.tools.map((tool) => (
-        tool.toolCallId === String(event.toolCallId)
-          ? { ...tool, args: event.args, status: "pending" }
-          : tool
-      ));
-      return;
-    }
-    if (event.type === "tool_updated" || event.type === "tool_finished") {
-      const assistant = this.ensureLiveAssistant(ticket);
-      const status = event.type === "tool_finished"
-        ? (event.isError ? "error" : "done")
-        : "running";
-      assistant.tools = assistant.tools.map((tool) => (
-        tool.toolCallId === String(event.toolCallId)
-          ? { ...tool, result: event.result, status }
-          : tool
-      ));
-      return;
-    }
-    if (event.type === "usage") {
-      const assistant = this.ensureLiveAssistant(ticket);
-      assistant.usage = addUsage(assistant.usage, event.usage);
-    }
-  }
-
   private emitImageMessagePersisted(rawMessage: unknown): void {
     if (!rawMessageHasImage(rawMessage)) return;
     this.emit({
@@ -4136,8 +3807,11 @@ export class ConversationActor {
     event: SessionEvent,
     rawMessage?: unknown,
   ): void {
-    this.applyLiveSessionEvent(ticket, event, rawMessage);
-    const projectionSeq = ++this.projectionSeq;
+    const projectionSeq = this.projection.applySessionEvent(
+      ticket.id,
+      event,
+      rawMessage,
+    );
     this.emit({
       type: "session_event",
       conversationId: this.conversationId,
@@ -4145,9 +3819,7 @@ export class ConversationActor {
       projectionSeq,
       event,
     });
-    if (event.type === "run_finished" && this.liveProjection?.runId === ticket.id) {
-      this.liveProjection = undefined;
-    }
+    if (event.type === "run_finished") this.projection.clear(ticket.id);
   }
 
   private emitActivity(): void {
