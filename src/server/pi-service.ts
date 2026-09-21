@@ -37,19 +37,9 @@ import {
   projectConversationPeers,
 } from "./project-snapshot.js";
 import type { RoleCatalog } from "./role-catalog.js";
-import { MODEL_REFRESH_TIMEOUT_MS } from "./model-refresh.js";
+import { ManualModelRefreshGate } from "./manual-model-refresh.js";
 import { SerialTaskQueue } from "./serial-task-queue.js";
 import { resolveContextUsage } from "./session-usage.js";
-
-interface ManualModelRefresh {
-  controller: AbortController;
-  completion: Promise<never>;
-  cancel(reason: string): void;
-  cancelled?: string;
-  underlying?: Promise<void>;
-  timedOut: boolean;
-  timer: ReturnType<typeof setTimeout>;
-}
 
 export interface PiConnectionCoordination {
   coordinator: ProjectSessionCoordinator;
@@ -301,7 +291,7 @@ export class PiConnection {
   private generation = 0;
   private initializationAbort?: AbortController;
   private coordinatedTransitionAbort?: AbortController;
-  private manualRefresh?: ManualModelRefresh;
+  private readonly manualModelRefresh: ManualModelRefreshGate;
   private disposed = false;
   private disposePromise?: Promise<void>;
 
@@ -313,6 +303,7 @@ export class PiConnection {
     usedCommandIds: Set<string> = new Set(),
   ) {
     this.usedCommandIds = usedCommandIds;
+    this.manualModelRefresh = new ManualModelRefreshGate(runtime);
     this.extensionUI = new ExtensionUIBroker(emit);
     this.unsubscribeRuntime = runtime.subscribe(() => {
       this.publishCoordinatedState();
@@ -569,14 +560,18 @@ export class PiConnection {
     ) {
       return Promise.reject(new Error("Session was not initialized"));
     }
-    if (command.type === "refresh_models" && this.manualRefresh) {
-      return Promise.reject(new Error("A model refresh is already pending"));
-    }
-    const manualRefresh = command.type === "refresh_models"
-      ? this.startManualRefresh()
-      : undefined;
     if (command.type === "refresh_models") {
-      return this.beginManualRefresh(command, generation, manualRefresh);
+      return this.manualModelRefresh.start({
+        enqueue: (operation) => this.operations.run(operation),
+        validateLaunch: () => {
+          this.assertOpen();
+          if (!this.isCoordinatedSession(command.sessionId, generation)) {
+            throw new Error("Session was not initialized");
+          }
+        },
+        isCurrent: () => this.isCoordinatedSession(command.sessionId, generation),
+        emitCommandComplete: () => this.emitCommandComplete(command),
+      });
     }
     if (command.type === "login_oauth") {
       if (this.usedAuthFlowIds.has(command.authFlowId)) {
@@ -621,7 +616,7 @@ export class PiConnection {
           && command.type !== "create_conversation"
           && command.type !== "fork_conversation"
         ) {
-          await this.waitForManualRefreshBarrier();
+          await this.manualModelRefresh.waitBarrier();
         }
         await this.executeCoordinated(command, transitionAbort);
       } finally {
@@ -655,7 +650,7 @@ export class PiConnection {
       this.usedCommandIds.add(command.commandId);
     }
 
-    this.cancelManualRefresh("Model refresh cancelled by connection lifecycle");
+    this.manualModelRefresh.cancel("Model refresh cancelled by connection lifecycle");
     this.cancelCoordinatedTransition();
     this.coordinatedView?.extensionAbort.abort();
     this.initializationAbort?.abort();
@@ -2216,7 +2211,7 @@ case "set_thinking":
 
   private closeCoordinatedSession(sessionId: string): Promise<void> {
     if (this.requestedSessionId !== sessionId) return Promise.resolve();
-    this.cancelManualRefresh("Model refresh cancelled by connection lifecycle");
+    this.manualModelRefresh.cancel("Model refresh cancelled by connection lifecycle");
     this.generation++;
     this.requestedSessionId = undefined;
     this.cancelCoordinatedTransition();
@@ -2331,135 +2326,6 @@ case "set_thinking":
     if (!applied) throw new Error("Logout was superseded by a newer credential change");
   }
 
-  private startManualRefresh(): ManualModelRefresh {
-    const controller = new AbortController();
-    let rejectCompletion!: (error: Error) => void;
-    const completion = new Promise<never>((_, reject) => {
-      rejectCompletion = reject;
-    });
-    let refresh!: ManualModelRefresh;
-    const cancel = (reason: string, timedOut = false) => {
-      if (refresh.cancelled || refresh.timedOut) return;
-      refresh.timedOut = timedOut;
-      if (!timedOut) refresh.cancelled = reason;
-      controller.abort();
-      rejectCompletion(new Error(reason));
-      // A timed-out queued launch has no SDK work to serialize, so a retry may
-      // be admitted immediately. Once an underlying refresh exists, its slot
-      // remains held until that promise really drains.
-      if (refresh.underlying === undefined && this.manualRefresh === refresh) {
-        this.manualRefresh = undefined;
-      }
-    };
-    const timer = setTimeout(() => {
-      cancel("Model refresh timed out; please retry", true);
-    }, MODEL_REFRESH_TIMEOUT_MS);
-    timer.unref?.();
-    refresh = {
-      controller,
-      completion,
-      timer,
-      timedOut: false,
-      cancel: (reason: string) => cancel(reason),
-    };
-    this.manualRefresh = refresh;
-    return refresh;
-  }
-
-  private beginManualRefresh(
-    command: Extract<ConnectionCommand, { type: "refresh_models" }>,
-    generation: number,
-    refresh: ManualModelRefresh | undefined,
-  ): Promise<void> {
-    if (!refresh) return Promise.reject(new Error("Model refresh was not admitted"));
-    // The launch remains ordered behind earlier connection work, but its
-    // network settlement deliberately leaves this view-transition lane.
-    const launch = this.operations.run(async () => {
-      this.assertOpen();
-      if (!this.isCoordinatedSession(command.sessionId, generation)) {
-        throw new Error("Session was not initialized");
-      }
-      if (refresh.timedOut || refresh.cancelled) return;
-      this.launchModelRefresh(refresh);
-    });
-    return this.observeManualRefresh(command, generation, launch, refresh);
-  }
-
-  private observeManualRefresh(
-    command: Extract<ConnectionCommand, { type: "refresh_models" }>,
-    generation: number,
-    launch: Promise<void>,
-    refresh: ManualModelRefresh,
-  ): Promise<void> {
-    const releaseWhenDrained = () => {
-      const underlying = refresh.underlying;
-      if (underlying === undefined) {
-        if (this.manualRefresh === refresh) this.manualRefresh = undefined;
-        return;
-      }
-      void underlying.catch(() => undefined).then(() => {
-        if (this.manualRefresh === refresh) this.manualRefresh = undefined;
-      });
-    };
-    void launch.then(releaseWhenDrained, releaseWhenDrained);
-
-    const terminal = launch.then(async () => {
-      this.throwIfManualRefreshUnsettled(refresh);
-      const underlying = refresh.underlying;
-      if (underlying === undefined) return;
-      try {
-        await underlying;
-      } catch (error) {
-        this.throwIfManualRefreshUnsettled(refresh);
-        throw error;
-      }
-      this.throwIfManualRefreshUnsettled(refresh);
-      if (!this.isCoordinatedSession(command.sessionId, generation)) {
-        throw new Error("Model refresh cancelled by connection lifecycle");
-      }
-      this.emitCommandComplete(command);
-    });
-    // Timeout/lifecycle cancellation can win the public race while the
-    // detached terminal promise waits for an abort-ignoring SDK operation.
-    void terminal.catch(() => undefined);
-    return Promise.race([terminal, refresh.completion]).finally(() => {
-      clearTimeout(refresh.timer);
-    });
-  }
-
-  private throwIfManualRefreshUnsettled(refresh: ManualModelRefresh): void {
-    if (refresh.timedOut) {
-      throw new Error("Model refresh timed out; please retry");
-    }
-    if (refresh.cancelled) throw new Error(refresh.cancelled);
-  }
-
-  private launchModelRefresh(refresh: ManualModelRefresh): void {
-    if (process.env.PI_OFFLINE !== undefined) {
-      throw new Error("Model refresh is unavailable while offline");
-    }
-    this.throwIfManualRefreshUnsettled(refresh);
-    const underlying = this.runtime.refreshConfiguration({
-      allowNetwork: true,
-      force: true,
-      signal: refresh.controller.signal,
-    });
-    refresh.underlying = underlying;
-    // The caller may settle on timeout/cancellation while SDK refresh keeps
-    // running. Always observe its eventual rejection.
-    void underlying.catch(() => undefined);
-  }
-
-  private async waitForManualRefreshBarrier(): Promise<void> {
-    const underlying = this.manualRefresh?.underlying;
-    if (underlying === undefined) return;
-    await underlying.catch(() => undefined);
-  }
-
-  private cancelManualRefresh(reason: string): void {
-    this.manualRefresh?.cancel(reason);
-  }
-
   private async commitCredentialChange(
     intent: CredentialChangeIntent,
     change: () => Promise<void> | void,
@@ -2570,7 +2436,7 @@ case "set_thinking":
   }
 
   dispose(): Promise<void> {
-    this.cancelManualRefresh("Model refresh cancelled by connection lifecycle");
+    this.manualModelRefresh.cancel("Model refresh cancelled by connection lifecycle");
     if (this.disposePromise) return this.disposePromise;
     this.disposed = true;
     this.generation++;
