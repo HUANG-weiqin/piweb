@@ -14501,6 +14501,108 @@ describe("ProjectSessionCoordinator", () => {
     );
     expect(context.attention.has(conversationId)).toBe(false);
   });
+
+  it("keeps a target whose abort recovery failed out of every pump", async () => {
+    const cwd = await mkdtemp(join(
+      tmpdir(),
+      "piweb-session-abort-failed-recovery-",
+    ));
+    temporaryDirectories.push(cwd);
+    const runtime = new FakeRuntime();
+    const roles = await RoleCatalog.open(
+      runtime,
+      join(cwd, "user", "roles.json"),
+    );
+    const store = await ProjectStore.open(cwd, "full_access");
+    const sourceId = randomUUID();
+    const targetId = randomUUID();
+    const sourceManager = await store.createConversation(
+      sourceId,
+      defaultProfile(roles),
+    );
+    await store.createConversation(targetId, defaultProfile(roles));
+    const runId = randomUUID();
+    appendReservedCustomEntry(
+      sourceManager,
+      createMetaOperationEntry({
+        operationId: randomUUID(),
+        kind: "abort_session",
+        targetConversationId: targetId,
+        runId,
+        result: { aborted: true },
+        state: "started",
+        updatedAt: "2020-01-01T00:00:01.000Z",
+      }),
+    );
+    const inbox = await ProjectInbox.open(join(store.stateDir, "inbox"));
+    const messageId = randomUUID();
+    await inbox.put({
+      messageId,
+      cardId: randomUUID(),
+      fromConversationId: sourceId,
+      toConversationId: targetId,
+      sentAt: "2026-07-19T12:00:00.000Z",
+      kind: "message",
+      body: "an aborted run must not be restarted by a later pump",
+      fromRunId: randomUUID(),
+      fromSnapshot: {
+        conversationId: sourceId,
+        role: { id: "default", name: "Default" },
+      },
+      toSnapshot: {
+        conversationId: targetId,
+        role: { id: "default", name: "Default" },
+      },
+    });
+    await inbox.updateState(messageId, {
+      state: "processing",
+      processingRunId: runId,
+    });
+
+    const coordinator = new ProjectSessionCoordinator(runtime, roles);
+    const abortRecovery = vi.spyOn(
+      coordinator as unknown as {
+        recoverStartedAbortOperation(context: object, recovery: unknown):
+          Promise<void>;
+      },
+      "recoverStartedAbortOperation",
+    ).mockRejectedValueOnce(new Error("transient abort recovery failure"));
+    const fixture: Fixture = {
+      cwd,
+      runtime,
+      roles,
+      registry: new ProjectStoreRegistry(),
+      coordinator,
+      handle: await coordinator.acquireProject(cwd),
+    };
+    fixtures.push(fixture);
+    try {
+      await settleFixtureRecovery(fixture);
+      const context = (fixture.handle as unknown as {
+        context: { abortRecoveryFailed: Set<string> };
+      }).context;
+      expect(abortRecovery).toHaveBeenCalledTimes(1);
+      // The intent was not honoured, so the target must be fenced off from
+      // every pump for the rest of this process.
+      expect(context.abortRecoveryFailed.has(targetId)).toBe(true);
+      expect(await coordinatorInbox(fixture.handle).get(messageId))
+        .toMatchObject({ state: "processing" });
+
+      // Even with its actor open, a direct pump must refuse to dispatch the
+      // interrupted run that recovery failed to settle.
+      await coordinator.openConversation(fixture.handle, targetId, {
+        updateRecent: false,
+      });
+      const pumpResult = await (coordinator as unknown as {
+        pumpTarget(context: object, conversationId: string): Promise<string>;
+      }).pumpTarget(context, targetId);
+      expect(pumpResult).toBe("no_work");
+      expect(await coordinatorInbox(fixture.handle).get(messageId))
+        .toMatchObject({ state: "processing" });
+    } finally {
+      abortRecovery.mockRestore();
+    }
+  });
 });
 
 class TrackingProjectStoreRegistry extends ProjectStoreRegistry {

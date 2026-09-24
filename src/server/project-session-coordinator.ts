@@ -267,6 +267,13 @@ interface ProjectContext {
    */
   readonly pendingPumps: Set<string>;
   readonly scheduledPumps: Set<string>;
+  /**
+   * Targets whose abort-intent recovery failed during this startup pass.
+   * They stay out of every inbox pump until a later recovery honours the
+   * intent, so a run that was ordered aborted cannot be restarted by a pump
+   * that runs after the failed recovery.
+   */
+  readonly abortRecoveryFailed: Set<string>;
   readonly reloadAdoptions: Map<string, ReloadAdoption>;
   readonly extensionUIRouters: Map<string, ConversationExtensionUIRouter>;
   readonly lifecycle: SerialTaskQueue;
@@ -617,6 +624,7 @@ export class ProjectSessionCoordinator {
         failedBatchRetries: new Set(),
         pendingPumps: new Set(),
         scheduledPumps: new Set(),
+        abortRecoveryFailed: new Set(),
         reloadAdoptions: new Map(),
         extensionUIRouters: new Map(),
         lifecycle: new SerialTaskQueue(),
@@ -6116,6 +6124,11 @@ export class ProjectSessionCoordinator {
           recovery.operation.targetConversationId,
           error,
         );
+        // The intent was not honoured, so this target must not be pumped
+        // until a later recovery succeeds: keep it out of the pump set and
+        // out of every later pump for the lifetime of this process.
+        context.abortRecoveryFailed.add(recovery.operation.targetConversationId);
+        actorIds.delete(recovery.operation.targetConversationId);
       }
     }
 
@@ -6586,6 +6599,13 @@ export class ProjectSessionCoordinator {
   ): Promise<"blocked_by_deletion" | "no_work" | "settled" | "started"> {
     if (context.closing) return "no_work";
     if (context.deleting.has(conversationId)) return "blocked_by_deletion";
+    if (context.abortRecoveryFailed.has(conversationId)) {
+      // This target still carries an abort intent that recovery failed to
+      // honour; pumping it would restart the very run that has to be
+      // settled first. Attention already flags it, and the next process
+      // start retries the intent.
+      return "no_work";
+    }
     const actor = context.actors.get(conversationId);
     if (!actor) return "no_work";
     if (!await this.reconcileInbox(context, conversationId, list)) return "no_work";
