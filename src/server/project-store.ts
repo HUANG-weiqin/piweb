@@ -2377,20 +2377,37 @@ export class ProjectStore {
         options !== undefined
         && this.conversationCatalog !== options.expectedCurrent
       ) return;
-      // An oversized observation is still a successful discovery/proof; it
-      // simply forfeits the disposable cross-process acceleration.
-      if (
-        Buffer.byteLength(`${JSON.stringify(catalog, null, 2)}\n`, "utf8")
-        > MAX_CONVERSATION_CATALOG_BYTES
-      ) {
-        this.conversationCatalog = undefined;
-        persisted = true;
-        return;
+      const bytes = (value: ConversationCatalog) =>
+        Buffer.byteLength(`${JSON.stringify(value, null, 2)}\n`, "utf8");
+      let onDisk = catalog;
+      if (bytes(catalog) > MAX_CONVERSATION_CATALOG_BYTES) {
+        // Coverage is unknown when only a stable path prefix fits on disk.
+        // The complete observation remains reusable by this store instance.
+        let lower = 0;
+        let upper = catalog.observations.length;
+        while (lower < upper) {
+          const count = Math.ceil((lower + upper) / 2);
+          const candidate: ConversationCatalog = {
+            ...catalog,
+            coverage: { kind: "unknown" },
+            observations: catalog.observations.slice(0, count),
+          };
+          if (bytes(candidate) <= MAX_CONVERSATION_CATALOG_BYTES) {
+            lower = count;
+          } else {
+            upper = count - 1;
+          }
+        }
+        onDisk = {
+          ...catalog,
+          coverage: { kind: "unknown" },
+          observations: catalog.observations.slice(0, lower),
+        };
       }
       await this.assertStateDirectorySafe();
       await writeConversationCatalogAtomically(
         this.conversationCatalogPath,
-        catalog,
+        onDisk,
       );
       this.conversationCatalog = catalog;
       persisted = true;

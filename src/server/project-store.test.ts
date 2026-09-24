@@ -2354,6 +2354,88 @@ describe("ProjectStore", () => {
     expect(read.mock.calls.length).toBeGreaterThan(1);
   });
 
+  it("keeps full in-process discovery while persisting a bounded unknown-coverage prefix", async () => {
+    const cwd = await createTemporaryDirectory("piweb-discovery-overflow-");
+    const store = await ProjectStore.open(cwd);
+    const first = await store.createConversation(randomUUID(), discoveryMeta(), {
+      updateRecent: false, refreshIndex: false,
+    });
+    const last = await store.createConversation(randomUUID(), discoveryMeta(), {
+      updateRecent: false, refreshIndex: false,
+    });
+    await rename(first.getSessionFile()!, join(store.sessionDir, "000-first.jsonl"));
+    await rename(last.getSessionFile()!, join(store.sessionDir, "zzz-last.jsonl"));
+    await store.discoverConversations();
+    const catalogPath = join(store.stateDir, "conversation-catalog.json");
+    const base = JSON.parse(await readFile(catalogPath, "utf8")) as {
+      version: number;
+      coverage: { kind: string; generation?: string };
+      observations: Array<{
+        relativePath: string;
+        header: { kind: "claims"; conversationId: string };
+        summary: {
+          id: string;
+          rootConversationId: string;
+          preview: string;
+          role: { description: string };
+        };
+        recoveryNeeded: boolean;
+      }>;
+    };
+    const firstObservation = base.observations[0]!;
+    const filler = Array.from({ length: 3_000 }, (_, index) => {
+      const id = `synthetic-${index}`;
+      return {
+        ...firstObservation,
+        relativePath: `mid-${String(index).padStart(4, "0")}.jsonl`,
+        header: { kind: "claims" as const, conversationId: id },
+        summary: {
+          ...firstObservation.summary,
+          id,
+          rootConversationId: id,
+          preview: "p".repeat(500),
+          role: { ...firstObservation.summary.role, description: "d".repeat(1_000) },
+        },
+      };
+    });
+    const largeCatalog = {
+      ...base,
+      observations: [firstObservation, ...filler, base.observations[1]!],
+    };
+    expect(Buffer.byteLength(`${JSON.stringify(largeCatalog, null, 2)}\n`, "utf8"))
+      .toBeGreaterThan(4 * 1024 * 1024);
+    const owner = store as unknown as {
+      persistConversationCatalog(catalog: unknown): Promise<boolean>;
+    };
+    await expect(owner.persistConversationCatalog(largeCatalog)).resolves.toBe(true);
+    const raw = await readFile(catalogPath, "utf8");
+    expect(Buffer.byteLength(raw, "utf8")).toBeLessThanOrEqual(4 * 1024 * 1024);
+    const persisted = JSON.parse(raw) as typeof largeCatalog;
+    expect(persisted.coverage).toEqual({ kind: "unknown" });
+    expect(persisted.observations).toEqual(
+      largeCatalog.observations.slice(0, persisted.observations.length),
+    );
+    expect(Buffer.byteLength(`${JSON.stringify({
+      ...largeCatalog,
+      coverage: { kind: "unknown" },
+      observations: largeCatalog.observations.slice(0, persisted.observations.length + 1),
+    }, null, 2)}\n`, "utf8")).toBeGreaterThan(4 * 1024 * 1024);
+    expect(persisted.observations[0]?.relativePath).toBe("000-first.jsonl");
+    expect(persisted.observations.some(({ relativePath }) => relativePath === "zzz-last.jsonl"))
+      .toBe(false);
+
+    const reopened = await ProjectStore.open(cwd);
+    const coldRead = vi.spyOn(reopened as never, "readStableExpectedSessionFile");
+    expect((await reopened.discoverConversations()).conversations.map(({ id }) => id).sort())
+      .toEqual([first.getSessionId(), last.getSessionId()].sort());
+    expect(coldRead.mock.calls.map(([file]) => basename((file as { path: string }).path)))
+      .toEqual(["zzz-last.jsonl"]);
+    const warmRead = vi.spyOn(store as never, "readStableExpectedSessionFile");
+    expect((await store.discoverConversations()).conversations.map(({ id }) => id).sort())
+      .toEqual([first.getSessionId(), last.getSessionId()].sort());
+    expect(warmRead).not.toHaveBeenCalled();
+  });
+
   it("keeps a complete discovery result when its disposable catalog write fails", async () => {
     const cwd = await createTemporaryDirectory("piweb-discovery-cache-write-");
     const store = await ProjectStore.open(cwd);
