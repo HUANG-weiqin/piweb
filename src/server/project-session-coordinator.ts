@@ -101,10 +101,7 @@ import {
   RoleUpdateConflictError,
 } from "./role-store.js";
 import { SerialTaskQueue } from "./serial-task-queue.js";
-import {
-  createReadonlySessionEntriesAdapter,
-  type PiSessionFileInspection,
-} from "./session-file.js";
+import { createReadonlySessionEntriesAdapter } from "./session-file.js";
 import {
   defaultToolPolicy,
   type ToolPolicy,
@@ -274,6 +271,8 @@ interface ProjectContext {
    * that runs after the failed recovery.
    */
   readonly abortRecoveryFailed: Set<string>;
+  /** No run may start until startup discovery and every abort intent are resolved. */
+  foundationReady: boolean;
   readonly reloadAdoptions: Map<string, ReloadAdoption>;
   readonly extensionUIRouters: Map<string, ConversationExtensionUIRouter>;
   readonly lifecycle: SerialTaskQueue;
@@ -625,6 +624,7 @@ export class ProjectSessionCoordinator {
         pendingPumps: new Set(),
         scheduledPumps: new Set(),
         abortRecoveryFailed: new Set(),
+        foundationReady: false,
         reloadAdoptions: new Map(),
         extensionUIRouters: new Map(),
         lifecycle: new SerialTaskQueue(),
@@ -652,7 +652,6 @@ export class ProjectSessionCoordinator {
       // Recovery queues its own lifecycle steps; queueing the whole pass as
       // one task would hold the project lane for as long as recovery takes.
       this.trackBackground(context, this.recoverProject(context));
-      this.trackBackground(context, this.scrubProjectCatalog(context));
       return context;
     } catch (error) {
       unsubscribeProject?.();
@@ -780,29 +779,67 @@ export class ProjectSessionCoordinator {
     return this.projectConversationSummaries(context, summaries);
   }
 
-  /**
-   * Projects the last successful project index without scanning the session
-   * directory. This is not a fresh integrity proof and must not be used for
-   * open/delete decisions.
-   */
+  async listSessionsForDisplay(
+    handle: ProjectSessionHandle,
+    signal?: AbortSignal,
+  ): Promise<ConversationSummary[]> {
+    const context = this.requireContext(handle);
+    this.throwIfAborted(signal);
+    const { conversations } = await raceWithAbort(
+      context.project.discoverConversations(),
+      signal,
+    );
+    this.throwIfAborted(signal);
+    return this.projectDisplaySummaries(context, conversations);
+  }
+
+  /** Current-index and discovery summaries are presentation, never authority. */
   projectSessionsFromCurrentIndex(
     handle: ProjectSessionHandle,
   ): ConversationSummary[] {
     const context = this.requireContext(handle);
-    return context.project.listConversations().map((summary) => {
+    return this.projectDisplaySummaries(
+      context,
+      context.project.listConversations(),
+    );
+  }
+
+  private projectDisplaySummaries(
+    context: ProjectContext,
+    summaries: readonly ConversationSummary[],
+  ): ConversationSummary[] {
+    return summaries.map((summary) => {
       const actor = context.actors.get(summary.id);
       const actorState = actor?.getState();
       const profile = actor?.profile ?? context.profiles.get(summary.id);
-      if (profile === undefined) {
-        return {
-          ...summary,
-          rootConversationId: summary.id,
-          activity: actorState?.activity ?? { kind: "idle" },
-          compacting: actorState?.compacting ?? false,
-          attention: context.attention.has(summary.id),
-        };
-      }
-      return this.projectConversationSummaries(context, [summary])[0]!;
+      return {
+        ...summary,
+        ...(summary.name === undefined && actorState?.autoTitlePreview !== undefined
+          ? { autoTitlePreview: actorState.autoTitlePreview }
+          : {}),
+        ...(profile === undefined ? {} : {
+          rootConversationId: profile.orchestration?.rootConversationId
+            ?? summary.rootConversationId ?? summary.id,
+          role: {
+            id: profile.role.id,
+            revision: profile.role.revision,
+            name: profile.role.name,
+            description: profile.role.description,
+            model: { ...profile.role.model },
+            compactionModel: profile.role.compactionModel === null
+              ? null
+              : { ...profile.role.compactionModel },
+            defaultThinkingLevel: profile.role.defaultThinkingLevel,
+            defaultServiceTier: profile.role.defaultServiceTier,
+            toolMode: profile.role.toolMode,
+            canManageSessions: profile.role.canManageSessions,
+          },
+          createdBy: structuredClone(profile.createdBy),
+        }),
+        activity: actorState?.activity ?? { kind: "idle" },
+        compacting: actorState?.compacting ?? false,
+        attention: context.attention.has(summary.id),
+      };
     });
   }
 
@@ -1275,6 +1312,7 @@ export class ProjectSessionCoordinator {
         input.idempotencyKey,
       );
       const requestFingerprint = startRequestFingerprint(input);
+      this.assertRunStartAllowed(context, conversationId);
 
       // Snapshot source cards once before any writes — used for per-run budget.
       const sourceAggregate = aggregateReservedConversationEntries(
@@ -1582,6 +1620,7 @@ export class ProjectSessionCoordinator {
         }
         return actor.admitBrowserPrompt({ promptId, runId, text, images });
       }
+      this.assertRunStartAllowed(context, conversationId);
       return context.inbox.withListSnapshot(async (list) => {
         const pump = await this.pumpTarget(context, conversationId, list);
         if (pump === "blocked_by_deletion" || context.deleting.has(conversationId)) {
@@ -2086,6 +2125,7 @@ export class ProjectSessionCoordinator {
         const disposition = await this.runLifecycle<ReloadResumeDisposition>(
           context,
           async () => {
+            this.assertRunStartAllowed(context, target.conversationId);
             const actor = await this.getOrOpenActor(
               context,
               target.conversationId,
@@ -5246,6 +5286,10 @@ export class ProjectSessionCoordinator {
       || existing.fromSnapshot.conversationId !== receipt.fromConversationId
       || existing.toSnapshot.conversationId !== receipt.toConversationId
       || (
+        existing.orchestration?.sourceRunId !== undefined
+        && existing.orchestration.sourceRunId !== receipt.sourceRunId
+      )
+      || (
         existing.runId !== undefined
         && existing.runId !== receipt.targetRunId
       )
@@ -5554,6 +5598,7 @@ export class ProjectSessionCoordinator {
     envelopes: InboxEnvelope[],
     runId: string,
   ): Promise<"started" | "not_started"> {
+    this.assertRunStartAllowed(context, target.conversationId);
     if (target.getActivity().kind !== "idle") {
       throw new Error(`Conversation is already running: ${target.conversationId}`);
     }
@@ -5964,26 +6009,15 @@ export class ProjectSessionCoordinator {
     );
   }
 
-  private async scrubProjectCatalog(context: ProjectContext): Promise<void> {
-    while (!context.closing) {
-      const advanced = await context.project.scrubOneCatalogObservation();
-      if (!advanced) return;
-      await new Promise<void>((resolve) => setImmediate(resolve));
-    }
-  }
-
   /**
    * Runs startup recovery as one foundation task followed by one lifecycle
    * step per remaining phase.
    *
    * The foundation task is enqueued first and holds the lane for everything
-   * another command must not overtake: the durable scans, the profile and
-   * abort-intent scan, and abort-intent recovery. Only the later, idempotent
-   * phases (sidecar repair, inbox reconciliation, actor pumps) yield between
-   * steps, so a pump started by a focus or by another command can never run
-   * before the abort-intent scan that has to precede every inbox pump. Each
-   * step still owns the lane for its own duration, which is what keeps
-   * unrelated commands from queueing behind the whole pass.
+   * another command must not overtake: discovery, exact candidate scans,
+   * abort-intent recovery, and source-card repair. Later idempotent sidecar
+   * and pump steps yield between lifecycle tasks. If the foundation fails,
+   * the run-start gate stays closed even after the lifecycle lane advances.
    */
   private async recoverProject(context: ProjectContext): Promise<void> {
     const foundation = await this.runLifecycle(context, () =>
@@ -6034,16 +6068,12 @@ export class ProjectSessionCoordinator {
     | undefined
   > {
     if (context.closing) return undefined;
-    let summaries = await context.project.refreshConversations();
-    // Startup recovery shares the same frozen-set batch path as ordinary
-    // retries. In particular, an absent target may still have captured
-    // sidecars whose external source must record a terminal card before the
-    // exact sidecar is removed; pruneCompletedTargetTombstones cannot prove
-    // that ordering or preserve a root fence across a cascade.
+    // A durable deletion fence is the only startup case that still needs a
+    // complete catalog proof. Its batch cleanup must precede discovery.
     await this.retryBlockedDeletions(context);
     const blockedTargets = new Set(await context.inbox.listDeletedTargets());
     const pending = await context.inbox.list();
-    summaries = await context.project.refreshConversations();
+    const discovery = await context.project.discoverConversations();
     const startedAbortOperations: Array<{
       sourceConversationId: string;
       operation: Extract<
@@ -6051,6 +6081,8 @@ export class ProjectSessionCoordinator {
         { kind: "abort_session"; state: "started" }
       >;
     }> = [];
+    const pendingSourceCards: ConversationCard[] = [];
+    const unsettledReceiptRuns = new Map<string, Set<string>>();
     const actorIds = new Set(
       pending
         .filter(({ toConversationId }) =>
@@ -6058,54 +6090,51 @@ export class ProjectSessionCoordinator {
         )
         .map(({ toConversationId }) => toConversationId),
     );
-    for (const summary of summaries) {
-      if (blockedTargets.has(summary.id)) {
-        context.attention.add(summary.id);
-      }
-    }
-    const scannableSummaries = summaries.filter(({ id }) =>
-      !blockedTargets.has(id)
-    );
-    // One batch proof reads every transcript under a single catalog proof.
-    // Reading them one at a time repeats a namespace census per conversation,
-    // so this pass grew with the project's transcript bytes; a batch failure
-    // still falls back to per-conversation reads, which keeps one unreadable
-    // file from marking anything but its own conversation.
-    let inspections: Map<string, PiSessionFileInspection> | undefined;
-    if (scannableSummaries.length > 0) {
+    for (const id of blockedTargets) context.attention.add(id);
+
+    // Discovery identifies only possible work. Every candidate is freshly
+    // proven at its exact target before its payload can drive recovery.
+    for (const id of discovery.recoveryConversationIds) {
       if (context.closing) return undefined;
       try {
-        inspections = await context.project.inspectConversations(
-          scannableSummaries.map(({ id }) => id),
+        const inspection = await context.project.inspectConversation(id);
+        if (!inspection.conversationMeta) {
+          throw new Error(`Conversation ${id} profile metadata is missing`);
+        }
+        for (const operation of inspection.metaOperations) {
+          if (
+            operation.kind === "abort_session"
+            && operation.state === "started"
+            && operation.result.aborted
+          ) {
+            startedAbortOperations.push({ sourceConversationId: id, operation });
+          }
+        }
+        const settledRunIds = new Set(
+          inspection.runSettlements.map(({ runId }) => runId),
         );
-      } catch {
-        // A batch failure only costs the single catalog proof: fall back to
-        // per-conversation reads below, which still isolate one bad file.
-        inspections = undefined;
-      }
-    }
-    for (const summary of scannableSummaries) {
-      if (context.closing) return undefined;
-      if (inspections === undefined) {
-        await this.recoverConversationSummary(
-          context,
-          summary.id,
-          blockedTargets,
-          startedAbortOperations,
-          actorIds,
-        );
-        continue;
-      }
-      try {
-        this.applyRecoveredSummary(
-          context,
-          summary.id,
-          inspections.get(summary.id)!,
-          startedAbortOperations,
-          actorIds,
-        );
+        const unsettled = inspection.messageDeliveryReceipts
+          .filter(({ targetRunId }) => !settledRunIds.has(targetRunId))
+          .map(({ targetRunId }) => targetRunId);
+        if (unsettled.length > 0) {
+          unsettledReceiptRuns.set(id, new Set(unsettled));
+        }
+        for (const card of inspection.cards) {
+          if (
+            card.messageId !== undefined
+            && (
+              card.state === "sending"
+              || card.state === "queued"
+              || card.state === "running"
+              || (card.kind === "delegation_task" && card.state === "delivered")
+            )
+          ) {
+            pendingSourceCards.push(card);
+          }
+        }
       } catch (error) {
-        this.markRecoveryAttention(context, summary.id, error);
+        this.markRecoveryAttention(context, id, error);
+        throw error;
       }
     }
 
@@ -6113,6 +6142,8 @@ export class ProjectSessionCoordinator {
       if (context.closing) return undefined;
       try {
         await this.recoverStartedAbortOperation(context, recovery);
+        unsettledReceiptRuns.get(recovery.operation.targetConversationId)
+          ?.delete(recovery.operation.runId);
       } catch (error) {
         this.markRecoveryAttention(
           context,
@@ -6124,23 +6155,27 @@ export class ProjectSessionCoordinator {
           recovery.operation.targetConversationId,
           error,
         );
-        // The intent was not honoured, so this target must not be pumped
-        // until a later recovery succeeds: keep it out of the pump set and
-        // out of every later pump for the lifetime of this process.
+        // This exact target remains fenced for the process lifetime.
         context.abortRecoveryFailed.add(recovery.operation.targetConversationId);
         actorIds.delete(recovery.operation.targetConversationId);
       }
     }
 
+    for (const [id, runs] of unsettledReceiptRuns) {
+      if (
+        runs.size > 0
+        && !blockedTargets.has(id)
+        && !context.abortRecoveryFailed.has(id)
+      ) {
+        actorIds.add(id);
+      }
+    }
+    await this.recoverPendingSourceCards(context, pendingSourceCards);
+    if (context.closing) return undefined;
+    context.foundationReady = true;
     return { pending, blockedTargets, actorIds };
   }
 
-  /**
-   * Attention asks a human to look at a conversation. Recovery yields between
-   * steps now, so a conversation can be deleted while the pass is running;
-   * flagging one that is already being deleted or no longer exists would
-   * leave a permanent badge for a conversation the user just removed.
-   */
   /**
    * Attention asks a human to look at a conversation. Recovery yields between
    * steps now, so a conversation can leave the project while the pass runs;
@@ -6165,83 +6200,80 @@ export class ProjectSessionCoordinator {
     context.attention.add(conversationId);
   }
 
-  /**
-   * Per-conversation fallback for the batched profile scan above.
-   */
-  private async recoverConversationSummary(
+  /** Repair only existing pending source cards using exact target receipts. */
+  private async recoverPendingSourceCards(
     context: ProjectContext,
-    summaryId: string,
-    blockedTargets: ReadonlySet<string>,
-    startedAbortOperations: {
-      sourceConversationId: string;
-      operation: Extract<
-        MetaOperation,
-        { kind: "abort_session"; state: "started" }
-      >;
-    }[],
-    actorIds: Set<string>,
+    cards: readonly ConversationCard[],
   ): Promise<void> {
-    if (blockedTargets.has(summaryId)) {
-      context.attention.add(summaryId);
-      return;
-    }
-    try {
-      const inspection = await context.project.inspectConversation(summaryId);
-      this.applyRecoveredSummary(
-        context,
-        summaryId,
-        inspection,
-        startedAbortOperations,
-        actorIds,
-      );
-    } catch (error) {
-      // Recovery yields between steps, so the conversation can be deleted
-      // while the pass runs; only a fault that proves it is gone is skipped.
-      this.markRecoveryAttention(context, summaryId, error);
-    }
-  }
-
-  private applyRecoveredSummary(
-    context: ProjectContext,
-    summaryId: string,
-    inspection: PiSessionFileInspection,
-    startedAbortOperations: {
-      sourceConversationId: string;
-      operation: Extract<
-        MetaOperation,
-        { kind: "abort_session"; state: "started" }
-      >;
-    }[],
-    actorIds: Set<string>,
-  ): void {
-    for (const operation of inspection.metaOperations) {
-      if (
-        operation.kind === "abort_session"
-        && operation.state === "started"
-        && operation.result.aborted
-      ) {
-        startedAbortOperations.push({
-          sourceConversationId: summaryId,
-          operation,
-        });
+    const cardsByTarget = new Map<string, ConversationCard[]>();
+    for (const card of cards) {
+      const targetId = card.toSnapshot.conversationId;
+      const group = cardsByTarget.get(targetId);
+      if (group) {
+        group.push(card);
+      } else {
+        cardsByTarget.set(targetId, [card]);
       }
     }
-    const settledRunIds = new Set(
-      inspection.runSettlements.map(({ runId }) => runId),
-    );
-    if (inspection.messageDeliveryReceipts.some((receipt) =>
-      !settledRunIds.has(receipt.targetRunId)
-      || receipt.kind === "delegation_task"
-    )) {
-      actorIds.add(summaryId);
-    }
-    const profile = inspection.conversationMeta;
-    if (!profile) {
-      throw new Error(
-        `Conversation ${summaryId} profile metadata is missing`,
+    const projections: {
+      receipt: MessageDeliveryReceipt;
+      settlement?: RunSettlement;
+    }[] = [];
+    for (const [targetId, group] of cardsByTarget) {
+      if (context.closing) return;
+      let inspection;
+      try {
+        inspection = await context.project.inspectConversation(targetId);
+      } catch (error) {
+        if (error instanceof ConversationNotFoundError) continue;
+        this.markRecoveryAttention(context, targetId, error);
+        for (const card of group) {
+          this.markRecoveryAttention(
+            context,
+            card.fromSnapshot.conversationId,
+            error,
+          );
+        }
+        throw error;
+      }
+      const cardsByMessage = new Map<string, ConversationCard[]>();
+      for (const card of group) {
+        const messageId = card.messageId!;
+        const matches = cardsByMessage.get(messageId);
+        if (matches) {
+          matches.push(card);
+        } else {
+          cardsByMessage.set(messageId, [card]);
+        }
+      }
+      const settlements = new Map(
+        inspection.runSettlements.map((settlement) => [settlement.runId, settlement]),
       );
+      for (const receipt of inspection.messageDeliveryReceipts) {
+        for (const card of cardsByMessage.get(receipt.messageId) ?? []) {
+          if (card.fromSnapshot.conversationId !== receipt.fromConversationId) {
+            continue;
+          }
+          if (
+            receipt.cardId !== card.cardId
+            || receipt.toConversationId !== targetId
+            || receipt.kind !== card.kind
+            || (card.runId !== undefined && card.runId !== receipt.targetRunId)
+            || (
+              card.orchestration?.sourceRunId !== undefined
+              && card.orchestration.sourceRunId !== receipt.sourceRunId
+            )
+          ) {
+            throw new Error(`Source card identity conflicts with receipt ${receipt.messageId}`);
+          }
+          projections.push({
+            receipt,
+            settlement: settlements.get(receipt.targetRunId),
+          });
+        }
+      }
     }
-    context.profiles.set(summaryId, cloneProfile(profile));
+    await this.projectReceiptSourceCards(context, projections);
   }
 
   /** One recovery step: advance a source card left in `sending`. */
@@ -6319,92 +6351,74 @@ export class ProjectSessionCoordinator {
     },
   ): Promise<void> {
     const { sourceConversationId, operation } = recovery;
-    const targetExists = context.project.listConversations().some(
-      ({ id }) => id === operation.targetConversationId,
+    const target = await this.withStoredConversationManager(
+      context,
+      operation.targetConversationId,
+      async (manager) => {
+        const aggregate = aggregateReservedConversationEntries(manager.getEntries());
+        let settlement = aggregate.runSettlements.find(
+          ({ runId }) => runId === operation.runId,
+        );
+        const targetActor = context.actors.get(operation.targetConversationId);
+        const activity = targetActor?.getActivity();
+        if (
+          !settlement
+          && targetActor
+          && activity?.kind !== "idle"
+          && activity?.runId === operation.runId
+        ) {
+          const completion = this.observeSettlement(
+            context,
+            targetActor,
+            operation.runId,
+          );
+          await targetActor.abort(operation.runId);
+          settlement = await completion;
+        }
+        const interrupted = (await context.inbox.list({
+          toConversationId: operation.targetConversationId,
+        })).filter((envelope) =>
+          envelope.state === "processing"
+          && envelope.processingRunId === operation.runId
+        );
+        if (
+          !settlement
+          && (
+            interrupted.length > 0
+            || aggregate.messageDeliveryReceipts.some(
+              ({ targetRunId }) => targetRunId === operation.runId,
+            )
+          )
+        ) {
+          settlement = createRunSettlementEntry({
+            runId: operation.runId,
+            outcome: "aborted",
+            finalText: null,
+            settledAt: this.now().toISOString(),
+          }).data;
+          appendReservedCustomEntry(manager, createRunSettlementEntry(settlement));
+          this.recordCompletion(context, operation.targetConversationId, settlement);
+        }
+        return { settlement, interrupted };
+      },
     );
-    if (targetExists) {
-      let recoveredSettlement: RunSettlement | undefined;
-      await this.withConversationManager(
+    if (target?.settlement && target.interrupted.length > 0) {
+      context.processingBatches.set(
+        completionKey(operation.targetConversationId, operation.runId),
+        target.interrupted,
+      );
+      await this.finishBatch(
         context,
         operation.targetConversationId,
-        async (manager) => {
-          recoveredSettlement = aggregateReservedConversationEntries(
-            manager.getEntries(),
-          ).runSettlements.find(
-            ({ runId }) => runId === operation.runId,
-          );
-        },
+        operation.runId,
+        target.settlement,
       );
-      const targetActor = context.actors.get(
-        operation.targetConversationId,
-      );
-      const targetActivity = targetActor?.getActivity();
-      if (
-        !recoveredSettlement
-        && targetActor
-        && targetActivity
-        && targetActivity.kind !== "idle"
-        && targetActivity.runId === operation.runId
-      ) {
-        const completion = this.observeSettlement(
-          context,
-          targetActor,
-          operation.runId,
-        );
-        await targetActor.abort(operation.runId);
-        recoveredSettlement = await completion;
-      }
-      const interrupted = (await context.inbox.list({
-        toConversationId: operation.targetConversationId,
-      })).filter(
-        (envelope) =>
-          envelope.state === "processing"
-          && envelope.processingRunId === operation.runId,
-      );
-      if (!recoveredSettlement && interrupted.length > 0) {
-        recoveredSettlement = createRunSettlementEntry({
-          runId: operation.runId,
-          outcome: "aborted",
-          finalText: null,
-          settledAt: this.now().toISOString(),
-        }).data;
-        await this.withConversationManager(
-          context,
-          operation.targetConversationId,
-          async (manager) => {
-            appendReservedCustomEntry(
-              manager,
-              createRunSettlementEntry(recoveredSettlement!),
-            );
-          },
-        );
-        this.recordCompletion(
-          context,
-          operation.targetConversationId,
-          recoveredSettlement,
-        );
-      }
-      if (recoveredSettlement && interrupted.length > 0) {
-        context.processingBatches.set(
-          completionKey(
-            operation.targetConversationId,
-            operation.runId,
-          ),
-          interrupted,
-        );
-        await this.finishBatch(
-          context,
-          operation.targetConversationId,
-          operation.runId,
-          recoveredSettlement,
-        );
-      }
     }
 
-    await this.withConversationManager(
+    await this.withStoredConversationManager(
       context,
       sourceConversationId,
-      async (manager) => {
+      (manager) => {
         const existing = aggregateReservedConversationEntries(
           manager.getEntries(),
         ).metaOperations.find(
@@ -6425,6 +6439,20 @@ export class ProjectSessionCoordinator {
         }
       },
     );
+  }
+
+  private assertRunStartAllowed(
+    context: ProjectContext,
+    conversationId: string,
+  ): void {
+    if (!context.foundationReady) {
+      throw new Error("Project recovery foundation is not ready to start runs");
+    }
+    if (context.abortRecoveryFailed.has(conversationId)) {
+      throw new Error(
+        `Conversation ${conversationId} abort recovery must complete before a run starts`,
+      );
+    }
   }
 
   private assertConversationWorkAllowed(
@@ -6467,12 +6495,6 @@ export class ProjectSessionCoordinator {
       this.assertManagerWorkAllowed(actor);
       return await work(actor.sessionManager);
     }
-    if (!context.project.listConversations().some(
-      ({ id }) => id === conversationId
-    )) {
-      return undefined;
-    }
-
     let lease: ReturnType<ProjectStoreRegistry["acquireConversation"]>;
     try {
       lease = this.projects.acquireConversation(
@@ -6494,10 +6516,16 @@ export class ProjectSessionCoordinator {
       throw error;
     }
     try {
-      const manager = await context.project.openConversation(
-        conversationId,
-        { updateRecent: false },
-      );
+      let manager: Awaited<ReturnType<ProjectStore["openConversation"]>>;
+      try {
+        manager = await context.project.openConversation(
+          conversationId,
+          { updateRecent: false },
+        );
+      } catch (error) {
+        if (error instanceof ConversationNotFoundError) return undefined;
+        throw error;
+      }
       return await work(manager);
     } finally {
       lease.release();
@@ -6597,7 +6625,7 @@ export class ProjectSessionCoordinator {
     conversationId: string,
     list?: InboxList,
   ): Promise<"blocked_by_deletion" | "no_work" | "settled" | "started"> {
-    if (context.closing) return "no_work";
+    if (context.closing || !context.foundationReady) return "no_work";
     if (context.deleting.has(conversationId)) return "blocked_by_deletion";
     if (context.abortRecoveryFailed.has(conversationId)) {
       // This target still carries an abort intent that recovery failed to

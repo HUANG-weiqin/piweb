@@ -233,26 +233,154 @@ describe("ProjectSessionCoordinator", () => {
     expect(query).not.toHaveBeenCalled();
   });
 
-  it("acquires a project before its background full audit completes", async () => {
-    const originalRefresh = ProjectStore.prototype.refreshConversations;
-    const releaseAudit = deferred();
-    vi.spyOn(ProjectStore.prototype, "refreshConversations").mockImplementation(
+  it("acquires a project before its background discovery completes", async () => {
+    const originalDiscover = ProjectStore.prototype.discoverConversations;
+    const releaseDiscovery = deferred();
+    vi.spyOn(ProjectStore.prototype, "discoverConversations").mockImplementation(
       async function () {
-        await releaseAudit.promise;
-        return originalRefresh.call(this);
+        await releaseDiscovery.promise;
+        return originalDiscover.call(this);
       },
     );
 
     const acquisition = createFixture();
-    const acquiredBeforeAudit = await Promise.race([
+    const acquiredBeforeDiscovery = await Promise.race([
       acquisition.then(() => true),
       new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 100)),
     ]);
-    releaseAudit.resolve();
+    releaseDiscovery.resolve();
     const fixture = await acquisition;
 
-    expect(acquiredBeforeAudit).toBe(true);
+    expect(acquiredBeforeDiscovery).toBe(true);
     expect(fixture.handle.project.listConversations()).toEqual([]);
+  });
+
+  it("discovers quiescent history at restart without full proof, scrub, or runtime actors", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "piweb-session-discovery-startup-"));
+    temporaryDirectories.push(cwd);
+    const runtime = new FakeRuntime();
+    const roles = await RoleCatalog.open(runtime, join(cwd, "user", "roles.json"));
+    const store = await ProjectStore.open(cwd, "full_access");
+    const ids = Array.from({ length: 3 }, () => randomUUID());
+    for (const id of ids) {
+      await store.createConversation(id, defaultProfile(roles, id === ids[1] ? {
+        createdBy: { kind: "conversation", conversationId: ids[0]! },
+        orchestration: { rootConversationId: ids[0]!, depth: 1 },
+      } : {}));
+    }
+    const refresh = vi.spyOn(ProjectStore.prototype, "refreshConversations");
+    const inspectAll = vi.spyOn(ProjectStore.prototype, "inspectConversations");
+    const scrub = vi.spyOn(ProjectStore.prototype, "scrubOneCatalogObservation");
+    const coordinator = new ProjectSessionCoordinator(runtime, roles);
+    const handle = await coordinator.acquireProject(cwd);
+    const fixture = { cwd, runtime, roles, registry: new ProjectStoreRegistry(), coordinator, handle };
+    fixtures.push(fixture);
+    await settleFixtureRecovery(fixture);
+
+    expect(refresh).not.toHaveBeenCalled();
+    expect(inspectAll).not.toHaveBeenCalled();
+    expect(scrub).not.toHaveBeenCalled();
+    expect(runtime.createConversationIds).toEqual([]);
+    const display = await coordinator.listSessionsForDisplay(handle);
+    expect((handle as unknown as { context: { profiles: Map<string, unknown> } })
+      .context.profiles.size).toBe(0);
+    expect(new Set(display.map(({ id }) => id))).toEqual(new Set(ids));
+    expect(display.every(({ role }) => role?.id === "default" && !("systemPrompt" in role))).toBe(true);
+    expect(display.find(({ id }) => id === ids[1])).toMatchObject({
+      rootConversationId: ids[0],
+      createdBy: { kind: "conversation", conversationId: ids[0] },
+    });
+    expect(coordinator.projectSessionsFromCurrentIndex(handle).find(
+      ({ id }) => id === ids[1],
+    )).toMatchObject({ rootConversationId: ids[0], role: { id: "default" } });
+    expect(refresh).not.toHaveBeenCalled();
+    expect(inspectAll).not.toHaveBeenCalled();
+  });
+
+  it("keeps run starts fenced after discovery fails while exact open remains usable", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "piweb-session-discovery-failed-"));
+    temporaryDirectories.push(cwd);
+    const runtime = new FakeRuntime();
+    const roles = await RoleCatalog.open(runtime, join(cwd, "user", "roles.json"));
+    const store = await ProjectStore.open(cwd, "full_access");
+    const targetId = randomUUID();
+    await store.createConversation(targetId, defaultProfile(roles));
+    vi.spyOn(ProjectStore.prototype, "discoverConversations")
+      .mockRejectedValueOnce(new Error("unknown discovery state"));
+    const coordinator = new ProjectSessionCoordinator(runtime, roles);
+    const handle = await coordinator.acquireProject(cwd);
+    const fixture = { cwd, runtime, roles, registry: new ProjectStoreRegistry(), coordinator, handle };
+    fixtures.push(fixture);
+    await settleFixtureRecovery(fixture);
+    const context = (handle as unknown as { context: { foundationReady: boolean } }).context;
+    expect(context.foundationReady).toBe(false);
+    await expect(coordinator.openConversation(handle, targetId, {
+      updateRecent: false,
+    })).resolves.toBeDefined();
+    await expect(coordinator.prompt(handle, targetId, randomUUID(), "must not run"))
+      .rejects.toThrow(/recovery|foundation/i);
+    const requestId = randomUUID();
+    const disposition = await coordinator.resumeAfterReload(
+      requestId,
+      [{ cwd, conversationId: targetId, continueTask: true, continuationRunId: randomUUID() }],
+      async () => undefined,
+    );
+    expect(disposition).toMatchObject([{
+      conversationId: targetId, disposition: "retry",
+    }]);
+    expect(runtime.control(targetId).received).toEqual([]);
+  });
+
+  it("keeps the foundation closed when an exact recovery candidate scan fails", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "piweb-session-candidate-failed-"));
+    temporaryDirectories.push(cwd);
+    const runtime = new FakeRuntime();
+    const roles = await RoleCatalog.open(runtime, join(cwd, "user", "roles.json"));
+    const store = await ProjectStore.open(cwd, "full_access");
+    const sourceId = randomUUID();
+    const targetId = randomUUID();
+    const sourceManager = await store.createConversation(sourceId, defaultProfile(roles));
+    await store.createConversation(targetId, defaultProfile(roles));
+    appendReservedCustomEntry(sourceManager, createMetaOperationEntry({
+      operationId: randomUUID(), kind: "abort_session", targetConversationId: targetId,
+      runId: randomUUID(), result: { aborted: true }, state: "started",
+      updatedAt: "2026-07-19T12:00:00.000Z",
+    }));
+    const inspect = vi.spyOn(ProjectStore.prototype, "inspectConversation")
+      .mockImplementationOnce(async () => { throw new Error("candidate unavailable"); });
+    const coordinator = new ProjectSessionCoordinator(runtime, roles);
+    const handle = await coordinator.acquireProject(cwd);
+    const fixture = { cwd, runtime, roles, registry: new ProjectStoreRegistry(), coordinator, handle };
+    fixtures.push(fixture);
+    await settleFixtureRecovery(fixture);
+    expect(inspect).toHaveBeenCalledWith(sourceId);
+    expect((handle as unknown as { context: { foundationReady: boolean } })
+      .context.foundationReady).toBe(false);
+    await coordinator.openConversation(handle, targetId, { updateRecent: false });
+    await expect(coordinator.prompt(handle, targetId, randomUUID(), "must not run"))
+      .rejects.toThrow(/recovery|foundation/i);
+  });
+
+  it("does not dispatch start_session while the recovery foundation is closed", async () => {
+    const fixture = await createFixture();
+    await settleFixtureRecovery(fixture);
+    const source = await fixture.coordinator.createUserConversation(
+      fixture.handle, { roleId: "default" },
+    );
+    const running = await startBlockedSourceRun(fixture, source.conversationId);
+    const context = (fixture.handle as unknown as { context: { foundationReady: boolean } }).context;
+    context.foundationReady = false;
+    try {
+      await expect(fixture.coordinator.startPeerSession(
+        fixture.handle,
+        source.conversationId,
+        { roleId: "default", task: "do not start", idempotencyKey: randomUUID() },
+      )).rejects.toThrow(/recovery|foundation/i);
+      expect(fixture.runtime.createConversationIds).toEqual([source.conversationId]);
+    } finally {
+      running.release.resolve();
+      await running.completion;
+    }
   });
 
   it("prepares bounded cold history and role without executable resources", async () => {
@@ -12020,6 +12148,46 @@ describe("ProjectSessionCoordinator", () => {
     }));
   });
 
+  it("settles a receipt-only run as aborted before it can be resumed from a started source intent", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "piweb-session-abort-receipt-only-"));
+    temporaryDirectories.push(cwd);
+    const runtime = new FakeRuntime();
+    const roles = await RoleCatalog.open(runtime, join(cwd, "user", "roles.json"));
+    const store = await ProjectStore.open(cwd, "full_access");
+    const sourceId = randomUUID();
+    const targetId = randomUUID();
+    const targetRunId = randomUUID();
+    const operationId = randomUUID();
+    const sourceManager = await store.createConversation(sourceId, defaultProfile(roles));
+    const targetManager = await store.createConversation(targetId, defaultProfile(roles));
+    appendReservedCustomEntry(sourceManager, createMetaOperationEntry({
+      operationId, kind: "abort_session", targetConversationId: targetId,
+      runId: targetRunId, result: { aborted: true }, state: "started",
+      updatedAt: "2026-07-19T12:00:00.000Z",
+    }));
+    appendReservedCustomEntry(targetManager, createMessageDeliveryReceiptEntry({
+      messageId: randomUUID(), cardId: randomUUID(),
+      fromConversationId: sourceId, toConversationId: targetId,
+      sourceRunId: randomUUID(), targetRunId, kind: "message",
+      sentAt: "2026-07-19T12:00:01.000Z",
+      payloadFingerprint: "a".repeat(64), deliveredAt: "2026-07-19T12:00:02.000Z",
+    }));
+
+    const coordinator = new ProjectSessionCoordinator(runtime, roles);
+    const handle = await coordinator.acquireProject(cwd);
+    const fixture = { cwd, runtime, roles, registry: new ProjectStoreRegistry(), coordinator, handle };
+    fixtures.push(fixture);
+    await settleFixtureRecovery(fixture);
+
+    expect(runtime.createConversationIds).toEqual([]);
+    expect((await handle.project.inspectConversation(targetId)).runSettlements).toContainEqual(
+      expect.objectContaining({ runId: targetRunId, outcome: "aborted" }),
+    );
+    expect((await handle.project.inspectConversation(sourceId)).metaOperations).toContainEqual(
+      expect.objectContaining({ operationId, state: "completed" }),
+    );
+  });
+
   it("turns a durable marker and processing sidecar into a receipt before exact-run recovery", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "piweb-session-resume-marker-"));
     temporaryDirectories.push(cwd);
@@ -12314,6 +12482,97 @@ describe("ProjectSessionCoordinator", () => {
     expect(fixture.runtime.control(target.conversationId).received).toEqual([]);
     releaseTarget.resolve();
     await targetCompletion;
+  });
+
+  it("repairs a settled delegation card from an exact target receipt without opening its actor", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "piweb-session-card-discovery-"));
+    temporaryDirectories.push(cwd);
+    const runtime = new FakeRuntime();
+    const roles = await RoleCatalog.open(runtime, join(cwd, "user", "roles.json"));
+    const store = await ProjectStore.open(cwd, "full_access");
+    const sourceId = randomUUID();
+    const targetId = randomUUID();
+    const cardId = randomUUID();
+    const messageId = randomUUID();
+    const targetRunId = randomUUID();
+    const sentAt = "2026-07-19T12:00:00.000Z";
+    const sourceManager = await store.createConversation(sourceId, defaultProfile(roles));
+    const targetManager = await store.createConversation(targetId, defaultProfile(roles));
+    const fromSnapshot = { conversationId: sourceId, role: { id: "default", name: "Default" } };
+    const toSnapshot = { conversationId: targetId, role: { id: "default", name: "Default" } };
+    appendReservedCustomEntry(sourceManager, createConversationCardEntry({
+      cardId, kind: "delegation_task", body: "finish the delegated task",
+      fromSnapshot, toSnapshot, state: "running", messageId,
+      runId: targetRunId, updatedAt: sentAt,
+    }));
+    appendReservedCustomEntry(targetManager, createMessageDeliveryReceiptEntry({
+      messageId, cardId, fromConversationId: sourceId, toConversationId: targetId,
+      sourceRunId: randomUUID(), targetRunId, kind: "delegation_task", sentAt,
+      payloadFingerprint: "a".repeat(64), deliveredAt: "2026-07-19T12:00:01.000Z",
+    }));
+    appendReservedCustomEntry(targetManager, createMessageDeliveryReceiptEntry({
+      messageId: randomUUID(), cardId: randomUUID(),
+      fromConversationId: sourceId, toConversationId: targetId,
+      sourceRunId: randomUUID(), targetRunId, kind: "delegation_task", sentAt,
+      payloadFingerprint: "b".repeat(64), deliveredAt: "2026-07-19T12:00:01.000Z",
+    }));
+    appendReservedCustomEntry(targetManager, createRunSettlementEntry({
+      runId: targetRunId, outcome: "completed", finalText: "done",
+      settledAt: "2026-07-19T12:00:02.000Z",
+    }));
+
+    const coordinator = new ProjectSessionCoordinator(runtime, roles);
+    const handle = await coordinator.acquireProject(cwd);
+    const fixture = { cwd, runtime, roles, registry: new ProjectStoreRegistry(), coordinator, handle };
+    fixtures.push(fixture);
+    await settleFixtureRecovery(fixture);
+
+    expect(runtime.createConversationIds).toEqual([]);
+    const cards = (await handle.project.inspectConversation(sourceId)).cards;
+    expect(cards).toHaveLength(1);
+    expect(cards[0]).toMatchObject({
+      cardId, state: "completed", runId: targetRunId, result: "done",
+    });
+  });
+
+  it("does not inspect an ordinary delivered card and settled receipt as recovery work", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "piweb-session-delivered-discovery-"));
+    temporaryDirectories.push(cwd);
+    const runtime = new FakeRuntime();
+    const roles = await RoleCatalog.open(runtime, join(cwd, "user", "roles.json"));
+    const store = await ProjectStore.open(cwd, "full_access");
+    const sourceId = randomUUID();
+    const targetId = randomUUID();
+    const cardId = randomUUID();
+    const messageId = randomUUID();
+    const targetRunId = randomUUID();
+    const sentAt = "2026-07-19T12:00:00.000Z";
+    const sourceManager = await store.createConversation(sourceId, defaultProfile(roles));
+    const targetManager = await store.createConversation(targetId, defaultProfile(roles));
+    appendReservedCustomEntry(sourceManager, createConversationCardEntry({
+      cardId, kind: "message", body: "already delivered",
+      fromSnapshot: { conversationId: sourceId, role: { id: "default", name: "Default" } },
+      toSnapshot: { conversationId: targetId, role: { id: "default", name: "Default" } },
+      state: "delivered", messageId, runId: targetRunId, updatedAt: sentAt,
+    }));
+    appendReservedCustomEntry(targetManager, createMessageDeliveryReceiptEntry({
+      messageId, cardId, fromConversationId: sourceId, toConversationId: targetId,
+      sourceRunId: randomUUID(), targetRunId, kind: "message", sentAt,
+      payloadFingerprint: "a".repeat(64), deliveredAt: "2026-07-19T12:00:01.000Z",
+    }));
+    appendReservedCustomEntry(targetManager, createRunSettlementEntry({
+      runId: targetRunId, outcome: "completed", finalText: "done",
+      settledAt: "2026-07-19T12:00:02.000Z",
+    }));
+    const inspect = vi.spyOn(ProjectStore.prototype, "inspectConversation");
+    const coordinator = new ProjectSessionCoordinator(runtime, roles);
+    const handle = await coordinator.acquireProject(cwd);
+    const fixture = { cwd, runtime, roles, registry: new ProjectStoreRegistry(), coordinator, handle };
+    fixtures.push(fixture);
+    await settleFixtureRecovery(fixture);
+
+    expect(inspect).not.toHaveBeenCalled();
+    expect(runtime.createConversationIds).toEqual([]);
   });
 
   it("recovers an unsettled receipt-only run without replaying a message body", async () => {
@@ -12713,6 +12972,7 @@ describe("ProjectSessionCoordinator", () => {
 
     it("rejects start when the createdBy parent is missing and there is no orchestration", async () => {
       const fixture = await createFixture();
+      await settleFixtureRecovery(fixture);
       const role = fixture.roles.getConversationRole("default");
 
       // B references a non-existent parent A.
@@ -12749,6 +13009,7 @@ describe("ProjectSessionCoordinator", () => {
 
     it("rejects a createdBy cycle before writing a sending card", async () => {
       const fixture = await createFixture();
+      await settleFixtureRecovery(fixture);
       const role = fixture.roles.getConversationRole("default");
 
       // A createdBy B, B createdBy A (cycle).
@@ -13845,6 +14106,7 @@ describe("ProjectSessionCoordinator", () => {
 
     it("rejects implicit lineage when the parent metadata is missing", async () => {
       const fixture = await createFixture();
+      await settleFixtureRecovery(fixture);
       const role = fixture.roles.getConversationRole("default");
       const parentId = randomUUID();
       await fixture.handle.project.createConversation(parentId);
@@ -14597,6 +14859,9 @@ describe("ProjectSessionCoordinator", () => {
         pumpTarget(context: object, conversationId: string): Promise<string>;
       }).pumpTarget(context, targetId);
       expect(pumpResult).toBe("no_work");
+      await expect(coordinator.prompt(
+        fixture.handle, targetId, randomUUID(), "must not bypass the abort fence",
+      )).rejects.toThrow(/abort recovery/i);
       expect(await coordinatorInbox(fixture.handle).get(messageId))
         .toMatchObject({ state: "processing" });
     } finally {
