@@ -34,7 +34,9 @@ import {
   MAX_PROJECT_CONVERSATION_PREVIEW_CHARACTERS,
 } from "../shared/protocol.js";
 import {
+  CONVERSATION_META_CUSTOM_TYPE,
   createConversationMetaEntry,
+  parseConversationMetaEntry,
   parseReservedConversationEntry,
   type ConversationMeta,
 } from "./conversation-meta.js";
@@ -50,10 +52,11 @@ import {
   validatePiSessionFile,
   type PiSessionFileInspection,
   type PiSessionFilePresentationInspection,
+  type ReadonlySessionEntry,
 } from "./session-file.js";
 
 const MANIFEST_VERSION = 2;
-const CONVERSATION_CATALOG_VERSION = 2;
+const CONVERSATION_CATALOG_VERSION = 3;
 const MAX_CONVERSATION_CATALOG_BYTES = 4 * 1024 * 1024;
 const PROJECT_STATE_DIRECTORY = ".piweb";
 const PROJECT_MANIFEST_FILE = "project.json";
@@ -90,6 +93,9 @@ interface CatalogConversationSummary {
   createdAt: string;
   updatedAt: string;
   messageCount: number;
+  rootConversationId?: string;
+  role?: ConversationSummary["role"];
+  createdBy?: ConversationMeta["createdBy"];
 }
 
 interface CatalogObservation {
@@ -104,6 +110,8 @@ interface CatalogObservation {
   header: CatalogHeaderEvidence;
   body: CatalogBodyEvidence;
   summary?: CatalogConversationSummary;
+  recoveryNeeded?: boolean;
+  explicitRootConversationId?: string;
   observedAt: string;
   diagnostic?: string;
 }
@@ -424,6 +432,9 @@ function parseCatalogConversationSummary(
     "createdAt",
     "updatedAt",
     "messageCount",
+    "rootConversationId",
+    "role",
+    "createdBy",
   ]);
   assertSessionId(value.id, "catalog summary id");
   if (
@@ -446,6 +457,32 @@ function parseCatalogConversationSummary(
   ) {
     throw new Error("catalog summary name is invalid");
   }
+  if (value.rootConversationId !== undefined) {
+    assertSessionId(value.rootConversationId, "catalog rootConversationId");
+  }
+  if (
+    value.role === undefined && value.createdBy !== undefined
+    || value.role !== undefined && value.createdBy === undefined
+  ) {
+    throw new Error("catalog role and createdBy must occur together");
+  }
+  let role: ConversationSummary["role"];
+  let createdBy: ConversationMeta["createdBy"] | undefined;
+  if (value.role !== undefined) {
+    if (!isRecord(value.role) || "systemPrompt" in value.role) {
+      throw new Error("catalog role must omit systemPrompt");
+    }
+    const parsed = parseConversationMetaEntry({
+      customType: CONVERSATION_META_CUSTOM_TYPE,
+      data: {
+        role: { ...value.role, systemPrompt: "" },
+        lifecycle: { kind: "normal" },
+        createdBy: value.createdBy,
+      },
+    }).data;
+    role = toDisplayRole(parsed.role);
+    createdBy = parsed.createdBy;
+  }
   return {
     id: value.id,
     ...(value.name === undefined ? {} : { name: value.name }),
@@ -453,6 +490,9 @@ function parseCatalogConversationSummary(
     createdAt: value.createdAt,
     updatedAt: value.updatedAt,
     messageCount: value.messageCount,
+    ...(value.rootConversationId === undefined
+      ? {} : { rootConversationId: value.rootConversationId }),
+    ...(role === undefined ? {} : { role, createdBy }),
   };
 }
 
@@ -464,6 +504,8 @@ function parseCatalogObservation(value: unknown): CatalogObservation {
     "header",
     "body",
     "summary",
+    "recoveryNeeded",
+    "explicitRootConversationId",
     "observedAt",
     "diagnostic",
   ]);
@@ -484,16 +526,17 @@ function parseCatalogObservation(value: unknown): CatalogObservation {
     "mtimeNs",
     "ctimeNs",
   ]);
-  const fingerprint: CatalogObservation["fingerprint"] = {
-    dev: String(value.fingerprint.dev),
-    ino: String(value.fingerprint.ino),
-    size: String(value.fingerprint.size),
-    mtimeNs: String(value.fingerprint.mtimeNs),
-    ctimeNs: String(value.fingerprint.ctimeNs),
-  };
-  if (Object.values(fingerprint).some((part) => !/^\d+$/.test(part))) {
+  const { dev, ino, size, mtimeNs, ctimeNs } = value.fingerprint;
+  if (
+    typeof dev !== "string" || !/^\d+$/.test(dev)
+    || typeof ino !== "string" || !/^\d+$/.test(ino)
+    || typeof size !== "string" || !/^\d+$/.test(size)
+    || typeof mtimeNs !== "string" || !/^\d+$/.test(mtimeNs)
+    || typeof ctimeNs !== "string" || !/^\d+$/.test(ctimeNs)
+  ) {
     throw new Error("catalog fingerprint must contain decimal strings");
   }
+  const fingerprint = { dev, ino, size, mtimeNs, ctimeNs };
   if (!isRecord(value.header)) throw new Error("catalog header must be an object");
   assertCatalogKeys(value.header, ["kind", "conversationId"]);
   let header: CatalogHeaderEvidence;
@@ -532,6 +575,23 @@ function parseCatalogObservation(value: unknown): CatalogObservation {
   ) {
     throw new Error("invalid catalog header cannot carry body evidence or summary");
   }
+  if (value.recoveryNeeded !== undefined) {
+    if (
+      typeof value.recoveryNeeded !== "boolean"
+      || value.body.kind !== "valid"
+      || summary?.role === undefined
+      || summary.createdBy === undefined
+      || summary.rootConversationId === undefined
+    ) {
+      throw new Error("catalog recovery observation is incomplete");
+    }
+  }
+  if (value.explicitRootConversationId !== undefined) {
+    assertSessionId(value.explicitRootConversationId, "catalog explicit root");
+    if (summary?.rootConversationId !== value.explicitRootConversationId) {
+      throw new Error("catalog explicit root does not match summary");
+    }
+  }
   if (!isCanonicalIsoDate(value.observedAt)) {
     throw new Error("catalog observedAt must be a canonical ISO timestamp");
   }
@@ -547,6 +607,10 @@ function parseCatalogObservation(value: unknown): CatalogObservation {
     header,
     body: { kind: value.body.kind },
     ...(summary === undefined ? {} : { summary }),
+    ...(value.recoveryNeeded === undefined
+      ? {} : { recoveryNeeded: value.recoveryNeeded }),
+    ...(value.explicitRootConversationId === undefined
+      ? {} : { explicitRootConversationId: value.explicitRootConversationId }),
     observedAt: value.observedAt,
     ...(value.diagnostic === undefined ? {} : { diagnostic: value.diagnostic }),
   };
@@ -595,11 +659,18 @@ async function readConversationCatalog(
   catalogPath: string,
 ): Promise<ConversationCatalog | undefined> {
   try {
-    const information = await stat(catalogPath, { bigint: true });
-    if (!information.isFile() || information.size > MAX_CONVERSATION_CATALOG_BYTES) {
+    const information = await lstat(catalogPath, { bigint: true });
+    if (
+      information.isSymbolicLink()
+      || !information.isFile()
+      || information.size > MAX_CONVERSATION_CATALOG_BYTES
+    ) {
       return undefined;
     }
-    return parseConversationCatalog(await readFile(catalogPath, "utf8"));
+    const raw = await readFile(catalogPath, "utf8");
+    return Buffer.byteLength(raw, "utf8") > MAX_CONVERSATION_CATALOG_BYTES
+      ? undefined
+      : parseConversationCatalog(raw);
   } catch {
     // This is a disposable observation cache. Corruption only forfeits cached
     // presentation and is rebuilt from the transcript without changing it.
@@ -807,7 +878,10 @@ function summariesEqual(
         summary.preview === other.preview &&
         summary.createdAt === other.createdAt &&
         summary.updatedAt === other.updatedAt &&
-        summary.messageCount === other.messageCount
+        summary.messageCount === other.messageCount &&
+        summary.rootConversationId === other.rootConversationId &&
+        JSON.stringify(summary.role) === JSON.stringify(other.role) &&
+        JSON.stringify(summary.createdBy) === JSON.stringify(other.createdBy)
       );
     })
   );
@@ -880,24 +954,18 @@ function projectedMessageActivityAt(
   return Number.isFinite(timestamp) ? timestamp : undefined;
 }
 
-/**
- * Mirrors Pi's per-file display summary without asking its whole-directory
- * index to rescan. Callers already own a verified SessionManager; this only
- * creates a disposable presentation projection from that manager's entries.
- */
-function toProjectedConversationSummary(
-  conversation: SessionManager,
-): ConversationSummary | undefined {
-  const header = conversation.getHeader();
-  const conversationId = conversation.getSessionId();
-  if (header === null || header.id !== conversationId) return undefined;
-  const createdAt = Date.parse(header.timestamp);
-  if (!Number.isFinite(createdAt)) return undefined;
-
+/** Mirrors Pi's per-file display summary from already validated entries. */
+function toProjectedConversationSummaryFromEntries(
+  conversationId: string,
+  headerTimestamp: string,
+  entries: readonly ReadonlySessionEntry[],
+  name?: string,
+): ConversationSummary {
+  const createdAt = Date.parse(headerTimestamp);
   let messageCount = 0;
   let firstMessage = "";
   let updatedAt = createdAt;
-  for (const entry of conversation.getEntries()) {
+  for (const entry of entries) {
     if (entry.type !== "message") continue;
     messageCount += 1;
     const message = entry.message as unknown;
@@ -910,15 +978,61 @@ function toProjectedConversationSummary(
 
   return {
     id: conversationId,
-    ...(conversation.getSessionName() === undefined
-      ? {}
-      : { name: conversation.getSessionName() }),
+    ...(name === undefined ? {} : { name }),
     preview: messageCount === 0 ? "" : firstMessage || "(no messages)",
     createdAt: new Date(createdAt).toISOString(),
     updatedAt: new Date(updatedAt).toISOString(),
     messageCount,
     compacting: false,
   };
+}
+
+function toProjectedConversationSummary(
+  conversation: SessionManager,
+): ConversationSummary | undefined {
+  const header = conversation.getHeader();
+  const conversationId = conversation.getSessionId();
+  if (header === null || header.id !== conversationId) return undefined;
+  return toProjectedConversationSummaryFromEntries(
+    conversationId,
+    header.timestamp,
+    conversation.getEntries(),
+    conversation.getSessionName(),
+  );
+}
+
+function toDisplayRole(role: ConversationMeta["role"]): NonNullable<ConversationSummary["role"]> {
+  return {
+    id: role.id,
+    revision: role.revision,
+    name: role.name,
+    description: role.description,
+    model: { ...role.model },
+    compactionModel: role.compactionModel === null
+      ? null : { ...role.compactionModel },
+    defaultThinkingLevel: role.defaultThinkingLevel,
+    defaultServiceTier: role.defaultServiceTier,
+    toolMode: role.toolMode,
+    canManageSessions: role.canManageSessions,
+  };
+}
+
+function recoveryNeeded(inspection: PiSessionFileInspection): boolean {
+  const settledRunIds = new Set(
+    inspection.runSettlements.map(({ runId }) => runId),
+  );
+  return inspection.metaOperations.some((operation) =>
+    operation.kind === "abort_session"
+    && operation.state === "started"
+    && operation.result.aborted
+  ) || inspection.messageDeliveryReceipts.some(
+    ({ targetRunId }) => !settledRunIds.has(targetRunId),
+  ) || inspection.cards.some((card) =>
+    card.state === "sending"
+    || card.state === "queued"
+    || card.state === "running"
+    || card.kind === "delegation_task" && card.state === "delivered"
+  );
 }
 
 export class ProjectStore {
@@ -1121,14 +1235,218 @@ export class ProjectStore {
     return this.enqueueConversationOperation(() => this.scanConversations());
   }
 
+  /** Complete display membership and recovery candidates, not a transcript or SDK index proof. */
+  discoverConversations(): Promise<{
+    conversations: ConversationSummary[];
+    recoveryConversationIds: string[];
+  }> {
+    return this.enqueueConversationOperation(() => this.scanConversationDiscovery());
+  }
+
+  private async scanConversationDiscovery(): Promise<{
+    conversations: ConversationSummary[];
+    recoveryConversationIds: string[];
+  }> {
+    for (let attempt = 0; attempt < MAX_INTEGRITY_PROOF_ATTEMPTS; attempt += 1) {
+      const projectionRevision = this.conversationProjectionRevision;
+      const prior = this.conversationCatalog;
+      try {
+        const files = await this.listSafeSessionFiles();
+        const priorByPath = new Map(prior?.observations.map((entry) => [
+          entry.relativePath, entry,
+        ]));
+        const observations: CatalogObservation[] = [];
+        const pathsById = new Map<string, string>();
+        for (const file of files) {
+          const evidence = await this.readSessionHeaderEvidence(file);
+          if (!fingerprintsEqual(file, evidence.file)) {
+            throw new SessionDirectoryChangedError();
+          }
+          const conversationId = evidence.conversationId;
+          if (conversationId === undefined) {
+            throw new Error(`Session file has an invalid header: ${file.path}`);
+          }
+          const previousPath = pathsById.get(conversationId);
+          if (previousPath !== undefined) {
+            throw new Error(
+              `Duplicate conversation identity ${conversationId}: ${previousPath} and ${file.path}`,
+            );
+          }
+          pathsById.set(conversationId, file.path);
+          const relativePath = this.catalogRelativePath(file);
+          const previous = priorByPath.get(relativePath);
+          if (
+            previous !== undefined
+            && previous.header.kind === "claims"
+            && previous.header.conversationId === conversationId
+            && previous.body.kind === "valid"
+            && previous.summary?.role !== undefined
+            && previous.summary.createdBy !== undefined
+            && previous.summary.rootConversationId !== undefined
+            && previous.recoveryNeeded !== undefined
+            && this.catalogFingerprintMatches(previous, file)
+          ) {
+            observations.push({
+              ...previous,
+              fingerprint: { ...previous.fingerprint },
+              header: { ...previous.header },
+              body: { ...previous.body },
+              summary: { ...previous.summary },
+            });
+            continue;
+          }
+
+          // This path has no matching v3 discovery observation. Parse its body
+          // once; the owned inspection is discarded after projecting display
+          // fields and the one recovery bit.
+          const { raw, inspection } = await this.readStableExpectedSessionFile(
+            file, conversationId, true,
+          );
+          const profile = inspection.conversationMeta;
+          if (profile === undefined) {
+            throw new Error(`Conversation ${conversationId} profile metadata is missing`);
+          }
+          const header = JSON.parse(raw.slice(0, raw.indexOf("\n"))) as {
+            timestamp: string;
+          };
+          let name: string | undefined;
+          for (const entry of inspection.entries) {
+            if (entry.type === "session_info") {
+              name = entry.name?.trim() || undefined;
+            }
+          }
+          const projected = toProjectedConversationSummaryFromEntries(
+            conversationId, header.timestamp, inspection.entries, name,
+          );
+          const summary: CatalogConversationSummary = {
+            id: conversationId,
+            ...(projected.name === undefined ? {} : {
+              name: [...projected.name].slice(0, MAX_PROJECT_CONVERSATION_NAME_CHARACTERS).join(""),
+            }),
+            preview: [...projected.preview].slice(0, MAX_PROJECT_CONVERSATION_PREVIEW_CHARACTERS).join(""),
+            createdAt: projected.createdAt,
+            updatedAt: projected.updatedAt,
+            messageCount: projected.messageCount,
+            role: toDisplayRole(profile.role),
+            createdBy: { ...profile.createdBy },
+          };
+          observations.push({
+            relativePath,
+            fingerprint: this.catalogFingerprint(file),
+            header: { kind: "claims", conversationId },
+            body: { kind: "valid" },
+            summary,
+            recoveryNeeded: recoveryNeeded(inspection),
+            ...(profile.orchestration === undefined ? {} : {
+              explicitRootConversationId: profile.orchestration.rootConversationId,
+            }),
+            observedAt: new Date().toISOString(),
+          });
+        }
+        const byId = new Map(observations.map((entry) => [
+          entry.summary!.id, entry,
+        ]));
+        const resolveRoot = (conversationId: string, chain: Set<string>): string => {
+          if (chain.has(conversationId)) {
+            throw new Error(`Orchestration parent cycle detected at ${conversationId}`);
+          }
+          const observation = byId.get(conversationId)!;
+          if (observation.explicitRootConversationId !== undefined) {
+            return observation.explicitRootConversationId;
+          }
+          const createdBy = observation.summary!.createdBy!;
+          if (createdBy.kind === "user") return conversationId;
+          if (!byId.has(createdBy.conversationId)) {
+            throw new Error(
+              `Cannot resolve orchestration for ${conversationId}: parent ${createdBy.conversationId} not found and no explicit orchestration`,
+            );
+          }
+          chain.add(conversationId);
+          return resolveRoot(createdBy.conversationId, chain);
+        };
+        for (const observation of observations) {
+          const summary = observation.summary!;
+          summary.rootConversationId = resolveRoot(summary.id, new Set());
+        }
+        const filesAfter = await this.listSafeSessionFiles();
+        if (!fingerprintSetsEqual(files, filesAfter)) {
+          throw new SessionDirectoryChangedError();
+        }
+        const namespace: NamespaceHeaderCensus = {
+          evidence: files.map((file, index) => ({
+            file,
+            conversationId: observations[index]!.summary!.id,
+          })),
+        };
+        const catalog: ConversationCatalog = {
+          version: CONVERSATION_CATALOG_VERSION,
+          coverage: { kind: "complete", generation: this.namespaceGeneration(namespace) },
+          observations,
+        };
+        try {
+          if (!await this.persistConversationCatalog(catalog, { expectedCurrent: prior })) {
+            continue;
+          }
+        } catch {
+          // The on-disk catalog is disposable; a write failure cannot turn
+          // stable transcript discovery into a missing-work observation.
+          this.conversationCatalog = undefined;
+        }
+        if (projectionRevision !== this.conversationProjectionRevision) {
+          continue;
+        }
+        this.publishConversationSummaries(
+          observations.map(({ summary }) => ({ ...summary!, compacting: false })),
+          projectionRevision,
+        );
+        return {
+          conversations: this.listConversations(),
+          recoveryConversationIds: observations
+            .filter(({ recoveryNeeded: needed }) => needed === true)
+            .map(({ summary }) => summary!.id)
+            .sort(),
+        };
+      } catch (error) {
+        if (
+          !(error instanceof SessionDirectoryChangedError)
+          && !(error instanceof SessionFileChangedError)
+          || attempt === MAX_INTEGRITY_PROOF_ATTEMPTS - 1
+        ) throw error;
+      }
+    }
+    throw new SessionDirectoryChangedError();
+  }
+
   private async scanConversations(): Promise<ConversationSummary[]> {
     const projectionRevision = this.conversationProjectionRevision;
     const information = await this.listSafeSessionInformation();
+    const discoveredById = new Map(
+      this.cachedCatalogConversations().map((summary) => [summary.id, summary]),
+    );
+    this.publishConversationSummaries(
+      toConversationSummaries(information).map((summary) => {
+        const discovered = discoveredById.get(summary.id);
+        return discovered?.role === undefined
+          ? summary
+          : {
+              ...summary,
+              rootConversationId: discovered.rootConversationId,
+              role: discovered.role,
+              createdBy: discovered.createdBy,
+            };
+      }),
+      projectionRevision,
+    );
+    return this.listConversations();
+  }
+
+  private publishConversationSummaries(
+    summaries: ConversationSummary[],
+    projectionRevision: number,
+  ): void {
     const overrides = [...this.conversationProjectionOverrides.values()]
       .filter((override) => override.revision > projectionRevision);
-    const summariesById = new Map(
-      toConversationSummaries(information).map((summary) => [summary.id, summary]),
-    );
+    const summariesById = new Map(summaries.map((summary) => [summary.id, summary]));
     for (const override of overrides) {
       summariesById.set(override.summary.id, { ...override.summary });
     }
@@ -1136,21 +1454,18 @@ export class ProjectStore {
       [...summariesById.values()].sort(compareConversationSummaries),
     );
     for (const override of overrides) {
-      const current = this.conversationProjectionOverrides.get(
-        override.summary.id,
-      );
+      const current = this.conversationProjectionOverrides.get(override.summary.id);
       if (current?.revision === override.revision) {
         this.conversationProjectionOverrides.delete(override.summary.id);
       }
     }
-    return this.listConversations();
   }
 
   /**
    * Updates the in-memory project projection for a verified, actor-owned
    * session without treating the mutable SDK directory index as authority.
-   * The catalog cache is deliberately discarded: it could otherwise preserve
-   * an older title across a later low-priority scrub.
+   * Only the projected file's observation is invalidated; unrelated v3
+   * discoveries remain reusable across actor events.
    */
   projectConversationSession(conversation: SessionManager): void {
     const sessionFile = conversation.getSessionFile();
@@ -1174,7 +1489,16 @@ export class ProjectStore {
       ].sort(compareConversationSummaries),
     );
     this.verifiedCatalog = undefined;
-    this.conversationCatalog = undefined;
+    if (this.conversationCatalog !== undefined) {
+      this.conversationCatalog = {
+        ...this.conversationCatalog,
+        observations: this.conversationCatalog.observations.filter(
+          (entry) => !pathsAreIdentical(
+            join(this.sessionDir, entry.relativePath), sessionFile,
+          ),
+        ),
+      };
+    }
   }
 
   private replaceConversations(conversations: ConversationSummary[]): void {
@@ -2050,6 +2374,16 @@ export class ProjectStore {
         options !== undefined
         && this.conversationCatalog !== options.expectedCurrent
       ) return;
+      // An oversized observation is still a successful discovery/proof; it
+      // simply forfeits the disposable cross-process acceleration.
+      if (
+        Buffer.byteLength(`${JSON.stringify(catalog, null, 2)}\n`, "utf8")
+        > MAX_CONVERSATION_CATALOG_BYTES
+      ) {
+        this.conversationCatalog = undefined;
+        persisted = true;
+        return;
+      }
       await this.assertStateDirectorySafe();
       await writeConversationCatalogAtomically(
         this.conversationCatalogPath,
@@ -2076,25 +2410,56 @@ export class ProjectStore {
         toConversationSummary(information),
       ]),
     );
+    const priorByPath = new Map(this.conversationCatalog?.observations.map(
+      (entry) => [entry.relativePath, entry],
+    ));
     const observations = catalog.files.map((file) => {
       const conversationId = catalog.validatedIdsByPath.get(file.pathKey);
       const summary = summariesByPath.get(file.pathKey);
       if (conversationId === undefined || summary === undefined) {
         throw new Error(`Verified catalog omitted a session identity: ${file.path}`);
       }
+      const relativePath = this.catalogRelativePath(file);
+      const previous = priorByPath.get(relativePath);
+      const reusable = previous !== undefined
+        && previous.header.kind === "claims"
+        && previous.header.conversationId === conversationId
+        && previous.recoveryNeeded !== undefined
+        && this.catalogFingerprintMatches(previous, file);
       return {
-        relativePath: this.catalogRelativePath(file),
+        relativePath,
         fingerprint: this.catalogFingerprint(file),
         header: { kind: "claims" as const, conversationId },
         body: { kind: "valid" as const },
         summary: {
           id: summary.id,
-          ...(summary.name === undefined ? {} : { name: summary.name }),
-          preview: summary.preview,
+          ...(summary.name === undefined ? {} : {
+            name: [...summary.name].slice(0, MAX_PROJECT_CONVERSATION_NAME_CHARACTERS).join(""),
+          }),
+          preview: [...summary.preview].slice(0, MAX_PROJECT_CONVERSATION_PREVIEW_CHARACTERS).join(""),
           createdAt: summary.createdAt,
           updatedAt: summary.updatedAt,
           messageCount: summary.messageCount,
+          ...(reusable && previous.summary?.role !== undefined
+            && previous.summary.createdBy !== undefined
+            && previous.summary.rootConversationId !== undefined
+            ? {
+                role: previous.summary.role,
+                createdBy: previous.summary.createdBy,
+                rootConversationId: previous.summary.rootConversationId,
+              }
+            : {}),
         },
+        ...(reusable && previous.summary?.role !== undefined
+          && previous.summary.createdBy !== undefined
+          && previous.summary.rootConversationId !== undefined
+          ? {
+              recoveryNeeded: previous.recoveryNeeded,
+              ...(previous.explicitRootConversationId === undefined ? {} : {
+                explicitRootConversationId: previous.explicitRootConversationId,
+              }),
+            }
+          : {}),
         observedAt,
       } satisfies CatalogObservation;
     });

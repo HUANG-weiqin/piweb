@@ -10,6 +10,7 @@ import {
   rename,
   rm,
   symlink,
+  unlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -39,7 +40,9 @@ vi.mock("./conversation-meta.js", async (importOriginal) => {
 
 import {
   CONVERSATION_META_CUSTOM_TYPE,
+  createConversationCardEntry,
   createConversationMessageEntry,
+  createMetaOperationEntry,
   createMessageDeliveryReceiptEntry,
   createRunSettlementEntry,
   type ConversationMeta,
@@ -66,6 +69,7 @@ interface ProjectStoreIntegrityInternals {
   renameSessionFile(source: string, destination: string): Promise<void>;
   unlinkSessionFile(path: string): Promise<void>;
   readStableNamespaceHeaderCensus(): Promise<unknown>;
+  readSessionHeaderEvidence(expectedFile: { path: string }): Promise<unknown>;
 }
 
 async function createTemporaryDirectory(prefix: string): Promise<string> {
@@ -107,6 +111,28 @@ function sessionInformation(
     firstMessage: "",
     allMessagesText: "",
     ...overrides,
+  };
+}
+
+function discoveryMeta(
+  createdBy: ConversationMeta["createdBy"] = { kind: "user" },
+): ConversationMeta {
+  return {
+    role: {
+      id: "default",
+      revision: 1,
+      name: "Discovery",
+      description: "Display only",
+      systemPrompt: "Never persist this in the catalog.",
+      model: { provider: "provider", id: "model" },
+      compactionModel: null,
+      defaultThinkingLevel: "off",
+      defaultServiceTier: null,
+      toolMode: "read_only",
+      canManageSessions: false,
+    },
+    lifecycle: { kind: "normal" },
+    createdBy,
   };
 }
 
@@ -1923,6 +1949,404 @@ describe("ProjectStore", () => {
     );
   });
 
+  it("reopens an unchanged v3 discovery without rereading JSONL bodies or SDK listAll", async () => {
+    const cwd = await createTemporaryDirectory("piweb-discovery-reopen-");
+    const store = await ProjectStore.open(cwd);
+    const root = await store.createConversation(randomUUID(), discoveryMeta(), {
+      updateRecent: false,
+      refreshIndex: false,
+    });
+    const child = await store.createConversation(
+      randomUUID(),
+      discoveryMeta({ kind: "conversation", conversationId: root.getSessionId() }),
+      { updateRecent: false, refreshIndex: false },
+    );
+    root.appendMessage({ role: "user", content: "hello", timestamp: 1 });
+    const listAll = vi.spyOn(SessionManager, "listAll");
+    const first = await store.discoverConversations();
+    expect(first.recoveryConversationIds).toEqual([]);
+    expect(first.conversations).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: root.getSessionId(),
+        rootConversationId: root.getSessionId(),
+        createdBy: { kind: "user" },
+        role: expect.objectContaining({ name: "Discovery" }),
+      }),
+      expect.objectContaining({
+        id: child.getSessionId(),
+        rootConversationId: root.getSessionId(),
+        createdBy: { kind: "conversation", conversationId: root.getSessionId() },
+      }),
+    ]));
+    expect(JSON.stringify(first)).not.toContain(discoveryMeta().role.systemPrompt);
+    const reopened = await ProjectStore.open(cwd);
+    const fullRead = vi.spyOn(reopened as never, "readStableExpectedSessionFile");
+    expect(await reopened.discoverConversations()).toEqual(first);
+    expect(reopened.listConversations()).toEqual(first.conversations);
+    expect(fullRead).not.toHaveBeenCalled();
+    expect(listAll).not.toHaveBeenCalled();
+    const catalog = await readFile(join(store.stateDir, "conversation-catalog.json"), "utf8");
+    expect(JSON.parse(catalog).version).toBe(3);
+    expect(catalog).not.toContain(discoveryMeta().role.systemPrompt);
+  });
+
+  it("projects a frozen explicit root when a delegation parent is no longer present", async () => {
+    const cwd = await createTemporaryDirectory("piweb-discovery-explicit-root-");
+    const store = await ProjectStore.open(cwd);
+    const rootId = randomUUID();
+    const parentId = randomUUID();
+    const meta = discoveryMeta({ kind: "conversation", conversationId: parentId });
+    meta.orchestration = { rootConversationId: rootId, depth: 2 };
+    const child = await store.createConversation(randomUUID(), meta, {
+      updateRecent: false, refreshIndex: false,
+    });
+    const discovered = await store.discoverConversations();
+    expect(discovered.conversations).toEqual([
+      expect.objectContaining({
+        id: child.getSessionId(), rootConversationId: rootId,
+        createdBy: { kind: "conversation", conversationId: parentId },
+      }),
+    ]);
+    const reopened = await ProjectStore.open(cwd);
+    expect((await reopened.discoverConversations()).conversations)
+      .toEqual(discovered.conversations);
+  });
+
+  it("rereads only an appended file and detects abort, receipt, and card recovery", async () => {
+    const cwd = await createTemporaryDirectory("piweb-discovery-changed-");
+    const store = await ProjectStore.open(cwd);
+    const stable = await store.createConversation(randomUUID(), discoveryMeta(), {
+      updateRecent: false, refreshIndex: false,
+    });
+    const changed = await store.createConversation(randomUUID(), discoveryMeta(), {
+      updateRecent: false, refreshIndex: false,
+    });
+    const source = await store.createConversation(randomUUID(), discoveryMeta(), {
+      updateRecent: false, refreshIndex: false,
+    });
+    await store.discoverConversations();
+    const reopened = await ProjectStore.open(cwd);
+    const fullRead = vi.spyOn(reopened as never, "readStableExpectedSessionFile");
+    const listAll = vi.spyOn(SessionManager, "listAll");
+    const targetRunId = randomUUID();
+    const abort = createMetaOperationEntry({
+      kind: "abort_session", operationId: randomUUID(),
+      targetConversationId: changed.getSessionId(), runId: randomUUID(),
+      state: "started", result: { aborted: true },
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    });
+    changed.appendCustomEntry(abort.customType, abort.data);
+    const receipt = createMessageDeliveryReceiptEntry({
+      messageId: randomUUID(), cardId: randomUUID(),
+      fromConversationId: source.getSessionId(),
+      toConversationId: changed.getSessionId(),
+      sourceRunId: randomUUID(), targetRunId,
+      kind: "message", sentAt: "2026-01-01T00:00:00.000Z",
+      payloadFingerprint: "a".repeat(64),
+      deliveredAt: "2026-01-01T00:00:01.000Z",
+    });
+    changed.appendCustomEntry(receipt.customType, receipt.data);
+    const card = createConversationCardEntry({
+      cardId: randomUUID(), kind: "message", body: "pending",
+      fromSnapshot: { conversationId: source.getSessionId(), role: { id: "default", name: "Discovery" } },
+      toSnapshot: { conversationId: changed.getSessionId(), role: { id: "default", name: "Discovery" } },
+      state: "sending", updatedAt: "2026-01-01T00:00:02.000Z",
+    });
+    source.appendCustomEntry(card.customType, card.data);
+    const discovered = await reopened.discoverConversations();
+    expect(discovered.recoveryConversationIds.sort()).toEqual([
+      changed.getSessionId(), source.getSessionId(),
+    ].sort());
+    expect(fullRead.mock.calls.map(([file]) => basename((file as { path: string }).path)).sort())
+      .toEqual([basename(changed.getSessionFile()!), basename(source.getSessionFile()!)].sort());
+    expect(listAll).not.toHaveBeenCalled();
+    expect(discovered.conversations.map(({ id }) => id)).toContain(stable.getSessionId());
+  });
+
+  it("does not select settled receipts, completed delegations, or delivered ordinary cards", async () => {
+    const cwd = await createTemporaryDirectory("piweb-discovery-candidates-");
+    const store = await ProjectStore.open(cwd);
+    const quiescent = await store.createConversation(randomUUID(), discoveryMeta(), {
+      updateRecent: false, refreshIndex: false,
+    });
+    const delegation = await store.createConversation(randomUUID(), discoveryMeta(), {
+      updateRecent: false, refreshIndex: false,
+    });
+    const receiptOnly = await store.createConversation(randomUUID(), discoveryMeta(), {
+      updateRecent: false, refreshIndex: false,
+    });
+    const abortOnly = await store.createConversation(randomUUID(), discoveryMeta(), {
+      updateRecent: false, refreshIndex: false,
+    });
+    const makeCard = (sourceId: string, kind: "message" | "delegation_task", state: "delivered" | "completed") =>
+      createConversationCardEntry({
+        cardId: randomUUID(), kind, body: "historical",
+        fromSnapshot: { conversationId: sourceId, role: { id: "default", name: "Discovery" } },
+        toSnapshot: { conversationId: delegation.getSessionId(), role: { id: "default", name: "Discovery" } },
+        state, updatedAt: "2026-01-01T00:00:00.000Z",
+      });
+    for (const [kind, state] of [
+      ["message", "delivered"],
+      ["delegation_task", "completed"],
+    ] as const) {
+      const card = makeCard(quiescent.getSessionId(), kind, state);
+      quiescent.appendCustomEntry(card.customType, card.data);
+    }
+    const settledRunId = randomUUID();
+    for (const [manager, targetRunId] of [
+      [quiescent, settledRunId],
+      [receiptOnly, randomUUID()],
+    ] as const) {
+      const receipt = createMessageDeliveryReceiptEntry({
+        messageId: randomUUID(), cardId: randomUUID(),
+        fromConversationId: delegation.getSessionId(),
+        toConversationId: manager.getSessionId(),
+        sourceRunId: randomUUID(), targetRunId,
+        kind: "message", sentAt: "2026-01-01T00:00:00.000Z",
+        payloadFingerprint: "a".repeat(64),
+        deliveredAt: "2026-01-01T00:00:01.000Z",
+      });
+      manager.appendCustomEntry(receipt.customType, receipt.data);
+    }
+    const settlement = createRunSettlementEntry({
+      runId: settledRunId, outcome: "completed", finalText: "done",
+      settledAt: "2026-01-01T00:00:02.000Z",
+    });
+    quiescent.appendCustomEntry(settlement.customType, settlement.data);
+    const deliveredDelegation = makeCard(
+      delegation.getSessionId(), "delegation_task", "delivered",
+    );
+    delegation.appendCustomEntry(deliveredDelegation.customType, deliveredDelegation.data);
+    const abort = createMetaOperationEntry({
+      kind: "abort_session", operationId: randomUUID(),
+      targetConversationId: abortOnly.getSessionId(), runId: randomUUID(),
+      state: "started", result: { aborted: true },
+      updatedAt: "2026-01-01T00:00:03.000Z",
+    });
+    abortOnly.appendCustomEntry(abort.customType, abort.data);
+    const discovered = await store.discoverConversations();
+    expect(discovered.recoveryConversationIds).toEqual([
+      delegation.getSessionId(), receiptOnly.getSessionId(), abortOnly.getSessionId(),
+    ].sort());
+    expect(discovered.recoveryConversationIds).not.toContain(quiescent.getSessionId());
+  });
+
+  it("retains unchanged discovery rows across actor projections and complete proof publishing", async () => {
+    const cwd = await createTemporaryDirectory("piweb-discovery-projections-");
+    const store = await ProjectStore.open(cwd);
+    const first = await store.createConversation(randomUUID(), discoveryMeta(), {
+      updateRecent: false, refreshIndex: false,
+    });
+    const second = await store.createConversation(randomUUID(), discoveryMeta(), {
+      updateRecent: false, refreshIndex: false,
+    });
+    await store.discoverConversations();
+    second.appendSessionInfo("updated title");
+    store.projectConversationSession(second);
+    const read = vi.spyOn(store as never, "readStableExpectedSessionFile");
+    await store.discoverConversations();
+    expect(read.mock.calls.map(([file]) => basename((file as { path: string }).path)))
+      .toEqual([basename(second.getSessionFile()!)]);
+    read.mockClear();
+    await store.refreshConversations();
+    expect(store.listConversations()).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: first.getSessionId(),
+        role: expect.objectContaining({ name: "Discovery" }),
+      }),
+    ]));
+    const reopened = await ProjectStore.open(cwd);
+    const reopenedRead = vi.spyOn(reopened as never, "readStableExpectedSessionFile");
+    const discovered = await reopened.discoverConversations();
+    expect(reopenedRead).not.toHaveBeenCalled();
+    expect(discovered.conversations.map(({ id }) => id).sort())
+      .toEqual([first.getSessionId(), second.getSessionId()].sort());
+  });
+
+  it("does not publish an older discovery over a newer actor projection", async () => {
+    const cwd = await createTemporaryDirectory("piweb-discovery-projection-race-");
+    const store = await ProjectStore.open(cwd);
+    const conversation = await store.createConversation(randomUUID(), discoveryMeta(), {
+      updateRecent: false, refreshIndex: false,
+    });
+    await store.discoverConversations();
+    conversation.appendSessionInfo("first title");
+    const entered = createDeferred<void>();
+    const release = createDeferred<void>();
+    const catalogOwner = store as unknown as {
+      persistConversationCatalog(
+        catalog: unknown,
+        options: { expectedCurrent: unknown },
+      ): Promise<boolean>;
+    };
+    const originalPersist = catalogOwner.persistConversationCatalog.bind(store);
+    vi.spyOn(catalogOwner, "persistConversationCatalog")
+      .mockImplementationOnce(async (catalog, options) => {
+        entered.resolve();
+        await release.promise;
+        return originalPersist(catalog, options);
+      });
+    const discovering = store.discoverConversations();
+    await entered.promise;
+    conversation.appendSessionInfo("newer title");
+    store.projectConversationSession(conversation);
+    release.resolve();
+    const result = await discovering;
+    expect(result.conversations).toEqual([
+      expect.objectContaining({ id: conversation.getSessionId(), name: "newer title" }),
+    ]);
+  });
+
+  it.each(["missing", "v2", "corrupt"] as const)(
+    "rebuilds a %s discovery catalog from validated JSONL",
+    async (kind) => {
+      const cwd = await createTemporaryDirectory("piweb-discovery-rebuild-");
+      const store = await ProjectStore.open(cwd);
+      const conversation = await store.createConversation(randomUUID(), discoveryMeta(), {
+        updateRecent: false, refreshIndex: false,
+      });
+      await store.discoverConversations();
+      const catalogPath = join(store.stateDir, "conversation-catalog.json");
+      if (kind === "missing") {
+        await unlink(catalogPath);
+      } else if (kind === "v2") {
+        const catalog = JSON.parse(await readFile(catalogPath, "utf8")) as { version: number };
+        catalog.version = 2;
+        await writeFile(catalogPath, JSON.stringify(catalog));
+      } else {
+        await writeFile(catalogPath, "not JSON\n");
+      }
+      const reopened = await ProjectStore.open(cwd);
+      const fullRead = vi.spyOn(reopened as never, "readStableExpectedSessionFile");
+      const discovered = await reopened.discoverConversations();
+      expect(discovered.conversations.map(({ id }) => id)).toEqual([conversation.getSessionId()]);
+      expect(fullRead).toHaveBeenCalledTimes(1);
+      expect(JSON.parse(await readFile(catalogPath, "utf8")).version).toBe(3);
+    },
+  );
+
+  it("rejects duplicate header claims and invalid JSONL instead of returning a negative discovery", async () => {
+    const cwd = await createTemporaryDirectory("piweb-discovery-duplicates-");
+    const store = await ProjectStore.open(cwd);
+    const conversation = await store.createConversation(randomUUID(), discoveryMeta(), {
+      updateRecent: false, refreshIndex: false,
+    });
+    await store.discoverConversations();
+    const extraPath = join(store.sessionDir, "extra.jsonl");
+    await writeFile(extraPath, await readFile(conversation.getSessionFile()!, "utf8"));
+    await expect(store.discoverConversations()).rejects.toThrow("Duplicate conversation identity");
+    await writeFile(extraPath, "not a JSONL header\n");
+    await expect(store.discoverConversations()).rejects.toThrow("invalid header");
+    await unlink(extraPath);
+    await writeFile(
+      conversation.getSessionFile()!,
+      `${await readFile(conversation.getSessionFile()!, "utf8")}{"type":"message"\n`,
+    );
+    await expect(store.discoverConversations()).rejects.toThrow("invalid JSON");
+  });
+
+  it("rechecks renamed and replaced paths instead of trusting old observations", async () => {
+    const cwd = await createTemporaryDirectory("piweb-discovery-path-change-");
+    const store = await ProjectStore.open(cwd);
+    const conversation = await store.createConversation(randomUUID(), discoveryMeta(), {
+      updateRecent: false, refreshIndex: false,
+    });
+    await store.discoverConversations();
+    const originalPath = conversation.getSessionFile()!;
+    const renamedPath = join(store.sessionDir, "renamed.jsonl");
+    await rename(originalPath, renamedPath);
+    const renamedRead = vi.spyOn(store as never, "readStableExpectedSessionFile");
+    expect((await store.discoverConversations()).conversations.map(({ id }) => id))
+      .toEqual([conversation.getSessionId()]);
+    expect(renamedRead).toHaveBeenCalledTimes(1);
+    renamedRead.mockClear();
+    const replacementPath = join(store.sessionDir, "replacement.tmp");
+    await writeFile(replacementPath, await readFile(renamedPath, "utf8"));
+    await rename(replacementPath, renamedPath);
+    expect((await store.discoverConversations()).conversations.map(({ id }) => id))
+      .toEqual([conversation.getSessionId()]);
+    expect(renamedRead).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries a namespace rename during header observation", async () => {
+    const cwd = await createTemporaryDirectory("piweb-discovery-header-race-");
+    const store = await ProjectStore.open(cwd);
+    const conversation = await store.createConversation(randomUUID(), discoveryMeta(), {
+      updateRecent: false, refreshIndex: false,
+    });
+    await store.discoverConversations();
+    const internals = store as unknown as ProjectStoreIntegrityInternals;
+    const originalHeader = internals.readSessionHeaderEvidence.bind(store);
+    const renamed = join(store.sessionDir, "renamed-during-census.jsonl");
+    const header = vi.spyOn(internals, "readSessionHeaderEvidence")
+      .mockImplementationOnce(async (file) => {
+        const evidence = await originalHeader(file);
+        await rename(file.path, renamed);
+        return evidence;
+      });
+    const discovered = await store.discoverConversations();
+    expect(header.mock.calls.length).toBeGreaterThan(1);
+    expect(discovered.conversations.map(({ id }) => id))
+      .toEqual([conversation.getSessionId()]);
+    expect(discovered.recoveryConversationIds).toEqual([]);
+  });
+
+  it("retries a body changed during discovery and never caches a false negative", async () => {
+    const cwd = await createTemporaryDirectory("piweb-discovery-race-");
+    const store = await ProjectStore.open(cwd);
+    const conversation = await store.createConversation(randomUUID(), discoveryMeta(), {
+      updateRecent: false, refreshIndex: false,
+    });
+    await store.discoverConversations();
+    conversation.appendSessionInfo("changed before scan");
+    const internals = store as unknown as ProjectStoreIntegrityInternals;
+    const originalRead = internals.readStableExpectedSessionFile.bind(store);
+    const abort = createMetaOperationEntry({
+      kind: "abort_session", operationId: randomUUID(),
+      targetConversationId: conversation.getSessionId(), runId: randomUUID(),
+      state: "started", result: { aborted: true },
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    });
+    const read = vi.spyOn(internals, "readStableExpectedSessionFile")
+      .mockImplementationOnce(async (file, id) => {
+        conversation.appendCustomEntry(abort.customType, abort.data);
+        return originalRead(file, id);
+      });
+    expect((await store.discoverConversations()).recoveryConversationIds)
+      .toEqual([conversation.getSessionId()]);
+    expect(read.mock.calls.length).toBeGreaterThan(1);
+  });
+
+  it("keeps a complete discovery result when its disposable catalog write fails", async () => {
+    const cwd = await createTemporaryDirectory("piweb-discovery-cache-write-");
+    const store = await ProjectStore.open(cwd);
+    const conversation = await store.createConversation(randomUUID(), discoveryMeta(), {
+      updateRecent: false, refreshIndex: false,
+    });
+    vi.spyOn(store as never, "persistConversationCatalog")
+      .mockRejectedValueOnce(new Error("cache is unwritable"));
+    const result = await store.discoverConversations();
+    expect(result.conversations.map(({ id }) => id)).toEqual([conversation.getSessionId()]);
+    expect(result.recoveryConversationIds).toEqual([]);
+  });
+
+  it("does not use persisted discovery as exact-open or full-audit proof", async () => {
+    const cwd = await createTemporaryDirectory("piweb-discovery-proof-boundary-");
+    const store = await ProjectStore.open(cwd);
+    const conversation = await store.createConversation(randomUUID(), discoveryMeta(), {
+      updateRecent: false, refreshIndex: false,
+    });
+    await store.discoverConversations();
+    const exactRead = vi.spyOn(store as never, "readStableExpectedSessionFile");
+    await store.openConversation(conversation.getSessionId(), { updateRecent: false });
+    expect(exactRead).toHaveBeenCalled();
+    const listAll = vi.spyOn(SessionManager, "listAll");
+    const fullRead = vi.spyOn(store as never, "readValidatedSessionFile");
+    await store.refreshConversations();
+    expect(listAll).toHaveBeenCalledTimes(1);
+    expect(fullRead).toHaveBeenCalledTimes(1);
+  });
+
   it("persists a disposable path-keyed catalog and rebuilds past corruption", async () => {
     const cwd = await createTemporaryDirectory("piweb-observation-catalog-");
     const store = await ProjectStore.open(cwd);
@@ -1998,7 +2422,7 @@ describe("ProjectStore", () => {
         summary?: { id: string };
       }>;
     };
-    expect(catalog.version).toBe(2);
+    expect(catalog.version).toBe(3);
     expect(catalog.observations).toEqual(expect.arrayContaining([
       expect.objectContaining({
         header: { kind: "claims", conversationId: conversation.getSessionId() },
@@ -2028,7 +2452,7 @@ describe("ProjectStore", () => {
     expect(reopened.listConversations()).toEqual([]);
     await expect(reopened.scrubOneCatalogObservation()).resolves.toBe(true);
     expect(JSON.parse(await readFile(catalogPath, "utf8"))).toMatchObject({
-      version: 2,
+      version: 3,
       observations: [expect.objectContaining({
         header: {
           kind: "claims",
