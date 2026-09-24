@@ -205,7 +205,7 @@ Project store handle 按 canonical cwd 引用计数；ProjectSessionCoordinator 
 ## 当前边界
 
 - 没有 archive、用户多选批量删除、fork/import、附件和跨设备同步；Agent 会话列表只有有界 cursor，不构成浏览器历史分页。
-- Agent 完整列表、显式 audit 与 cascade delete 仍完整验证全部 JSONL 并与 Pi `listAll()` 对照；完整证明回执只在进程内复用。启动/浏览器另用 path-keyed catalog v3：持久化有界展示摘要（role 不含 systemPrompt）和单一 `recoveryNeeded`。只有 canonical path、dev/ino/size/mtimeNs/ctimeNs 与 header 完全相等才跨重启复用发现；每轮仍重证安全目录、稳定 header 全集与唯一 identity。缺失、旧版、损坏或变更只使对应文件重读；不能把 I/O/inspection 失败记成无工作。发现不调用 SDK `listAll()`，不填充完整证明回执，也不能替代 exact target proof。目录观察提交仍受 owner/CAS 与 actor projection revision 保护；一个活跃文件的更新不得丢弃全部未变文件观察。跨重启负向发现要求 catalog 为宿主产生且未被另行篡改；格式合法的假阴性 cache 篡改及 same-fingerprint ABA 不在保证内。删除 cache 安全但会重新建立观察。
+- Agent 完整列表、显式 audit 与 cascade delete 仍完整验证全部 JSONL 并与 Pi `listAll()` 对照；完整证明回执只在进程内复用。启动/浏览器另用 path-keyed catalog v3：持久化有界展示摘要（role 不含 systemPrompt）和单一 `recoveryNeeded`。只有 canonical path、dev/ino/size/mtimeNs/ctimeNs 与 header 完全相等才跨重启复用发现；每轮仍重证安全目录、稳定 header 全集与唯一 identity。缺失、旧版、损坏或变更只使对应文件重读；不能把 I/O/inspection 失败记成无工作。发现不调用 SDK `listAll()`，不填充完整证明回执，也不能替代 exact target proof。目录观察提交仍受 owner/CAS 与 actor projection revision 保护；一个活跃文件的更新不得丢弃全部未变文件观察。跨重启负向发现要求 catalog 为宿主产生且未被另行篡改；格式合法的假阴性 cache 篡改及 same-fingerprint ABA 不在保证内。持久 cache 仍限 4 MiB：超限只保存能装入预算的稳定观察前缀并标 `coverage: "unknown"`，进程内保留完整观察；冷重启只重读预算外的未知行，不因超限清空所有加速。该 cache coverage 不替代当轮完整成员证明。删除 cache 安全但会重新建立观察。
 - 压缩只减少模型上下文，不物理缩小 JSONL。单会话 cold open 仍需目标完整校验与 SDK 全量加载；本次目录发现优化不承诺这笔成本随当前上下文大小缩小，也不删除旧消息、图片或账本。
 - 没有跨进程 writer lock 和断电级 durability。
 - Pi JSONL header eager materialization 依赖锁定 SDK 的 v3 session format；升级 SDK 时必须用测试验证 header/open/list 行为。
