@@ -1392,6 +1392,9 @@ export class ProjectStore {
           // stable transcript discovery into a missing-work observation.
           this.conversationCatalog = undefined;
         }
+        if (!fingerprintSetsEqual(files, await this.listSafeSessionFiles())) {
+          throw new SessionDirectoryChangedError();
+        }
         if (projectionRevision !== this.conversationProjectionRevision) {
           continue;
         }

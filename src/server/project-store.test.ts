@@ -2197,6 +2197,43 @@ describe("ProjectStore", () => {
     ]);
   });
 
+  it("rechecks the namespace after a cache write before returning a negative discovery", async () => {
+    const cwd = await createTemporaryDirectory("piweb-discovery-persist-race-");
+    const store = await ProjectStore.open(cwd);
+    const conversation = await store.createConversation(randomUUID(), discoveryMeta(), {
+      updateRecent: false, refreshIndex: false,
+    });
+    await store.discoverConversations();
+    conversation.appendSessionInfo("changed before discovery");
+    const entered = createDeferred<void>();
+    const release = createDeferred<void>();
+    const catalogOwner = store as unknown as {
+      persistConversationCatalog(
+        catalog: unknown,
+        options: { expectedCurrent: unknown },
+      ): Promise<boolean>;
+    };
+    const originalPersist = catalogOwner.persistConversationCatalog.bind(store);
+    vi.spyOn(catalogOwner, "persistConversationCatalog")
+      .mockImplementationOnce(async (catalog, options) => {
+        entered.resolve();
+        await release.promise;
+        return originalPersist(catalog, options);
+      });
+    const discovering = store.discoverConversations();
+    await entered.promise;
+    const abort = createMetaOperationEntry({
+      kind: "abort_session", operationId: randomUUID(),
+      targetConversationId: conversation.getSessionId(), runId: randomUUID(),
+      state: "started", result: { aborted: true },
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    });
+    conversation.appendCustomEntry(abort.customType, abort.data);
+    release.resolve();
+    expect((await discovering).recoveryConversationIds)
+      .toEqual([conversation.getSessionId()]);
+  });
+
   it.each(["missing", "v2", "corrupt"] as const)(
     "rebuilds a %s discovery catalog from validated JSONL",
     async (kind) => {
