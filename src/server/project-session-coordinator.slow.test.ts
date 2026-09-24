@@ -10797,6 +10797,7 @@ describe("ProjectSessionCoordinator", () => {
         .find(({ id }) => id === child.conversationId)
         ?.activity.kind === "idle",
     "child initial run to settle");
+    await settleFixtureRecovery(fixture);
     const inbox = coordinatorInbox(fixture.handle);
     await inbox.markTargetDeleted(
       root.conversationId,
@@ -10822,21 +10823,23 @@ describe("ProjectSessionCoordinator", () => {
       fixture.handle,
       child.conversationId,
     );
-    await (fixture.coordinator as unknown as {
-      retryDurableDeletions(context: unknown): Promise<void>;
-    }).retryDurableDeletions(context);
-    let ids = (await fixture.coordinator.listSessions(fixture.handle))
-      .map(({ id }) => id);
-    expect(ids).toEqual(expect.arrayContaining([
-      root.conversationId,
-      child.conversationId,
-    ]));
-
-    releaseLifecycle.resolve();
-    await lifecycleBlock;
+    try {
+      await (fixture.coordinator as unknown as {
+        retryDurableDeletions(context: unknown): Promise<void>;
+      }).retryDurableDeletions(context);
+      const ids = (await fixture.coordinator.listSessions(fixture.handle))
+        .map(({ id }) => id);
+      expect(ids).toEqual(expect.arrayContaining([
+        root.conversationId,
+        child.conversationId,
+      ]));
+    } finally {
+      releaseLifecycle.resolve();
+      await lifecycleBlock;
+    }
     await childDeletion;
     await waitUntil(async () => {
-      ids = (await fixture.coordinator.listSessions(fixture.handle))
+      const ids = (await fixture.coordinator.listSessions(fixture.handle))
         .map(({ id }) => id);
       return !ids.includes(root.conversationId)
         && !ids.includes(child.conversationId)
