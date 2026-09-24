@@ -163,6 +163,21 @@ async function createPendingExternalEnvelope(
   return { source, targetId, messageId, inbox };
 }
 
+/**
+ * Startup recovery yields between steps now, so a test that mutates durable
+ * state straight after `createFixture()` can race its own project's recovery
+ * pass. Wait for the fixture's pass to finish before the scenario starts.
+ */
+async function settleFixtureRecovery(fixture: Fixture): Promise<void> {
+  const context = (fixture.handle as unknown as {
+    context: { backgroundTasks: Set<Promise<void>> };
+  }).context;
+  await waitUntil(
+    () => context.backgroundTasks.size === 0,
+    "startup recovery to settle before the scenario mutates durable state",
+  );
+}
+
 describe("ProjectSessionCoordinator", () => {
   it("uses one LSP workspace for all queries without a trust resolver and disposes it after actor teardown", async () => {
     const fixture = await createFixture();
@@ -10780,6 +10795,7 @@ describe("ProjectSessionCoordinator", () => {
 
   it("does not drop failed inbox recovery for a transient delete reservation", async () => {
     const fixture = await createFixture();
+    await settleFixtureRecovery(fixture);
     const source = await fixture.coordinator.createUserConversation(
       fixture.handle,
       { roleId: "default" },
@@ -13184,6 +13200,7 @@ describe("ProjectSessionCoordinator", () => {
 
     it("terminalizes a source with a separate durable fence before clearing an absent target sidecar", async () => {
       const fixture = await createFixture();
+      await settleFixtureRecovery(fixture);
       const source = await fixture.coordinator.createUserConversation(
         fixture.handle,
         { roleId: "default" },

@@ -5790,7 +5790,11 @@ describe("PiConnection coordinated project view", () => {
       expect(calls).toHaveLength(1);
       releaseFirst.resolve();
       await firstCensus;
-      await vi.waitFor(() => expect(calls).toHaveLength(2));
+      // Recovery publishes its own project change now that it yields between
+      // steps, which can add an independent census after the pair under test;
+      // what matters here is that the two back-to-back refreshes coalesce into
+      // one active and one trailing census.
+      await vi.waitFor(() => expect(calls.length).toBeGreaterThanOrEqual(2));
       expect(calls[0]).toEqual([firstTarget.conversationId]);
       expect(calls[1]).toEqual([
         firstTarget.conversationId,
