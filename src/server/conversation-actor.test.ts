@@ -1096,9 +1096,10 @@ describe("ConversationActor", () => {
           "  会话首轮自动命名  \n这行解释不应进入标题",
         ));
         await vi.waitFor(() => expect(manager.getSessionName()).toBe("会话首轮自动命名"));
-        expect(order.filter((step) => step !== "refresh")).toEqual([
+        expect(order).toEqual([
           "title",
           "prompt",
+          "project",
           "name",
           "project",
         ]);
@@ -1323,6 +1324,8 @@ describe("ConversationActor", () => {
         expect(runtime.session.promptCalls).toHaveLength(1);
         expect(runtime.session.abortCalls).toBe(1);
         expect(runtime.titleCalls[0]?.[2]?.signal?.aborted).toBe(true);
+        expect(projectTitle).toHaveBeenCalledExactlyOnceWith(fixture.manager);
+        projectTitle.mockClear();
 
         title.resolve(automaticTitleMessage("Too late after abort"));
         await new Promise<void>((resolve) => setImmediate(resolve));
@@ -5833,6 +5836,23 @@ describe("ConversationActor", () => {
         },
       });
     await fixture.actor.dispose();
+  });
+
+  it("projects only the settled session instead of refreshing the full catalog", async () => {
+    const fixture = await openActor();
+    const refresh = vi.spyOn(fixture.project, "refreshConversations");
+    const project = vi.spyOn(fixture.project, "projectConversationSession");
+    try {
+      await fixture.actor.startPrompt({
+        runId: RUN_A,
+        text: "finish recovered work",
+        origin: "inbox",
+      });
+      expect(refresh).not.toHaveBeenCalled();
+      expect(project).toHaveBeenCalledExactlyOnceWith(fixture.manager);
+    } finally {
+      await fixture.actor.dispose();
+    }
   });
 
   it("uses a reserved custom entry as the default durable settlement", async () => {

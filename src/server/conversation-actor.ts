@@ -3383,9 +3383,11 @@ export class ConversationActor {
     // Neither the run's durable settlement nor its completion waits for title
     // generation or persistence. A newer run may occupy the writer first.
     queueMicrotask(() => this.commitInitialTitleIfIdle());
-    void this.project.refreshConversations().catch((error) => {
+    try {
+      this.project.projectConversationSession(this.sessionManager);
+    } catch (error) {
       this.emitError(error, ticket.id);
-    });
+    }
     return settlement;
   }
 

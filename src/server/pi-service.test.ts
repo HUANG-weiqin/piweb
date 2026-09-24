@@ -3042,9 +3042,9 @@ describe("PiConnection coordinated project view", () => {
         "read_only",
       );
       const staleContext = projectReferenceState(staleHandle);
-      const refreshConversations = staleHandle.project.refreshConversations
+      const refreshConversations = staleHandle.project.discoverConversations
         .bind(staleHandle.project);
-      vi.spyOn(staleHandle.project, "refreshConversations")
+      vi.spyOn(staleHandle.project, "discoverConversations")
         .mockImplementationOnce(async () => {
           scanStarted.resolve();
           await releaseScan.promise;
@@ -3395,10 +3395,10 @@ describe("PiConnection coordinated project view", () => {
       const start = harness.events.length;
       let firstListSessionsSawConversationSnapshot: boolean | undefined;
       let listSessionsCalls = 0;
-      const listSessions = harness.coordinator.listSessions.bind(
+      const listSessions = harness.coordinator.listSessionsForDisplay.bind(
         harness.coordinator,
       );
-      vi.spyOn(harness.coordinator, "listSessions").mockImplementation(async (handle) => {
+      vi.spyOn(harness.coordinator, "listSessionsForDisplay").mockImplementation(async (handle) => {
         if (listSessionsCalls++ === 0) {
           firstListSessionsSawConversationSnapshot = harness.events.some(
             (event) => event.type === "conversation_snapshot"
@@ -3563,7 +3563,7 @@ describe("PiConnection coordinated project view", () => {
     }
   });
 
-  it("uses the validated recent seed for one initial project snapshot", async () => {
+  it("opens recent from discovery without requesting a full transcript catalog", async () => {
     const harness = await coordinatedConnectionHarness();
     const warmHandle = await harness.coordinator.acquireProject(
       harness.cwd,
@@ -3593,7 +3593,7 @@ describe("PiConnection coordinated project view", () => {
         conversation: { kind: "recent" },
       });
 
-      expect(listSessions).toHaveBeenCalledTimes(1);
+      expect(listSessions).not.toHaveBeenCalled();
       const snapshots = harness.events.filter(
         (event): event is Extract<ServerEvent, { type: "project_snapshot" }> =>
           event.type === "project_snapshot",
@@ -3639,10 +3639,10 @@ describe("PiConnection coordinated project view", () => {
       const manager = harness.runtime.created[0]?.persistentManager;
       if (!manager) throw new Error("persistent SessionManager was not provided");
 
-      const listSessionsImplementation = harness.coordinator.listSessions.bind(
+      const listSessionsImplementation = harness.coordinator.listSessionsForDisplay.bind(
         harness.coordinator,
       );
-      const listSessions = vi.spyOn(harness.coordinator, "listSessions");
+      const listSessions = vi.spyOn(harness.coordinator, "listSessionsForDisplay");
       listSessions.mockImplementation(async (handle) => {
         if (listSessions.mock.calls.length === 2) await refreshGate.promise;
         const sessions = await listSessionsImplementation(handle);
@@ -4577,10 +4577,7 @@ describe("PiConnection coordinated project view", () => {
         harness.cwd,
         "read_only",
       );
-      const projectInternals = handle.project as unknown as {
-        scanConversations(): Promise<unknown>;
-      };
-      vi.spyOn(projectInternals, "scanConversations").mockRejectedValue(
+      vi.spyOn(handle.project, "discoverConversations").mockRejectedValue(
         new SessionDirectoryChangedError(),
       );
       handle.release();
@@ -4621,10 +4618,7 @@ describe("PiConnection coordinated project view", () => {
         harness.cwd,
         "read_only",
       );
-      const projectInternals = handle.project as unknown as {
-        scanConversations(): Promise<unknown>;
-      };
-      vi.spyOn(projectInternals, "scanConversations").mockRejectedValue(
+      vi.spyOn(handle.project, "discoverConversations").mockRejectedValue(
         new Error("catalog refresh failed"),
       );
       handle.release();
@@ -5162,7 +5156,7 @@ describe("PiConnection coordinated project view", () => {
         ...summaries.at(-3)!,
         attention: true,
       };
-      vi.spyOn(harness.coordinator, "listSessions")
+      vi.spyOn(harness.coordinator, "listSessionsForDisplay")
         .mockResolvedValue(summaries);
       const eventCount = harness.events.length;
 
@@ -5281,7 +5275,7 @@ describe("PiConnection coordinated project view", () => {
           });
         }
       }
-      vi.spyOn(harness.coordinator, "listSessions")
+      vi.spyOn(harness.coordinator, "listSessionsForDisplay")
         .mockResolvedValue(summaries);
       const eventCount = harness.events.length;
 
@@ -5937,7 +5931,7 @@ describe("PiConnection coordinated project view", () => {
       const trailing = new Promise<ConversationSummary[]>((resolve) => {
         resolveTrailing = resolve;
       });
-      const listSessions = vi.spyOn(harness.coordinator, "listSessions")
+      const listSessions = vi.spyOn(harness.coordinator, "listSessionsForDisplay")
         .mockImplementationOnce(() => first)
         .mockImplementationOnce(() => trailing);
       const projectId = latestState(harness.events).projectId;
@@ -6196,11 +6190,11 @@ describe("PiConnection coordinated project view", () => {
         return {};
       };
       const staleRefreshStarted = deferred();
-      const originalListSessions = harness.coordinator.listSessions.bind(
+      const originalListSessions = harness.coordinator.listSessionsForDisplay.bind(
         harness.coordinator,
       );
       let holdStaleRefresh = true;
-      const listSessions = vi.spyOn(harness.coordinator, "listSessions")
+      const listSessions = vi.spyOn(harness.coordinator, "listSessionsForDisplay")
         .mockImplementation(async (handle, signal) => {
           const summaries = await originalListSessions(handle, signal);
           if (holdStaleRefresh) {

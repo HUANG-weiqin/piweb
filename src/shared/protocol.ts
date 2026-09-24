@@ -1130,6 +1130,11 @@ export interface ConversationSummary {
   createdBy?: ConversationCreatedBy;
 }
 
+/**
+ * Complete means fresh, stable project membership, not a full transcript audit.
+ * Cached or partial membership remains unknown; only complete, untruncated
+ * snapshots may establish that a previously displayed conversation is absent.
+ */
 export type ProjectSnapshotCoverage = "complete" | "unknown";
 
 export interface ProjectActivitySummary {

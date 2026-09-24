@@ -742,16 +742,16 @@ export class PiConnection {
         ? target.conversationId
         : undefined;
       if (target.kind === "recent") {
-        // Subscribe before the one fresh integrity scan: promise settlement is
-        // itself a handoff boundary where an actor mutation could otherwise be
-        // missed. A mutation during the scan may cause one harmless refresh.
+        // Subscribe before directory discovery: promise settlement is a
+        // handoff boundary where an actor mutation could otherwise be missed.
+        // Display observations never replace the target's exact open proof.
         unsubscribeRecentSeed = coordinator.subscribe(handle, (event) => {
           if (event.type !== "project_changed") recentSeedInvalidated = true;
         });
         const recentSeed = await this.measureTransitionPhase(
           diagnostics,
           "presentationOrTargetReadMs",
-          () => coordinator.listSessions(handle, signal),
+          () => coordinator.listSessionsForDisplay(handle, signal),
         );
         const knownIds = new Set(recentSeed.map(({ id }) => id));
         targetConversationId = handle.project.lastConversationId
@@ -1789,7 +1789,7 @@ case "set_thinking":
         refresh.trailing = false;
         latestFailed = false;
         try {
-          const conversations = await view.coordinator.listSessions(
+          const conversations = await view.coordinator.listSessionsForDisplay(
             view.handle,
           );
           if (!this.isCurrentCoordinatedView(view)) return;
