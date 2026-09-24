@@ -14267,6 +14267,89 @@ describe("ProjectSessionCoordinator", () => {
       await targetCompletion;
     });
   });
+
+  it("opens each source conversation once per receipt-ledger projection", async () => {
+    const fixture = await createFixture();
+    const sourceA = deterministicTestUuid("ledger-source-a", "grouped");
+    const sourceB = deterministicTestUuid("ledger-source-b", "grouped");
+    for (const sourceId of [sourceA, sourceB]) {
+      await fixture.handle.project.createConversation(
+        sourceId,
+        defaultProfile(fixture.roles),
+      );
+    }
+    await fixture.handle.project.refreshConversations();
+    const target = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const receipt = (
+      index: number,
+      fromConversationId: string,
+    ) => createMessageDeliveryReceiptEntry({
+      messageId: deterministicTestUuid(`ledger-message-${index}`, "grouped"),
+      cardId: deterministicTestUuid(`ledger-card-${index}`, "grouped"),
+      fromConversationId,
+      toConversationId: target.conversationId,
+      sourceRunId: randomUUID(),
+      targetRunId: randomUUID(),
+      kind: "message",
+      sentAt: "2026-07-19T12:00:00.000Z",
+      payloadFingerprint: "a".repeat(64),
+      deliveredAt: "2026-07-19T12:00:01.000Z",
+    });
+    for (const index of [0, 1, 2]) {
+      appendReservedCustomEntry(target.sessionManager, receipt(index, sourceA));
+    }
+    appendReservedCustomEntry(target.sessionManager, receipt(3, sourceB));
+
+    const context = (fixture.handle as unknown as { context: object }).context;
+    const openSpy = vi.spyOn(fixture.handle.project, "openConversation");
+    try {
+      await (fixture.coordinator as unknown as {
+        reconcileReceiptLedger(
+          context: object,
+          conversationId: string,
+        ): Promise<string[]>;
+      }).reconcileReceiptLedger(context, target.conversationId);
+
+      const openedSourceIds = openSpy.mock.calls
+        .map(([conversationId]) => conversationId)
+        .filter((conversationId) =>
+          conversationId === sourceA || conversationId === sourceB);
+      expect(openedSourceIds.filter((id) => id === sourceA)).toHaveLength(1);
+      expect(openedSourceIds.filter((id) => id === sourceB)).toHaveLength(1);
+    } finally {
+      openSpy.mockRestore();
+    }
+  });
+
+  it("coalesces queued inbox pump requests for one conversation", async () => {
+    const fixture = await createFixture();
+    const conversationId = deterministicTestUuid("pump-coalesce", "target");
+    await fixture.handle.project.createConversation(
+      conversationId,
+      defaultProfile(fixture.roles),
+    );
+    await fixture.handle.project.refreshConversations();
+
+    const context = (fixture.handle as unknown as { context: object }).context;
+    const internals = fixture.coordinator as unknown as {
+      requestPumpTarget(context: object, conversationId: string): void;
+      pumpTarget(context: object, conversationId: string): Promise<unknown>;
+    };
+    const pumpSpy = vi.spyOn(internals, "pumpTarget");
+    try {
+      internals.requestPumpTarget(context, conversationId);
+      internals.requestPumpTarget(context, conversationId);
+      internals.requestPumpTarget(context, conversationId);
+      await vi.waitFor(() => expect(pumpSpy).toHaveBeenCalledTimes(1));
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      expect(pumpSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      pumpSpy.mockRestore();
+    }
+  });
 });
 
 class TrackingProjectStoreRegistry extends ProjectStoreRegistry {

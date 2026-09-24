@@ -101,7 +101,10 @@ import {
   RoleUpdateConflictError,
 } from "./role-store.js";
 import { SerialTaskQueue } from "./serial-task-queue.js";
-import { createReadonlySessionEntriesAdapter } from "./session-file.js";
+import {
+  createReadonlySessionEntriesAdapter,
+  type PiSessionFileInspection,
+} from "./session-file.js";
 import {
   defaultToolPolicy,
   type ToolPolicy,
@@ -258,6 +261,12 @@ interface ProjectContext {
   readonly completions: Map<string, RunSettlement>;
   readonly processingBatches: Map<string, InboxEnvelope[]>;
   readonly failedBatchRetries: Set<string>;
+  /**
+   * Coalescing state for fire-and-forget inbox pumps: a conversation needs a
+   * pump but no task has started for it yet, and a pump task is queued for it.
+   */
+  readonly pendingPumps: Set<string>;
+  readonly scheduledPumps: Set<string>;
   readonly reloadAdoptions: Map<string, ReloadAdoption>;
   readonly extensionUIRouters: Map<string, ConversationExtensionUIRouter>;
   readonly lifecycle: SerialTaskQueue;
@@ -606,6 +615,8 @@ export class ProjectSessionCoordinator {
         completions: new Map(),
         processingBatches: new Map(),
         failedBatchRetries: new Set(),
+        pendingPumps: new Set(),
+        scheduledPumps: new Set(),
         reloadAdoptions: new Map(),
         extensionUIRouters: new Map(),
         lifecycle: new SerialTaskQueue(),
@@ -2809,12 +2820,7 @@ export class ProjectSessionCoordinator {
     });
     context.actorUnsubscribes.set(conversationId, unsubscribe);
     this.emit(context, { type: "project_changed" });
-    this.trackBackground(
-      context,
-      this.runLifecycle(context, async () => {
-        await this.pumpTarget(context, conversationId);
-      }),
-    );
+    this.requestPumpTarget(context, conversationId);
     return actor;
   }
 
@@ -5218,79 +5224,161 @@ export class ProjectSessionCoordinator {
     return marker;
   }
 
+  private projectReceiptSourceCardInto(
+    manager: ConversationActor["sessionManager"],
+    receipt: MessageDeliveryReceipt,
+    settlement?: RunSettlement,
+  ): void {
+    const existing = aggregateReservedConversationEntries(
+      manager.getEntries(),
+    ).cards.find(({ cardId }) => cardId === receipt.cardId);
+    if (!existing) return;
+    if (
+      existing.messageId !== receipt.messageId
+      || existing.kind !== receipt.kind
+      || existing.fromSnapshot.conversationId !== receipt.fromConversationId
+      || existing.toSnapshot.conversationId !== receipt.toConversationId
+      || (
+        existing.runId !== undefined
+        && existing.runId !== receipt.targetRunId
+      )
+    ) {
+      throw new Error(
+        `Source card identity conflicts with receipt ${receipt.messageId}`,
+      );
+    }
+    if (
+      receipt.kind !== "delegation_task"
+      && (
+        existing.state === "completed"
+        || existing.state === "failed"
+        || existing.state === "aborted"
+      )
+    ) {
+      return;
+    }
+    const taskSettlement = receipt.kind === "delegation_task"
+      && settlement?.runId === receipt.targetRunId
+      ? settlement
+      : undefined;
+    const state: ConversationCard["state"] = taskSettlement
+      ? taskSettlement.outcome === "completed"
+        ? "completed"
+        : taskSettlement.outcome
+      : receipt.kind === "delegation_task"
+      ? "running"
+      : "delivered";
+    const result = taskSettlement
+      ? taskSettlement.finalText ?? undefined
+      : undefined;
+    if (
+      existing.state === state
+      && existing.runId === receipt.targetRunId
+      && existing.result === result
+    ) {
+      return;
+    }
+    const { result: _oldResult, ...base } = existing;
+    appendReservedCustomEntry(
+      manager,
+      createConversationCardEntry({
+        ...base,
+        state,
+        runId: receipt.targetRunId,
+        ...(result === undefined ? {} : { result }),
+        updatedAt: this.now().toISOString(),
+      }),
+    );
+  }
+
   private async projectReceiptSourceCard(
     context: ProjectContext,
     receipt: MessageDeliveryReceipt,
     settlement?: RunSettlement,
   ): Promise<void> {
-    const project = (manager: ConversationActor["sessionManager"]): void => {
-      const existing = aggregateReservedConversationEntries(
-        manager.getEntries(),
-      ).cards.find(({ cardId }) => cardId === receipt.cardId);
-      if (!existing) return;
-      if (
-        existing.messageId !== receipt.messageId
-        || existing.kind !== receipt.kind
-        || existing.fromSnapshot.conversationId !== receipt.fromConversationId
-        || existing.toSnapshot.conversationId !== receipt.toConversationId
-        || (
-          existing.runId !== undefined
-          && existing.runId !== receipt.targetRunId
-        )
-      ) {
-        throw new Error(
-          `Source card identity conflicts with receipt ${receipt.messageId}`,
-        );
-      }
-      if (
-        receipt.kind !== "delegation_task"
-        && (
-          existing.state === "completed"
-          || existing.state === "failed"
-          || existing.state === "aborted"
-        )
-      ) {
-        return;
-      }
-      const taskSettlement = receipt.kind === "delegation_task"
-        && settlement?.runId === receipt.targetRunId
-        ? settlement
-        : undefined;
-      const state: ConversationCard["state"] = taskSettlement
-        ? taskSettlement.outcome === "completed"
-          ? "completed"
-          : taskSettlement.outcome
-        : receipt.kind === "delegation_task"
-        ? "running"
-        : "delivered";
-      const result = taskSettlement
-        ? taskSettlement.finalText ?? undefined
-        : undefined;
-      if (
-        existing.state === state
-        && existing.runId === receipt.targetRunId
-        && existing.result === result
-      ) {
-        return;
-      }
-      const { result: _oldResult, ...base } = existing;
-      appendReservedCustomEntry(
-        manager,
-        createConversationCardEntry({
-          ...base,
-          state,
-          runId: receipt.targetRunId,
-          ...(result === undefined ? {} : { result }),
-          updatedAt: this.now().toISOString(),
-        }),
-      );
-    };
-
     await this.withStoredConversationManager(
       context,
       receipt.fromConversationId,
-      project,
+      (manager) =>
+        this.projectReceiptSourceCardInto(manager, receipt, settlement),
     );
+  }
+
+  private reportReceiptProjectionFailure(
+    context: ProjectContext,
+    receipt: MessageDeliveryReceipt,
+    error: unknown,
+  ): void {
+    context.attention.add(receipt.fromConversationId);
+    context.attention.add(receipt.toConversationId);
+    this.emit(context, {
+      type: "error",
+      conversationId: receipt.fromConversationId,
+      runId: receipt.targetRunId,
+      message: error instanceof Error ? error.message : String(error),
+      fatal: false,
+    });
+  }
+
+  /**
+   * Projects many source cards with at most one stored open per source
+   * conversation. One reconciliation pass covers a target's whole receipt
+   * ledger, and every stored open re-reads and re-parses the source
+   * transcript, so projecting per receipt made the pass cost grow with the
+   * receipt count on the shared project lifecycle lane (deletion and other
+   * commands waited behind it). Grouping by sender keeps the pass cost
+   * proportional to the distinct senders while preserving per-receipt
+   * failure attribution.
+   */
+  private async projectReceiptSourceCards(
+    context: ProjectContext,
+    entries: readonly {
+      receipt: MessageDeliveryReceipt;
+      settlement?: RunSettlement;
+    }[],
+  ): Promise<void> {
+    const entriesBySource = new Map<
+      string,
+      { receipt: MessageDeliveryReceipt; settlement?: RunSettlement }[]
+    >();
+    for (const entry of entries) {
+      const source = entry.receipt.fromConversationId;
+      const group = entriesBySource.get(source);
+      if (group === undefined) {
+        entriesBySource.set(source, [entry]);
+      } else {
+        group.push(entry);
+      }
+    }
+    for (const [source, group] of entriesBySource) {
+      try {
+        await this.withStoredConversationManager(
+          context,
+          source,
+          (manager) => {
+            for (const entry of group) {
+              try {
+                this.projectReceiptSourceCardInto(
+                  manager,
+                  entry.receipt,
+                  entry.settlement,
+                );
+              } catch (error) {
+                this.reportReceiptProjectionFailure(
+                  context,
+                  entry.receipt,
+                  error,
+                );
+              }
+            }
+          },
+        );
+      } catch (error) {
+        for (const entry of group) {
+          this.reportReceiptProjectionFailure(context, entry.receipt, error);
+        }
+      }
+    }
   }
 
   private async projectReceiptSourceCardBestEffort(
@@ -5301,15 +5389,7 @@ export class ProjectSessionCoordinator {
     try {
       await this.projectReceiptSourceCard(context, receipt, settlement);
     } catch (error) {
-      context.attention.add(receipt.fromConversationId);
-      context.attention.add(receipt.toConversationId);
-      this.emit(context, {
-        type: "error",
-        conversationId: receipt.fromConversationId,
-        runId: receipt.targetRunId,
-        message: error instanceof Error ? error.message : String(error),
-        fatal: false,
-      });
+      this.reportReceiptProjectionFailure(context, receipt, error);
     }
   }
 
@@ -5333,13 +5413,13 @@ export class ProjectSessionCoordinator {
     const settlementByRun = new Map(
       settlements.map((settlement) => [settlement.runId, settlement]),
     );
-    for (const receipt of receipts) {
-      await this.projectReceiptSourceCardBestEffort(
-        context,
+    await this.projectReceiptSourceCards(
+      context,
+      receipts.map((receipt) => ({
         receipt,
-        settlementByRun.get(receipt.targetRunId),
-      );
-    }
+        settlement: settlementByRun.get(receipt.targetRunId),
+      })),
+    );
     return [...new Set(receipts
       .filter((receipt) => !settlementByRun.has(receipt.targetRunId))
       .map((receipt) => receipt.targetRunId))];
@@ -5550,9 +5630,7 @@ export class ProjectSessionCoordinator {
             completionKey(target.conversationId, runId),
           );
           if (!context.closing) {
-            this.trackBackground(context, this.runLifecycle(context, async () => {
-              await this.pumpTarget(context, target.conversationId);
-            }));
+            this.requestPumpTarget(context, target.conversationId);
           }
         } catch (rollbackError) {
           if (!context.closing) {
@@ -5887,6 +5965,23 @@ export class ProjectSessionCoordinator {
     }
   }
 
+  /**
+   * Runs startup recovery one lifecycle step at a time. Recovery re-reads and
+   * re-opens many conversations (profile scans, receipt ledger projection,
+   * actor opens), and one lifecycle task for the whole pass made every
+   * unrelated command — deletion, focus, prompts — queue behind the entire
+   * pass for as long as recovery takes. Steps keep recovery's own ordering
+   * (durable scans before abort recovery, abort recovery before inbox
+   * reconciliation, reconciliation before actor pumps) while leaving the
+   * shared project lane free between them.
+   */
+  /**
+   * Runs startup recovery as one lifecycle task. Every recovery phase must
+   * observe the project in the state the previous phase left it in: durable
+   * fences, abort intents, sidecar repair and actor pumps are sequenced
+   * against each other and against deletion, so the pass keeps the project
+   * lane for its whole duration.
+   */
   private async recoverProject(context: ProjectContext): Promise<void> {
     if (context.closing) return;
     let summaries = await context.project.refreshConversations();
@@ -5916,41 +6011,49 @@ export class ProjectSessionCoordinator {
         .map(({ toConversationId }) => toConversationId),
     );
     for (const summary of summaries) {
-      if (context.closing) return;
       if (blockedTargets.has(summary.id)) {
         context.attention.add(summary.id);
+      }
+    }
+    const scannableSummaries = summaries.filter(({ id }) =>
+      !blockedTargets.has(id)
+    );
+    // One batch proof reads every transcript under a single catalog proof.
+    // Reading them one at a time repeats a namespace census per conversation,
+    // so this pass grew with the project's transcript bytes; a batch failure
+    // still falls back to per-conversation reads, which keeps one unreadable
+    // file from marking anything but its own conversation.
+    let inspections: Map<string, PiSessionFileInspection> | undefined;
+    if (scannableSummaries.length > 0) {
+      if (context.closing) return;
+      try {
+        inspections = await context.project.inspectConversations(
+          scannableSummaries.map(({ id }) => id),
+        );
+      } catch {
+        inspections = undefined;
+      }
+    }
+    for (const summary of scannableSummaries) {
+      if (context.closing) return;
+      if (inspections === undefined) {
+        await this.recoverConversationSummary(
+          context,
+          summary.id,
+          blockedTargets,
+          startedAbortOperations,
+          actorIds,
+        );
         continue;
       }
       try {
-        const inspection = await context.project.inspectConversation(
+        this.applyRecoveredSummary(
+          context,
           summary.id,
+          inspections.get(summary.id)!,
+          startedAbortOperations,
+          actorIds,
         );
-        for (const operation of inspection.metaOperations) {
-          if (
-            operation.kind === "abort_session"
-            && operation.state === "started"
-            && operation.result.aborted
-          ) {
-            startedAbortOperations.push({
-              sourceConversationId: summary.id,
-              operation,
-            });
-          }
-        }
-        const settledRunIds = new Set(
-          inspection.runSettlements.map(({ runId }) => runId),
-        );
-        if (inspection.messageDeliveryReceipts.some((receipt) =>
-          !settledRunIds.has(receipt.targetRunId)
-          || receipt.kind === "delegation_task"
-        )) {
-          actorIds.add(summary.id);
-        }
-        const profile = inspection.conversationMeta;
-        if (!profile) {
-          throw new Error(`Conversation ${summary.id} profile metadata is missing`);
-        }
-        context.profiles.set(summary.id, cloneProfile(profile));
       } catch {
         context.attention.add(summary.id);
       }
@@ -5971,53 +6074,158 @@ export class ProjectSessionCoordinator {
     for (const envelope of pending) {
       if (context.closing) return;
       if (blockedTargets.has(envelope.toConversationId)) continue;
-      try {
-        const project = (manager: ConversationActor["sessionManager"]) => {
-          const card = aggregateReservedConversationEntries(
-            manager.getEntries(),
-          ).cards.find(({ cardId }) => cardId === envelope.cardId);
-          if (card?.state !== "sending") return;
-          appendReservedCustomEntry(
-            manager,
-            createConversationCardEntry({
-              ...card,
-              state: envelope.state === "processing" ? "running" : "queued",
-              messageId: envelope.messageId,
-              ...(envelope.delegationId === undefined
-                ? {}
-                : { delegationId: envelope.delegationId }),
-              ...(envelope.requestFingerprint === undefined
-                ? {}
-                : { requestFingerprint: envelope.requestFingerprint }),
-              ...(envelope.processingRunId === undefined
-                ? {}
-                : { runId: envelope.processingRunId }),
-              updatedAt: this.now().toISOString(),
-            }),
-          );
-        };
-        await this.withStoredConversationManager(
-          context,
-          envelope.fromConversationId,
-          project,
-        );
-      } catch {
-        // A deleted source must not prevent the durable target delivery.
-      }
+      await this.recoverSendingEnvelopeCard(context, envelope);
     }
 
     await this.reconcileInbox(context);
     for (const actorId of actorIds) {
       if (context.closing) return;
-      try {
-        await this.getOrOpenActor(context, actorId);
-        await this.pumpTarget(context, actorId);
-      } catch {
-        context.attention.add(actorId);
-      }
+      await this.recoverActorPump(context, actorId);
     }
     await this.retryBlockedDeletions(context);
     this.emit(context, { type: "project_changed" });
+  }
+
+  /** One recovery step: profile, settled-run and abort-intent scan. */
+  /**
+   * Per-conversation fallback for the batched profile scan above.
+   */
+  private async recoverConversationSummary(
+    context: ProjectContext,
+    summaryId: string,
+    blockedTargets: ReadonlySet<string>,
+    startedAbortOperations: {
+      sourceConversationId: string;
+      operation: Extract<
+        MetaOperation,
+        { kind: "abort_session"; state: "started" }
+      >;
+    }[],
+    actorIds: Set<string>,
+  ): Promise<void> {
+    if (blockedTargets.has(summaryId)) {
+      context.attention.add(summaryId);
+      return;
+    }
+    try {
+      const inspection = await context.project.inspectConversation(summaryId);
+      this.applyRecoveredSummary(
+        context,
+        summaryId,
+        inspection,
+        startedAbortOperations,
+        actorIds,
+      );
+    } catch {
+      context.attention.add(summaryId);
+    }
+  }
+
+  private applyRecoveredSummary(
+    context: ProjectContext,
+    summaryId: string,
+    inspection: PiSessionFileInspection,
+    startedAbortOperations: {
+      sourceConversationId: string;
+      operation: Extract<
+        MetaOperation,
+        { kind: "abort_session"; state: "started" }
+      >;
+    }[],
+    actorIds: Set<string>,
+  ): void {
+    for (const operation of inspection.metaOperations) {
+      if (
+        operation.kind === "abort_session"
+        && operation.state === "started"
+        && operation.result.aborted
+      ) {
+        startedAbortOperations.push({
+          sourceConversationId: summaryId,
+          operation,
+        });
+      }
+    }
+    const settledRunIds = new Set(
+      inspection.runSettlements.map(({ runId }) => runId),
+    );
+    if (inspection.messageDeliveryReceipts.some((receipt) =>
+      !settledRunIds.has(receipt.targetRunId)
+      || receipt.kind === "delegation_task"
+    )) {
+      actorIds.add(summaryId);
+    }
+    const profile = inspection.conversationMeta;
+    if (!profile) {
+      throw new Error(
+        `Conversation ${summaryId} profile metadata is missing`,
+      );
+    }
+    context.profiles.set(summaryId, cloneProfile(profile));
+  }
+
+  /** One recovery step: advance a source card left in `sending`. */
+  private async recoverSendingEnvelopeCard(
+    context: ProjectContext,
+    envelope: InboxEnvelope,
+  ): Promise<void> {
+    try {
+      const project = (manager: ConversationActor["sessionManager"]) => {
+        const card = aggregateReservedConversationEntries(
+          manager.getEntries(),
+        ).cards.find(({ cardId }) => cardId === envelope.cardId);
+        if (card?.state !== "sending") return;
+        appendReservedCustomEntry(
+          manager,
+          createConversationCardEntry({
+            ...card,
+            state: envelope.state === "processing" ? "running" : "queued",
+            messageId: envelope.messageId,
+            ...(envelope.delegationId === undefined
+              ? {}
+              : { delegationId: envelope.delegationId }),
+            ...(envelope.requestFingerprint === undefined
+              ? {}
+              : { requestFingerprint: envelope.requestFingerprint }),
+            ...(envelope.processingRunId === undefined
+              ? {}
+              : { runId: envelope.processingRunId }),
+            updatedAt: this.now().toISOString(),
+          }),
+        );
+      };
+      await this.withStoredConversationManager(
+        context,
+        envelope.fromConversationId,
+        project,
+      );
+    } catch {
+      // A deleted source must not prevent the durable target delivery.
+    }
+  }
+
+  /**
+   * One recovery step: open a target that still owes delivery, then pump it.
+   */
+  private async recoverActorPump(
+    context: ProjectContext,
+    actorId: string,
+  ): Promise<void> {
+    try {
+      await this.getOrOpenActor(context, actorId);
+      // The actor open above may already have requested a pump; consuming
+      // that request here keeps one queued duplicate from running after this
+      // inline pump, and a failure hands the request back for a retry.
+      context.pendingPumps.delete(actorId);
+      try {
+        await this.pumpTarget(context, actorId);
+      } catch (error) {
+        context.pendingPumps.add(actorId);
+        throw error;
+      }
+    } catch {
+      context.attention.add(actorId);
+    }
   }
 
   private async recoverStartedAbortOperation(
@@ -6256,6 +6464,36 @@ export class ProjectSessionCoordinator {
     }
     this.assertManagerWorkAllowed(actor);
     return await work(actor.sessionManager);
+  }
+
+  /**
+   * Schedules a fire-and-forget inbox pump for one conversation, coalescing
+   * requests that arrive while an earlier pump task is still queued: a task
+   * that starts after this request observes the same durable state, so the
+   * queued task simply reuses the pending request instead of piling up one
+   * lifecycle task per event. A request that arrives while a pump is already
+   * running arms a new task, so no request can be swallowed by a pump that
+   * started before it was made. Each queued task therefore holds the project
+   * lifecycle lane for exactly one pump.
+   */
+  private requestPumpTarget(
+    context: ProjectContext,
+    conversationId: string,
+  ): void {
+    context.pendingPumps.add(conversationId);
+    if (context.scheduledPumps.has(conversationId)) return;
+    context.scheduledPumps.add(conversationId);
+    const task = this.runLifecycle(context, async () => {
+      context.scheduledPumps.delete(conversationId);
+      if (!context.pendingPumps.delete(conversationId)) return;
+      await this.pumpTarget(context, conversationId);
+    });
+    this.trackBackground(context, task.catch((error: unknown) => {
+      // A lifecycle task that never started (for example a closing context)
+      // must not leave the conversation permanently marked as scheduled.
+      context.scheduledPumps.delete(conversationId);
+      throw error;
+    }));
   }
 
   private async pumpTarget(
