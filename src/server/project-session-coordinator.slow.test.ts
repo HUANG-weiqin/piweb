@@ -65,7 +65,7 @@ import {
   WAIT_POLL_DELAY_MS,
   type StartPeerSessionInput,
 } from "./project-session-coordinator.js";
-import { ProjectStore } from "./project-store.js";
+import { ConversationNotFoundError, ProjectStore } from "./project-store.js";
 import {
   ProjectStoreRegistry,
   type ConversationDeletionLease,
@@ -14366,6 +14366,125 @@ describe("ProjectSessionCoordinator", () => {
     } finally {
       pumpSpy.mockRestore();
     }
+  });
+
+  it("keeps a startup pump behind the recovery foundation", async () => {
+    const coordinatorPrototype = ProjectSessionCoordinator.prototype as unknown as {
+      recoverProjectFoundation(context: object): Promise<unknown>;
+      pumpTarget(context: object, conversationId: string): Promise<unknown>;
+    };
+    const originalFoundation = coordinatorPrototype.recoverProjectFoundation;
+    const originalPump = coordinatorPrototype.pumpTarget;
+    const order: string[] = [];
+    const gate = deferred();
+    const foundationSpy = vi.spyOn(
+      coordinatorPrototype,
+      "recoverProjectFoundation",
+    ).mockImplementation(async function (this: unknown, context: object) {
+      order.push("foundation");
+      await gate.promise;
+      return originalFoundation.call(this, context);
+    });
+    const pumpSpy = vi.spyOn(coordinatorPrototype, "pumpTarget")
+      .mockImplementation(async function (
+        this: unknown,
+        context: object,
+        conversationId: string,
+      ) {
+        order.push("pump");
+        return originalPump.call(this, context, conversationId);
+      });
+    try {
+      const fixture = await createFixture();
+      const conversationId = deterministicTestUuid(
+        "pump-after-foundation",
+        "target",
+      );
+      await fixture.handle.project.createConversation(
+        conversationId,
+        defaultProfile(fixture.roles),
+      );
+      await fixture.handle.project.refreshConversations();
+      const context = (fixture.handle as unknown as { context: object }).context;
+      (fixture.coordinator as unknown as {
+        requestPumpTarget(context: object, conversationId: string): void;
+      }).requestPumpTarget(context, conversationId);
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      // The foundation owns the abort-intent scan that must precede any inbox
+      // pump, so a pump requested while recovery runs may not overtake it.
+      expect(order).toEqual(["foundation"]);
+      gate.resolve();
+      await vi.waitFor(() => expect(order).toContain("pump"));
+      expect(order[0]).toBe("foundation");
+    } finally {
+      gate.resolve();
+      foundationSpy.mockRestore();
+      pumpSpy.mockRestore();
+    }
+  });
+
+  it("keeps a failed pump request pending for a retry", async () => {
+    const fixture = await createFixture();
+    const conversationId = deterministicTestUuid("pump-failure", "target");
+    await fixture.handle.project.createConversation(
+      conversationId,
+      defaultProfile(fixture.roles),
+    );
+    await fixture.handle.project.refreshConversations();
+    const context = (fixture.handle as unknown as {
+      context: { pendingPumps: Set<string>; scheduledPumps: Set<string> };
+    }).context;
+    const pumpSpy = vi.spyOn(
+      fixture.coordinator as unknown as {
+        pumpTarget(context: object, conversationId: string): Promise<unknown>;
+      },
+      "pumpTarget",
+    ).mockRejectedValueOnce(new Error("transient pump failure"));
+    try {
+      (fixture.coordinator as unknown as {
+        requestPumpTarget(context: object, conversationId: string): void;
+      }).requestPumpTarget(context, conversationId);
+      // A pump that failed before doing the work must leave its request
+      // pending, otherwise the durable sidecar waits for an unrelated event.
+      await vi.waitFor(() =>
+        expect(context.pendingPumps.has(conversationId)).toBe(true)
+      );
+      expect(context.scheduledPumps.has(conversationId)).toBe(false);
+    } finally {
+      pumpSpy.mockRestore();
+      context.pendingPumps.delete(conversationId);
+    }
+  });
+
+  it("only skips recovery attention for a conversation that is gone", async () => {
+    const fixture = await createFixture();
+    const internals = fixture.coordinator as unknown as {
+      markRecoveryAttention(
+        context: object,
+        conversationId: string,
+        cause?: unknown,
+      ): void;
+    };
+    const context = (fixture.handle as unknown as {
+      context: { attention: Set<string> };
+    }).context;
+    const conversationId = deterministicTestUuid(
+      "recovery-attention",
+      "target",
+    );
+    internals.markRecoveryAttention(
+      context,
+      conversationId,
+      new Error("settlement persistence failed"),
+    );
+    expect(context.attention.has(conversationId)).toBe(true);
+    context.attention.delete(conversationId);
+    internals.markRecoveryAttention(
+      context,
+      conversationId,
+      new ConversationNotFoundError(conversationId),
+    );
+    expect(context.attention.has(conversationId)).toBe(false);
   });
 });
 

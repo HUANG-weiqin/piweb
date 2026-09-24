@@ -5965,41 +5965,77 @@ export class ProjectSessionCoordinator {
   }
 
   /**
-   * Runs startup recovery one lifecycle step at a time. Recovery re-reads and
-   * re-opens many conversations (profile scans, receipt ledger projection,
-   * actor opens), and one lifecycle task for the whole pass made every
-   * unrelated command — deletion, focus, prompts — queue behind it for as
-   * long as recovery takes. Each step is still ordered against the next one,
-   * so durable scans precede abort recovery, abort recovery precedes sidecar
-   * repair, and reconciliation precedes actor pumps; only unrelated commands
-   * may run between two steps.
+   * Runs startup recovery as one foundation task followed by one lifecycle
+   * step per remaining phase.
+   *
+   * The foundation task is enqueued first and holds the lane for everything
+   * another command must not overtake: the durable scans, the profile and
+   * abort-intent scan, and abort-intent recovery. Only the later, idempotent
+   * phases (sidecar repair, inbox reconciliation, actor pumps) yield between
+   * steps, so a pump started by a focus or by another command can never run
+   * before the abort-intent scan that has to precede every inbox pump. Each
+   * step still owns the lane for its own duration, which is what keeps
+   * unrelated commands from queueing behind the whole pass.
    */
   private async recoverProject(context: ProjectContext): Promise<void> {
+    const foundation = await this.runLifecycle(context, () =>
+      this.recoverProjectFoundation(context));
+    if (foundation === undefined || context.closing) return;
+    const { pending, blockedTargets, actorIds } = foundation;
+
+    for (const envelope of pending) {
+      if (context.closing) return;
+      if (blockedTargets.has(envelope.toConversationId)) continue;
+      await this.runLifecycle(context, () =>
+        this.recoverSendingEnvelopeCard(context, envelope));
+    }
+
     if (context.closing) return;
-    let summaries = await this.runLifecycle(
-      context,
-      () => context.project.refreshConversations(),
-    );
+    await this.runLifecycle(context, () => this.reconcileInbox(context));
+    for (const actorId of actorIds) {
+      if (context.closing) return;
+      await this.runLifecycle(context, () =>
+        this.recoverActorPump(context, actorId));
+    }
+    if (context.closing) return;
+    await this.runLifecycle(context, () => this.retryBlockedDeletions(context));
+
+    // A pump that failed inside this pass consumed its request without a
+    // scheduled task left behind; re-arm those requests once so they are not
+    // dropped until the next unrelated event or a restart.
+    for (const conversationId of [...context.pendingPumps]) {
+      if (context.closing) return;
+      this.requestPumpTarget(context, conversationId);
+    }
+    this.emit(context, { type: "project_changed" });
+  }
+
+  /**
+   * The first recovery lane task: durable scans, profile and abort-intent
+   * scan, and abort-intent recovery. Returns the state the later steps need,
+   * or undefined when the pass was interrupted by shutdown.
+   */
+  private async recoverProjectFoundation(
+    context: ProjectContext,
+  ): Promise<
+    | {
+      pending: InboxEnvelope[];
+      blockedTargets: Set<string>;
+      actorIds: Set<string>;
+    }
+    | undefined
+  > {
+    if (context.closing) return undefined;
+    let summaries = await context.project.refreshConversations();
     // Startup recovery shares the same frozen-set batch path as ordinary
     // retries. In particular, an absent target may still have captured
     // sidecars whose external source must record a terminal card before the
     // exact sidecar is removed; pruneCompletedTargetTombstones cannot prove
     // that ordering or preserve a root fence across a cascade.
-    if (context.closing) return;
-    await this.runLifecycle(context, () => this.retryBlockedDeletions(context));
-    if (context.closing) return;
-    const blockedTargets = new Set(
-      await this.runLifecycle(context, () =>
-        context.inbox.listDeletedTargets()),
-    );
-    if (context.closing) return;
-    const pending = await this.runLifecycle(context, () =>
-      context.inbox.list());
-    if (context.closing) return;
-    summaries = await this.runLifecycle(
-      context,
-      () => context.project.refreshConversations(),
-    );
+    await this.retryBlockedDeletions(context);
+    const blockedTargets = new Set(await context.inbox.listDeletedTargets());
+    const pending = await context.inbox.list();
+    summaries = await context.project.refreshConversations();
     const startedAbortOperations: Array<{
       sourceConversationId: string;
       operation: Extract<
@@ -6029,12 +6065,11 @@ export class ProjectSessionCoordinator {
     // file from marking anything but its own conversation.
     let inspections: Map<string, PiSessionFileInspection> | undefined;
     if (scannableSummaries.length > 0) {
-      if (context.closing) return;
+      if (context.closing) return undefined;
       try {
-        inspections = await this.runLifecycle(context, () =>
-          context.project.inspectConversations(
-            scannableSummaries.map(({ id }) => id),
-          ));
+        inspections = await context.project.inspectConversations(
+          scannableSummaries.map(({ id }) => id),
+        );
       } catch {
         // A batch failure only costs the single catalog proof: fall back to
         // per-conversation reads below, which still isolate one bad file.
@@ -6042,66 +6077,49 @@ export class ProjectSessionCoordinator {
       }
     }
     for (const summary of scannableSummaries) {
-      if (context.closing) return;
+      if (context.closing) return undefined;
       if (inspections === undefined) {
-        await this.runLifecycle(context, () =>
-          this.recoverConversationSummary(
-            context,
-            summary.id,
-            blockedTargets,
-            startedAbortOperations,
-            actorIds,
-          ));
+        await this.recoverConversationSummary(
+          context,
+          summary.id,
+          blockedTargets,
+          startedAbortOperations,
+          actorIds,
+        );
         continue;
       }
-      await this.runLifecycle(context, () => {
-        if (context.closing) return;
-        try {
-          this.applyRecoveredSummary(
-            context,
-            summary.id,
-            inspections!.get(summary.id)!,
-            startedAbortOperations,
-            actorIds,
-          );
-        } catch {
-          this.markRecoveryAttention(context, summary.id);
-        }
-      });
+      try {
+        this.applyRecoveredSummary(
+          context,
+          summary.id,
+          inspections.get(summary.id)!,
+          startedAbortOperations,
+          actorIds,
+        );
+      } catch (error) {
+        this.markRecoveryAttention(context, summary.id, error);
+      }
     }
 
     for (const recovery of startedAbortOperations) {
-      if (context.closing) return;
-      await this.runLifecycle(context, async () => {
-        try {
-          await this.recoverStartedAbortOperation(context, recovery);
-        } catch {
-          this.markRecoveryAttention(context, recovery.sourceConversationId);
-          this.markRecoveryAttention(
-            context,
-            recovery.operation.targetConversationId,
-          );
-        }
-      });
+      if (context.closing) return undefined;
+      try {
+        await this.recoverStartedAbortOperation(context, recovery);
+      } catch (error) {
+        this.markRecoveryAttention(
+          context,
+          recovery.sourceConversationId,
+          error,
+        );
+        this.markRecoveryAttention(
+          context,
+          recovery.operation.targetConversationId,
+          error,
+        );
+      }
     }
 
-    for (const envelope of pending) {
-      if (context.closing) return;
-      if (blockedTargets.has(envelope.toConversationId)) continue;
-      await this.runLifecycle(context, () =>
-        this.recoverSendingEnvelopeCard(context, envelope));
-    }
-
-    if (context.closing) return;
-    await this.runLifecycle(context, () => this.reconcileInbox(context));
-    for (const actorId of actorIds) {
-      if (context.closing) return;
-      await this.runLifecycle(context, () =>
-        this.recoverActorPump(context, actorId));
-    }
-    if (context.closing) return;
-    await this.runLifecycle(context, () => this.retryBlockedDeletions(context));
-    this.emit(context, { type: "project_changed" });
+    return { pending, blockedTargets, actorIds };
   }
 
   /**
@@ -6110,20 +6128,22 @@ export class ProjectSessionCoordinator {
    * flagging one that is already being deleted or no longer exists would
    * leave a permanent badge for a conversation the user just removed.
    */
+  /**
+   * Attention asks a human to look at a conversation. Recovery yields between
+   * steps now, so a conversation can leave the project while the pass runs;
+   * a fault that proves the conversation is gone is not actionable and must
+   * not leave a permanent badge, while every other fault stays visible — the
+   * cached catalog projection is not evidence of absence.
+   */
   private markRecoveryAttention(
     context: ProjectContext,
     conversationId: string,
+    cause?: unknown,
   ): void {
-    if (context.deleting.has(conversationId)) return;
-    if (
-      !context.project.listConversations().some(({ id }) => id === conversationId)
-    ) {
-      return;
-    }
+    if (cause instanceof ConversationNotFoundError) return;
     context.attention.add(conversationId);
   }
 
-  /** One recovery step: profile, settled-run and abort-intent scan. */
   /**
    * Per-conversation fallback for the batched profile scan above.
    */
@@ -6153,10 +6173,10 @@ export class ProjectSessionCoordinator {
         startedAbortOperations,
         actorIds,
       );
-    } catch {
+    } catch (error) {
       // Recovery yields between steps, so the conversation can be deleted
-      // while the pass runs; only flag conversations that still exist.
-      this.markRecoveryAttention(context, summaryId);
+      // while the pass runs; only a fault that proves it is gone is skipped.
+      this.markRecoveryAttention(context, summaryId, error);
     }
   }
 
@@ -6262,8 +6282,8 @@ export class ProjectSessionCoordinator {
         context.pendingPumps.add(actorId);
         throw error;
       }
-    } catch {
-      this.markRecoveryAttention(context, actorId);
+    } catch (error) {
+      this.markRecoveryAttention(context, actorId, error);
     }
   }
 
@@ -6525,7 +6545,15 @@ export class ProjectSessionCoordinator {
     const task = this.runLifecycle(context, async () => {
       context.scheduledPumps.delete(conversationId);
       if (!context.pendingPumps.delete(conversationId)) return;
-      await this.pumpTarget(context, conversationId);
+      try {
+        await this.pumpTarget(context, conversationId);
+      } catch (error) {
+        // This request was consumed by a task that failed before doing the
+        // work; keep it pending so the next request or the recovery flush
+        // schedules a retry instead of dropping the delivery.
+        context.pendingPumps.add(conversationId);
+        throw error;
+      }
     });
     this.trackBackground(context, task.catch((error: unknown) => {
       // A lifecycle task that never started (for example a closing context)

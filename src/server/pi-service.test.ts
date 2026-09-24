@@ -5755,6 +5755,17 @@ describe("PiConnection coordinated project view", () => {
       appendCard(firstTarget);
       const releaseFirst = deferred();
       const calls: string[][] = [];
+      // Recovery publishes its own project change when it finishes, which
+      // would add an independent census inside the window under test; let the
+      // fixture's pass settle first so the counts below belong only to the two
+      // refreshes this test drives.
+      const recoveryContext = (externalHandle as unknown as {
+        context: { backgroundTasks: Set<Promise<void>> };
+      }).context;
+      await vi.waitFor(
+        () => expect(recoveryContext.backgroundTasks.size).toBe(0),
+        { timeout: 5_000 },
+      );
       let firstCensus: Promise<ReadonlyMap<string, "present">> | undefined;
       vi.spyOn(harness.coordinator, "resolveConversationPeerPresence")
         .mockImplementation((_handle, _actor, peerIds) => {
@@ -5790,11 +5801,7 @@ describe("PiConnection coordinated project view", () => {
       expect(calls).toHaveLength(1);
       releaseFirst.resolve();
       await firstCensus;
-      // Recovery publishes its own project change now that it yields between
-      // steps, which can add an independent census after the pair under test;
-      // what matters here is that the two back-to-back refreshes coalesce into
-      // one active and one trailing census.
-      await vi.waitFor(() => expect(calls.length).toBeGreaterThanOrEqual(2));
+      await vi.waitFor(() => expect(calls).toHaveLength(2));
       expect(calls[0]).toEqual([firstTarget.conversationId]);
       expect(calls[1]).toEqual([
         firstTarget.conversationId,
