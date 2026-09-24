@@ -216,8 +216,13 @@ class SessionFileChangedError extends Error {
 }
 
 export class ConversationNotFoundError extends Error {
+  /** The conversation this error is about, so callers can tell whose proof
+   * failed when one failure is reported for several conversations. */
+  readonly conversationId: string;
+
   constructor(conversationId: string) {
     super(`Conversation not found: ${conversationId}`);
+    this.conversationId = conversationId;
   }
 }
 

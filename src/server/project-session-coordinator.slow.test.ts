@@ -14425,6 +14425,7 @@ describe("ProjectSessionCoordinator", () => {
 
   it("keeps a failed pump request pending for a retry", async () => {
     const fixture = await createFixture();
+    await settleFixtureRecovery(fixture);
     const conversationId = deterministicTestUuid("pump-failure", "target");
     await fixture.handle.project.createConversation(
       conversationId,
@@ -14444,6 +14445,7 @@ describe("ProjectSessionCoordinator", () => {
       (fixture.coordinator as unknown as {
         requestPumpTarget(context: object, conversationId: string): void;
       }).requestPumpTarget(context, conversationId);
+      await vi.waitFor(() => expect(pumpSpy).toHaveBeenCalledTimes(1));
       // A pump that failed before doing the work must leave its request
       // pending, otherwise the durable sidecar waits for an unrelated event.
       await vi.waitFor(() =>
@@ -14476,6 +14478,19 @@ describe("ProjectSessionCoordinator", () => {
       context,
       conversationId,
       new Error("settlement persistence failed"),
+    );
+    expect(context.attention.has(conversationId)).toBe(true);
+    context.attention.delete(conversationId);
+    // The missing proof can be about a different conversation than the one
+    // the fault is being reported for (one abort-intent failure reports both
+    // ends); only the conversation it is about may be skipped.
+    internals.markRecoveryAttention(
+      context,
+      conversationId,
+      new ConversationNotFoundError(deterministicTestUuid(
+        "recovery-attention-other",
+        "source",
+      )),
     );
     expect(context.attention.has(conversationId)).toBe(true);
     context.attention.delete(conversationId);

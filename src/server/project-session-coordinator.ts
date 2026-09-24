@@ -6140,7 +6140,15 @@ export class ProjectSessionCoordinator {
     conversationId: string,
     cause?: unknown,
   ): void {
-    if (cause instanceof ConversationNotFoundError) return;
+    // One abort-intent failure is reported for both its source and its
+    // target; only the conversation the missing proof is actually about may
+    // be skipped, the other one still holds un-recovered work.
+    if (
+      cause instanceof ConversationNotFoundError
+      && cause.conversationId === conversationId
+    ) {
+      return;
+    }
     context.attention.add(conversationId);
   }
 
@@ -6534,6 +6542,14 @@ export class ProjectSessionCoordinator {
    * running arms a new task, so no request can be swallowed by a pump that
    * started before it was made. Each queued task therefore holds the project
    * lifecycle lane for exactly one pump.
+   *
+   * Liveness after a failure is deliberate and bounded: a pump that throws
+   * keeps its request in `pendingPumps` without arming another task, so
+   * progress resumes on the next request for that conversation or when
+   * startup recovery flushes the pending set — never through an automatic
+   * retry loop. The sidecar itself stays durable across restarts, so a
+   * conversation that never gets another request is still recovered by the
+   * next process.
    */
   private requestPumpTarget(
     context: ProjectContext,
