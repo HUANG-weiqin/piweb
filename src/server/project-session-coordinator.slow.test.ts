@@ -5475,6 +5475,13 @@ describe("ProjectSessionCoordinator", () => {
       ),
       "delegation settlement to complete the source card",
     );
+    expect(aggregateReservedConversationEntries(source.sessionManager.getEntries())
+      .cards.find((card) =>
+        card.toSnapshot.conversationId === child!.conversationId
+      )).toMatchObject({
+        state: "completed",
+        result: "delegation settled",
+      });
     releaseOrdinary.resolve();
     releaseSource.resolve();
     await sourceCompletion;
@@ -14550,11 +14557,115 @@ describe("ProjectSessionCoordinator", () => {
     });
   });
 
-  it("opens each source conversation once per receipt-ledger projection", async () => {
+  it("starts a browser prompt without opening unrelated receipt source histories", async () => {
+    const fixture = await createFixture();
+    await settleFixtureRecovery(fixture);
+    const sourceIds = [randomUUID(), randomUUID()];
+    for (const sourceId of sourceIds) {
+      await fixture.handle.project.createConversation(
+        sourceId,
+        defaultProfile(fixture.roles),
+      );
+    }
+    const target = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const earlierRunId = randomUUID();
+    for (const sourceId of sourceIds) {
+      appendReservedCustomEntry(target.sessionManager, createMessageDeliveryReceiptEntry({
+        messageId: randomUUID(),
+        cardId: randomUUID(),
+        fromConversationId: sourceId,
+        toConversationId: target.conversationId,
+        sourceRunId: randomUUID(),
+        targetRunId: earlierRunId,
+        kind: "message",
+        sentAt: "2026-07-19T12:00:00.000Z",
+        payloadFingerprint: "a".repeat(64),
+        deliveredAt: "2026-07-19T12:00:01.000Z",
+      }));
+    }
+    appendReservedCustomEntry(target.sessionManager, createRunSettlementEntry({
+      runId: earlierRunId,
+      outcome: "completed",
+      finalText: "earlier reply",
+      settledAt: "2026-07-19T12:00:02.000Z",
+    }));
+    fixture.runtime.control(target.conversationId).enqueue(
+      completesWith("browser reply"),
+    );
+
+    const openSpy = vi.spyOn(fixture.handle.project, "openConversation");
+    try {
+      const browserRunId = randomUUID();
+      await expect(fixture.coordinator.prompt(
+        fixture.handle,
+        target.conversationId,
+        browserRunId,
+        "new browser prompt",
+      )).resolves.toMatchObject({ runId: browserRunId, outcome: "completed" });
+      expect(openSpy.mock.calls.filter(([conversationId]) =>
+        conversationId !== target.conversationId
+      )).toEqual([]);
+    } finally {
+      openSpy.mockRestore();
+    }
+  });
+
+  it("resumes an unsettled receipt run before admitting a browser prompt", async () => {
+    const fixture = await createFixture();
+    await settleFixtureRecovery(fixture);
+    const sourceId = randomUUID();
+    await fixture.handle.project.createConversation(
+      sourceId,
+      defaultProfile(fixture.roles),
+    );
+    const target = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    await settleFixtureRecovery(fixture);
+    const receiptRunId = randomUUID();
+    appendReservedCustomEntry(target.sessionManager, createMessageDeliveryReceiptEntry({
+      messageId: randomUUID(),
+      cardId: randomUUID(),
+      fromConversationId: sourceId,
+      toConversationId: target.conversationId,
+      sourceRunId: randomUUID(),
+      targetRunId: receiptRunId,
+      kind: "message",
+      sentAt: "2026-07-19T12:00:00.000Z",
+      payloadFingerprint: "a".repeat(64),
+      deliveredAt: "2026-07-19T12:00:01.000Z",
+    }));
+
+    const browserRunId = randomUUID();
+    await expect(fixture.coordinator.prompt(
+      fixture.handle,
+      target.conversationId,
+      browserRunId,
+      "should wait for the receipt run",
+    )).rejects.toThrow("Durable conversation work was admitted before this browser prompt");
+    await waitUntil(
+      () => fixture.runtime.control(target.conversationId).received.length === 1,
+      "the unsettled receipt run to resume",
+    );
+    expect(fixture.runtime.control(target.conversationId).received[0])
+      .toMatchObject({
+        customType: "workbench.inbox_resume.v1",
+        details: { runId: receiptRunId },
+      });
+    expect(aggregateReservedConversationEntries(target.sessionManager.getEntries())
+      .runSettlements.some(({ runId }) => runId === browserRunId)).toBe(false);
+  });
+
+  it("opens each source once only for the settled run's receipt projection", async () => {
     const fixture = await createFixture();
     const sourceA = deterministicTestUuid("ledger-source-a", "grouped");
     const sourceB = deterministicTestUuid("ledger-source-b", "grouped");
-    for (const sourceId of [sourceA, sourceB]) {
+    const unrelatedSource = deterministicTestUuid("ledger-source-other", "grouped");
+    for (const sourceId of [sourceA, sourceB, unrelatedSource]) {
       await fixture.handle.project.createConversation(
         sourceId,
         defaultProfile(fixture.roles),
@@ -14565,42 +14676,65 @@ describe("ProjectSessionCoordinator", () => {
       fixture.handle,
       { roleId: "default" },
     );
+    await settleFixtureRecovery(fixture);
+    const settledRunId = randomUUID();
+    const unrelatedRunId = randomUUID();
     const receipt = (
       index: number,
       fromConversationId: string,
+      targetRunId: string,
     ) => createMessageDeliveryReceiptEntry({
       messageId: deterministicTestUuid(`ledger-message-${index}`, "grouped"),
       cardId: deterministicTestUuid(`ledger-card-${index}`, "grouped"),
       fromConversationId,
       toConversationId: target.conversationId,
       sourceRunId: randomUUID(),
-      targetRunId: randomUUID(),
+      targetRunId,
       kind: "message",
       sentAt: "2026-07-19T12:00:00.000Z",
       payloadFingerprint: "a".repeat(64),
       deliveredAt: "2026-07-19T12:00:01.000Z",
     });
     for (const index of [0, 1, 2]) {
-      appendReservedCustomEntry(target.sessionManager, receipt(index, sourceA));
+      appendReservedCustomEntry(target.sessionManager, receipt(index, sourceA, settledRunId));
     }
-    appendReservedCustomEntry(target.sessionManager, receipt(3, sourceB));
+    appendReservedCustomEntry(target.sessionManager, receipt(3, sourceB, settledRunId));
+    appendReservedCustomEntry(target.sessionManager, receipt(4, unrelatedSource, unrelatedRunId));
+    appendReservedCustomEntry(target.sessionManager, createRunSettlementEntry({
+      runId: unrelatedRunId,
+      outcome: "completed",
+      finalText: "unrelated",
+      settledAt: "2026-07-19T12:00:02.000Z",
+    }));
+    appendReservedCustomEntry(target.sessionManager, createRunSettlementEntry({
+      runId: settledRunId,
+      outcome: "completed",
+      finalText: "settled",
+      settledAt: "2026-07-19T12:00:02.000Z",
+    }));
 
     const context = (fixture.handle as unknown as { context: object }).context;
     const openSpy = vi.spyOn(fixture.handle.project, "openConversation");
     try {
       await (fixture.coordinator as unknown as {
-        reconcileReceiptLedger(
+        projectReceiptSourceCardsForRun(
           context: object,
           conversationId: string,
-        ): Promise<string[]>;
-      }).reconcileReceiptLedger(context, target.conversationId);
+          runId: string,
+        ): Promise<void>;
+      }).projectReceiptSourceCardsForRun(
+        context, target.conversationId, settledRunId,
+      );
 
       const openedSourceIds = openSpy.mock.calls
         .map(([conversationId]) => conversationId)
         .filter((conversationId) =>
-          conversationId === sourceA || conversationId === sourceB);
+          conversationId === sourceA
+          || conversationId === sourceB
+          || conversationId === unrelatedSource);
       expect(openedSourceIds.filter((id) => id === sourceA)).toHaveLength(1);
       expect(openedSourceIds.filter((id) => id === sourceB)).toHaveLength(1);
+      expect(openedSourceIds).not.toContain(unrelatedSource);
     } finally {
       openSpy.mockRestore();
     }

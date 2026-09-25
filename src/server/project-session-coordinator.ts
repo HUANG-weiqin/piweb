@@ -4694,7 +4694,6 @@ export class ProjectSessionCoordinator {
     } = {},
   ): Promise<boolean> {
     if (!await this.reconcileInbox(context, target.conversationId)) return false;
-    await this.reconcileReceiptLedger(context, target.conversationId);
     const activity = target.getActivity();
     if (activity.kind === "idle" || activity.kind === "cancelling") {
       return false;
@@ -5372,14 +5371,10 @@ export class ProjectSessionCoordinator {
   }
 
   /**
-   * Projects many source cards with at most one stored open per source
-   * conversation. One reconciliation pass covers a target's whole receipt
-   * ledger, and every stored open re-reads and re-parses the source
-   * transcript, so projecting per receipt made the pass cost grow with the
-   * receipt count on the shared project lifecycle lane (deletion and other
-   * commands waited behind it). Grouping by sender keeps the pass cost
-   * proportional to the distinct senders while preserving per-receipt
-   * failure attribution.
+   * Projects startup pending cards or one settled run's receipts with at most
+   * one stored open per source. Each stored open re-reads the source transcript;
+   * grouping keeps the work proportional to distinct senders while preserving
+   * per-receipt failure attribution.
    */
   private async projectReceiptSourceCards(
     context: ProjectContext,
@@ -5444,36 +5439,48 @@ export class ProjectSessionCoordinator {
     }
   }
 
-  private async reconcileReceiptLedger(
+  private async readUnsettledReceiptRuns(
     context: ProjectContext,
     targetConversationId: string,
   ): Promise<string[]> {
-    let receipts: MessageDeliveryReceipt[] = [];
-    let settlements: RunSettlement[] = [];
-    await this.withConversationManager(
+    return this.withConversationManager(
       context,
       targetConversationId,
-      async (manager) => {
+      (manager) => {
         const aggregate = aggregateReservedConversationEntries(
           manager.getEntries(),
         );
-        receipts = aggregate.messageDeliveryReceipts;
-        settlements = aggregate.runSettlements;
+        const settledRunIds = new Set(
+          aggregate.runSettlements.map(({ runId }) => runId),
+        );
+        return [...new Set(aggregate.messageDeliveryReceipts
+          .filter(({ targetRunId }) => !settledRunIds.has(targetRunId))
+          .map(({ targetRunId }) => targetRunId))];
       },
     );
-    const settlementByRun = new Map(
-      settlements.map((settlement) => [settlement.runId, settlement]),
-    );
-    await this.projectReceiptSourceCards(
+  }
+
+  private async projectReceiptSourceCardsForRun(
+    context: ProjectContext,
+    targetConversationId: string,
+    runId: string,
+  ): Promise<void> {
+    const entries = await this.withConversationManager(
       context,
-      receipts.map((receipt) => ({
-        receipt,
-        settlement: settlementByRun.get(receipt.targetRunId),
-      })),
+      targetConversationId,
+      (manager) => {
+        const aggregate = aggregateReservedConversationEntries(
+          manager.getEntries(),
+        );
+        const settlement = aggregate.runSettlements.find(
+          (entry) => entry.runId === runId,
+        );
+        return aggregate.messageDeliveryReceipts
+          .filter((receipt) => receipt.targetRunId === runId)
+          .map((receipt) => ({ receipt, settlement }));
+      },
     );
-    return [...new Set(receipts
-      .filter((receipt) => !settlementByRun.has(receipt.targetRunId))
-      .map((receipt) => receipt.targetRunId))];
+    await this.projectReceiptSourceCards(context, entries);
   }
 
   private async reconcileInbox(
@@ -5742,7 +5749,11 @@ export class ProjectSessionCoordinator {
     const finish = async (retrying: boolean): Promise<void> => {
       try {
         if (!await this.reconcileInbox(context, targetConversationId)) return;
-        await this.reconcileReceiptLedger(context, targetConversationId);
+        await this.projectReceiptSourceCardsForRun(
+          context,
+          targetConversationId,
+          runId,
+        );
         for (const envelope of initialEnvelopes) {
           const stored = await context.inbox.get(envelope.messageId);
           if (
@@ -6637,7 +6648,7 @@ export class ProjectSessionCoordinator {
     const actor = context.actors.get(conversationId);
     if (!actor) return "no_work";
     if (!await this.reconcileInbox(context, conversationId, list)) return "no_work";
-    const receiptRunIds = await this.reconcileReceiptLedger(
+    const receiptRunIds = await this.readUnsettledReceiptRuns(
       context,
       conversationId,
     );
