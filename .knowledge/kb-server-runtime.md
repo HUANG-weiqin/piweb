@@ -32,10 +32,10 @@
 
 ### 逻辑 run 范围的 Bash
 
-`src/server/bash-execution.ts` 只拥有有界命令执行，不是 terminal、stdin、持久 shell 或调度器。Actor 把 exact `ConversationRunOwnership` 对象交给 session-local binding；executionId 是独立 UUID，不是 PID、toolCallId 或正文指纹。`PiRuntime` 共享 32 个真实未终结执行的预算，每个逻辑 run 最多 4 个未终结执行、64 个已发布句柄；快速未发布结果仍返回 Pi 原生形状。`bash_poll` 返回非消费的最新快照，列表查询不等待；没有退出码 0 且无 error/partial 的事实，就不能宣称成功。
+`src/server/bash-execution.ts` 只拥有有界命令执行，不是 terminal、stdin、持久 shell 或调度器。Actor 把 exact `ConversationRunOwnership` 对象交给 session-local binding；后台 `task_id` 是独立 UUID，不是 PID、toolCallId 或正文指纹。`PiRuntime` 共享 32 个真实未终结执行的预算，每个逻辑 run 最多 4 个未终结执行、64 个已发布后台记录。`bash` 使用整数毫秒 timeout，默认 120000、上限 600000，前台阻塞到结束并返回 Pi 原生形状；显式 `run_in_background:true` 才立即返回 id。`bash_output` 默认阻塞等 30000ms（上限 600000），`block:false` 或等待超时返回非消费快照，无 id 时立即列表；`bash_stop({task_id})` 固定有界短等。没有退出码 0 且无 error/partial 的事实，就不能宣称成功。
 
 - 复用 Pi 公开 local operations 和 Bash factory，每个执行有独立 AbortController。SDK signal 仅取消工具等待，已经 aborted 的启动调用在准入前拒绝；命令 timeout 从启动起只计一次，不随 poll 重置。
-- 输出先在 operations 边界限制原始 stdout+stderr 为 16 MiB，超限 stop/drop 并明确 `partial`；运行预览最多 1 KiB，最终继续用 Pi 的 50 KiB/2000 行截断、错误文本及全文临时文件。latest payload 是防御复制，不另建 collector、游标或输出持久库；yield 后不再向旧 toolCallId 发更新。
+- 输出先在 operations 边界限制原始 stdout+stderr 为 16 MiB，超限 stop/drop 并明确 `partial`；运行预览最多 1 KiB，最终继续用 Pi 的 50 KiB/2000 行截断、错误文本及全文临时文件。latest payload 是防御复制，不另建 collector、游标或输出持久库；后台准入返回后不再向旧 toolCallId 发更新。
 - 普通工具返回、物理 `agent_end`、压缩与 LoopList 续跑不销毁执行，同一逻辑 run 继续查询。真正 terminal、abort、reload 和 dispose 先停止准入并 stop，再按整组约 2 秒宽限收尾。执行尚未确认终结时仍占预算，隔离同 conversation 的后继 Bash；迟到 callback 只能释放旧资源/计数，不能追加消息或复活 run。
 - terminal/abort/reload/dispose 时由 Actor 等待 Bash 整组清理完成后再写 run settlement；callback 没有 transcript 写入权，也不再追加持久收尾摘要。旧会话中的 `piweb.bash_execution_notice.v1` 仅由严格 reserved parser 兼容读取，不再写入或投影到 history/wire。清理未知仍使 Actor fatal、暂停自动工作，inbox pump/recovery 不能借 fresh Actor 绕过。
 - Bash 清理未知不是可忽略的普通 reload 错误。默认 reload 在 Coordinator 与内部 `piweb_reload_blocked` IPC 上拒绝，不写新的 handoff manifest、不 kill/restart 旧 child，并保持 admission 冻结；只有显式 force 才允许 best-effort 替换。这个拒绝不是公共 WebSocket 命令。

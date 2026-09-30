@@ -389,11 +389,13 @@ describe("projectConversationHistory", () => {
     )).toBe(false);
   });
 
-  it("retains bounded Bash execution state when an oversized tool result is omitted", () => {
+  it.each(["executionId", "taskId"])("retains bounded Bash %s state when an oversized tool result is omitted", (idKey) => {
     const manager = SessionManager.inMemory("E:\\work");
     const bash = {
-      executionId: randomUUID(),
-      state: "in_progress",
+      [idKey]: randomUUID(),
+      state: "finished",
+      exitCode: 0,
+      partial: true,
       outputFile: "large-output.txt",
     };
     manager.appendMessage(message({
@@ -421,8 +423,10 @@ describe("projectConversationHistory", () => {
           content: "[历史工具数据过大，已省略]",
           details: {
             piwebBash: {
-              executionId: bash.executionId,
-              state: "in_progress",
+              [idKey]: bash[idKey],
+              state: "finished",
+              exitCode: 0,
+              partial: true,
             },
           },
         },

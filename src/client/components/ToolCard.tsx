@@ -50,6 +50,10 @@ const FIELD_LABELS: Record<string, string> = {
   edits: "编辑",
   error: "错误",
   executionId: "执行句柄",
+  taskId: "后台任务句柄",
+  task_id: "后台任务句柄",
+  run_in_background: "后台执行",
+  block: "阻塞等待",
   exitCode: "退出码",
   file: "文件",
   fileCount: "预计文件数",
@@ -174,10 +178,12 @@ export function toolPresentation(
       return { label: "读取文件", target: stringField(record, "path") };
     case "bash":
       return { label: "运行命令", target: stringField(record, "command") };
-    case "bash_poll":
+    case "bash_output":
+      return { label: "获取后台命令结果", target: stringField(record, "task_id") };
+    case "bash_poll": // Historical tool calls only; no longer an available tool.
       return { label: "查询后台命令", target: stringField(record, "executionId") };
     case "bash_stop":
-      return { label: "停止后台命令", target: stringField(record, "executionId") };
+      return { label: "停止后台命令", target: stringField(record, "task_id") || stringField(record, "executionId") };
     case "edit":
       return { label: "编辑文件", target: stringField(record, "path") };
     case "write":
@@ -263,15 +269,18 @@ function bashCardStatus(tool: ToolItem): {
   status: BashCardStatus;
   label: string;
 } | undefined {
-  if (!new Set(["bash", "bash_poll", "bash_stop"]).has(tool.name)) {
+  if (!new Set(["bash", "bash_output", "bash_poll", "bash_stop"]).has(tool.name)) {
     return;
   }
   const result = asRecord(tool.result);
   const piwebBash = asRecord(asRecord(result?.details)?.piwebBash);
   if (!piwebBash) return;
 
-  if (Array.isArray(piwebBash.executions)) {
-    const states = piwebBash.executions.flatMap((item) => {
+  const taskRows = Array.isArray(piwebBash.tasks)
+    ? piwebBash.tasks
+    : piwebBash.executions;
+  if (Array.isArray(taskRows)) {
+    const states = taskRows.flatMap((item) => {
       const state = asRecord(item)?.state;
       return state === "in_progress" || state === "stopping" ? [state] : [];
     });
@@ -292,6 +301,9 @@ function bashCardStatus(tool: ToolItem): {
   }
   if (piwebBash.state !== "finished") return;
 
+  if (piwebBash.partial === true) {
+    return { status: "ended", label: "命令已结束，输出不完整" };
+  }
   if (piwebBash.error !== undefined && piwebBash.error !== null) {
     return { status: "ended", label: "命令结束时伴随执行错误" };
   }

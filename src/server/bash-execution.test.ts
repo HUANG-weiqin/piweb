@@ -133,7 +133,7 @@ function bashDetails(result: { details?: unknown }): Record<string, unknown> {
 describe("run-scoped Bash execution", () => {
   afterEach(() => vi.useRealTimers());
 
-  it("yields a live handle, keeps Pi updates private after return, and poll cancellation does not stop execution", async () => {
+  it("starts a background task, keeps later Pi updates private, and output-wait cancellation does not stop execution", async () => {
     const result = deferred<{ exitCode: number | null }>();
     let emit!: (data: Buffer) => void;
     let executionSignal: AbortSignal | undefined;
@@ -164,19 +164,19 @@ describe("run-scoped Bash execution", () => {
       },
     );
 
-    const handle = await invoke(fixture.tool("bash"), { command: "hold", yieldMs: 0 }, undefined, (update) => updates.push(update));
-    const handleInfo = bashDetails(handle).piwebBash as { executionId: string; state: string };
+    const handle = await invoke(fixture.tool("bash"), { command: "hold", run_in_background: true }, undefined, (update) => updates.push(update));
+    const handleInfo = bashDetails(handle).piwebBash as { executionId: string; taskId: string; state: string };
     expect(handleInfo.state).toBe("in_progress");
-    expect(resultText(handle)).toContain("not produced a final result");
-    const updatesAtYield = updates.length;
+    expect(resultText(handle)).toContain(`task_id: ${handleInfo.taskId}`);
+    const updatesAtStart = updates.length;
 
     emit(Buffer.from(`late-output${"x".repeat(4096)}`));
     await new Promise((resolve) => setTimeout(resolve, 20));
-    expect(updates).toHaveLength(updatesAtYield);
+    expect(updates).toHaveLength(updatesAtStart);
     expect(executionSignal?.aborted).toBe(false);
 
     const pollAbort = new AbortController();
-    const poll = invoke(fixture.tool("bash_poll"), { executionId: handleInfo.executionId, waitMs: 5000 }, pollAbort.signal);
+    const poll = invoke(fixture.tool("bash_output"), { task_id: handleInfo.taskId, timeout: 5000 }, pollAbort.signal);
     pollAbort.abort();
     const snapshot = await poll;
     expect(resultText(snapshot)).toContain("late-output");
@@ -184,7 +184,7 @@ describe("run-scoped Bash execution", () => {
     expect(executionSignal?.aborted).toBe(false);
 
     result.resolve({ exitCode: 0 });
-    const final = await invoke(fixture.tool("bash_poll"), { executionId: handleInfo.executionId, waitMs: 1000 });
+    const final = await invoke(fixture.tool("bash_output"), { task_id: handleInfo.taskId, timeout: 1000 });
     expect(resultText(final)).toBe("final");
     expect(bashDetails(final).fullOutputPath).toBe("native-output.txt");
     expect((bashDetails(final).piwebBash as { exitCode: number }).exitCode).toBe(0);
@@ -195,7 +195,7 @@ describe("run-scoped Bash execution", () => {
     { exitCode: null, error: /without a known exit code/ },
   ])("keeps native failures explicit for exitCode $exitCode", async ({ exitCode, error }) => {
     const fixture = makeFixture(async () => ({ exitCode }));
-    await expect(invoke(fixture.tool("bash"), { command: "fail", yieldMs: 5000 })).rejects.toThrow(error);
+    await expect(invoke(fixture.tool("bash"), { command: "fail" })).rejects.toThrow(error);
   });
 
   it("exports the typed cleanup-unconfirmed signal and keeps Pi output references on unknown exits", async () => {
@@ -207,7 +207,7 @@ describe("run-scoped Bash execution", () => {
       options.onData(Buffer.alloc(64 * 1024, 0x78));
       return { exitCode: null };
     });
-    await expect(invoke(fixture.tool("bash"), { command: "unknown-exit", yieldMs: 5000 }))
+    await expect(invoke(fixture.tool("bash"), { command: "unknown-exit" }))
       .rejects.toThrow(/without a known exit code.*Full output:/s);
   });
 
@@ -218,9 +218,9 @@ describe("run-scoped Bash execution", () => {
       executionSignal = options.signal;
       return completion.promise;
     });
-    const handle = await invoke(fixture.tool("bash"), { command: "race", yieldMs: 0 });
-    const executionId = (bashDetails(handle).piwebBash as { executionId: string }).executionId;
-    const stopping = invoke(fixture.tool("bash_stop"), { executionId });
+    const handle = await invoke(fixture.tool("bash"), { command: "race", run_in_background: true });
+    const taskId = (bashDetails(handle).piwebBash as { taskId: string }).taskId;
+    const stopping = invoke(fixture.tool("bash_stop"), { task_id: taskId });
     expect(executionSignal?.aborted).toBe(true);
     completion.resolve({ exitCode: 0 });
     const final = await stopping;
@@ -231,7 +231,7 @@ describe("run-scoped Bash execution", () => {
     });
   });
 
-  it("does not reset timeout while polling and reports the native timeout error", async () => {
+  it("keeps the hard timeout deadline through a nonblocking snapshot and reports Pi's native timeout error", async () => {
     vi.useFakeTimers();
     let executionSignal: AbortSignal | undefined;
     let markStarted!: () => void;
@@ -241,31 +241,31 @@ describe("run-scoped Bash execution", () => {
       markStarted();
       options.signal?.addEventListener("abort", () => resolve({ exitCode: null }), { once: true });
     }));
-    const handle = await invoke(fixture.tool("bash"), { command: "timed", timeout: 0.06, yieldMs: 0 });
-    const executionId = (bashDetails(handle).piwebBash as { executionId: string }).executionId;
+    const handle = await invoke(fixture.tool("bash"), { command: "timed", timeout: 60, run_in_background: true });
+    const taskId = (bashDetails(handle).piwebBash as { taskId: string }).taskId;
     await started;
 
     await vi.advanceTimersByTimeAsync(55);
-    const poll = await invoke(fixture.tool("bash_poll"), { executionId, waitMs: 0 });
+    const poll = await invoke(fixture.tool("bash_output"), { task_id: taskId, block: false });
     expect(resultText(poll)).toContain("in_progress");
     expect(executionSignal?.aborted).toBe(false);
 
     await vi.advanceTimersByTimeAsync(5);
     expect(executionSignal?.aborted).toBe(true);
-    const rowsResult = await invoke(fixture.tool("bash_poll"), {});
-    const executions = (bashDetails(rowsResult).piwebBash as { executions: Array<{ stopReason?: string; state: string }> }).executions;
+    const rowsResult = await invoke(fixture.tool("bash_output"), {});
+    const executions = (bashDetails(rowsResult).piwebBash as { tasks: Array<{ stopReason?: string; state: string }> }).tasks;
     expect(executions[0]).toMatchObject({ state: "finished", stopReason: "timeout" });
-    await expect(invoke(fixture.tool("bash_poll"), { executionId, waitMs: 0 }))
+    await expect(invoke(fixture.tool("bash_output"), { task_id: taskId, block: false }))
       .rejects.toThrow(/Command timed out after 0\.06 seconds/);
   });
 
-  it("rejects foreign or expired handles and discards fast unyielded records", async () => {
+  it("rejects foreign or expired task_ids and discards fast foreground records", async () => {
     const pending = deferred<{ exitCode: number | null }>();
     const fixture = makeFixture(async () => pending.promise);
-    const handle = await invoke(fixture.tool("bash"), { command: "hold", yieldMs: 0 });
-    const executionId = (bashDetails(handle).piwebBash as { executionId: string }).executionId;
+    const handle = await invoke(fixture.tool("bash"), { command: "hold", run_in_background: true });
+    const taskId = (bashDetails(handle).piwebBash as { taskId: string }).taskId;
     fixture.setOwner(Object.freeze({ conversationId: "conversation-a", runId: "run-a" }));
-    await expect(invoke(fixture.tool("bash_poll"), { executionId, waitMs: 0 })).rejects.toThrow(/not available in this run/);
+    await expect(invoke(fixture.tool("bash_output"), { task_id: taskId, block: false })).rejects.toThrow(/not available in this run/);
 
     const closing = fixture.binding.lifecycle.close(fixture.owner, "run_end");
     pending.resolve({ exitCode: 0 });
@@ -273,44 +273,57 @@ describe("run-scoped Bash execution", () => {
 
     const fast = makeFixture(async () => ({ exitCode: 0 }));
     for (let index = 0; index < 65; index++) {
-      const native = await invoke(fast.tool("bash"), { command: "fast", yieldMs: 5000 });
+      const native = await invoke(fast.tool("bash"), { command: "fast" });
       expect(bashDetails(native).piwebBash).toBeUndefined();
     }
-    await expect(invoke(fast.tool("bash_poll"), { executionId: "expired-handle", waitMs: 0 })).rejects.toThrow(/not available in this run/);
+    await expect(invoke(fast.tool("bash_output"), { task_id: "expired-handle", block: false })).rejects.toThrow(/not available in this run/);
   });
 
-  it("enforces four unsettled executions per run and retains all 64 published handles", async () => {
+  it("enforces four unsettled executions per run and refuses to drop unobserved task records at 64", async () => {
     const pending: Array<ReturnType<typeof deferred<{ exitCode: number | null }>>> = [];
+    let launchCount = 0;
     const fixture = makeFixture(async () => {
+      launchCount++;
+      if (launchCount > 4) return { exitCode: 0 };
       const next = deferred<{ exitCode: number | null }>();
       pending.push(next);
       return next.promise;
     }, { base: simpleBase });
-    const ids: string[] = [];
+    const taskIds: string[] = [];
     for (let index = 0; index < 4; index++) {
-      const handle = await invoke(fixture.tool("bash"), { command: `hold-${index}`, yieldMs: 0 });
-      ids.push((bashDetails(handle).piwebBash as { executionId: string }).executionId);
+      const handle = await invoke(fixture.tool("bash"), { command: `hold-${index}`, run_in_background: true });
+      taskIds.push((bashDetails(handle).piwebBash as { taskId: string }).taskId);
     }
-    await expect(invoke(fixture.tool("bash"), { command: "fifth", yieldMs: 0 })).rejects.toThrow(/4 unsettled/);
+    await expect(invoke(fixture.tool("bash"), { command: "fifth", run_in_background: true })).rejects.toThrow(/4 unsettled/);
     expect(pending).toHaveLength(4);
     pending.forEach((item) => item.resolve({ exitCode: 0 }));
-    for (const executionId of ids) {
-      await invoke(fixture.tool("bash_poll"), { executionId, waitMs: 1000 });
-    }
+    await Promise.all(pending.map((item) => item.promise));
+    for (let index = 0; index < 8; index++) await Promise.resolve();
 
     for (let index = 4; index < 64; index++) {
-      const handle = await invoke(fixture.tool("bash"), { command: `handle-${index}`, yieldMs: 0 });
-      const executionId = (bashDetails(handle).piwebBash as { executionId: string }).executionId;
-      ids.push(executionId);
-      pending.at(-1)?.resolve({ exitCode: 0 });
-      await invoke(fixture.tool("bash_poll"), { executionId, waitMs: 1000 });
+      const handle = await invoke(fixture.tool("bash"), { command: `task-${index}`, run_in_background: true });
+      taskIds.push((bashDetails(handle).piwebBash as { taskId: string }).taskId);
     }
-    expect(ids).toHaveLength(64);
-    const listing = await invoke(fixture.tool("bash_poll"), {});
-    const rows = (bashDetails(listing).piwebBash as { executions: unknown[] }).executions;
+    expect(taskIds).toHaveLength(64);
+    const listing = await invoke(fixture.tool("bash_output"), {});
+    const rows = (bashDetails(listing).piwebBash as { tasks: unknown[] }).tasks;
     expect(rows).toHaveLength(64);
-    await expect(invoke(fixture.tool("bash"), { command: "overflow", yieldMs: 0 })).rejects.toThrow(/64 Bash handle limit/);
-    expect(pending).toHaveLength(64);
+    expect(resultText(listing)).toContain(`"task_id":"${taskIds[0]}"`);
+    await expect(invoke(fixture.tool("bash"), { command: "overflow", run_in_background: true }))
+      .rejects.toThrow(/64 Bash task record limit/);
+    expect(launchCount).toBe(64);
+
+    const firstTaskId = taskIds[0]!;
+    await invoke(fixture.tool("bash_output"), { task_id: firstTaskId });
+    const replacement = await invoke(fixture.tool("bash"), { command: "replace-observed", run_in_background: true });
+    const replacementTaskId = (bashDetails(replacement).piwebBash as { taskId: string }).taskId;
+    const afterEviction = await invoke(fixture.tool("bash_output"), {});
+    const remainingTasks = (bashDetails(afterEviction).piwebBash as { tasks: Array<{ taskId: string }> }).tasks;
+    expect(remainingTasks).toHaveLength(64);
+    expect(remainingTasks.some((task) => task.taskId === replacementTaskId)).toBe(true);
+    await expect(invoke(fixture.tool("bash_output"), { task_id: firstTaskId, block: false }))
+      .rejects.toThrow(/not available in this run/);
+    expect(launchCount).toBe(65);
   });
 
   it("bounds raw output before Pi forwarding and marks the resulting final record partial", async () => {
@@ -337,13 +350,13 @@ describe("run-scoped Bash execution", () => {
       if (options.signal?.aborted) throw new Error("aborted");
       return { exitCode: 0 };
     }, { base: floodBase });
-    const handle = await invoke(fixture.tool("bash"), { command: "flood", yieldMs: 0 });
-    const executionId = (bashDetails(handle).piwebBash as { executionId: string }).executionId;
-    const listing = await invoke(fixture.tool("bash_poll"), {});
-    const executions = (bashDetails(listing).piwebBash as { executions: Array<{ partial?: boolean; stopReason?: string }> }).executions;
+    const handle = await invoke(fixture.tool("bash"), { command: "flood", run_in_background: true });
+    const taskId = (bashDetails(handle).piwebBash as { taskId: string }).taskId;
+    const listing = await invoke(fixture.tool("bash_output"), {});
+    const executions = (bashDetails(listing).piwebBash as { tasks: Array<{ partial?: boolean; stopReason?: string }> }).tasks;
     expect(forwardedBytes).toEqual([16 * 1024 * 1024]);
     expect(executions[0]).toMatchObject({ partial: true, stopReason: "output_limit" });
-    await expect(invoke(fixture.tool("bash_poll"), { executionId, waitMs: 0 })).rejects.toThrow(/partial output.*must not be treated/);
+    await expect(invoke(fixture.tool("bash_output"), { task_id: taskId, block: false })).rejects.toThrow(/partial output.*must not be treated/);
   });
 
   it("keeps close-timeout quota until late settlement and blocks same-conversation replacement", async () => {
@@ -356,7 +369,7 @@ describe("run-scoped Bash execution", () => {
       onChange: (owner) => oldChanges.push(owner),
       base: simpleBase,
     });
-    const handle = await invoke(old.tool("bash"), { command: "unkillable", yieldMs: 0 });
+    const handle = await invoke(old.tool("bash"), { command: "unkillable", run_in_background: true });
     const close = old.binding.lifecycle.close(old.owner, "run_end");
     await vi.advanceTimersByTimeAsync(2000);
     const report = await close;
@@ -371,16 +384,64 @@ describe("run-scoped Bash execution", () => {
       conversationKey: `cwd\0${replacementOwner.conversationId}`,
       base: simpleBase,
     });
-    await expect(invoke(replacement.tool("bash"), { command: "blocked", yieldMs: 0 })).rejects.toThrow(/previous Bash execution/);
+    await expect(invoke(replacement.tool("bash"), { command: "blocked" })).rejects.toThrow(/previous Bash execution/);
 
     pending.resolve({ exitCode: 0 });
     for (let index = 0; index < 8; index++) await Promise.resolve();
     expect(old.binding.lifecycle.activity(old.owner)).toEqual({ running: 0, stopping: 0, cleanupUnknown: false });
     expect(oldChanges.every((owner) => owner === old.owner)).toBe(true);
-    const replacementResult = await invoke(replacement.tool("bash"), { command: "allowed", yieldMs: 1000 });
+    const replacementResult = await invoke(replacement.tool("bash"), { command: "allowed" });
     expect(resultText(replacementResult)).toContain("(no output)");
     expect(oldChanges.every((owner) => owner === old.owner)).toBe(true);
     expect(bashDetails(handle).piwebBash).toBeDefined();
+  });
+
+  it("cancels a foreground tool wait promptly while bounded close retains an unresponsive native execution", async () => {
+    vi.useFakeTimers();
+    const pending = deferred<{ exitCode: number | null }>();
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    let emitLateOutput!: (data: Buffer) => void;
+    const updates: unknown[] = [];
+    const budget = new BashExecutionBudget();
+    const old = makeFixture(async (_command, _cwd, options) => {
+      emitLateOutput = options.onData;
+      markStarted();
+      return pending.promise;
+    }, { budget, base: simpleBase });
+    const sdkAbort = new AbortController();
+    const foreground = invoke(old.tool("bash"), { command: "ignores-abort" }, sdkAbort.signal, (update) => updates.push(update));
+    const foregroundOutcome = foreground.then(() => "returned", () => "cancelled");
+    await started;
+    sdkAbort.abort();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(await foregroundOutcome).toBe("cancelled");
+    const updatesAtCancellation = updates.length;
+    emitLateOutput(Buffer.from("late foreground output"));
+    expect(updates).toHaveLength(updatesAtCancellation);
+    expect(old.binding.lifecycle.activity(old.owner)).toEqual({ running: 1, stopping: 0, cleanupUnknown: false });
+    const listing = await invoke(old.tool("bash_output"), {});
+    expect((bashDetails(listing).piwebBash as { tasks: unknown[] }).tasks).toHaveLength(0);
+
+    const close = old.binding.lifecycle.close(old.owner, "abort");
+    await vi.advanceTimersByTimeAsync(2000);
+    const report = await close;
+    expect(report.cleanupUnknown).toBe(true);
+    expect(old.binding.lifecycle.activity(old.owner)).toEqual({ running: 0, stopping: 1, cleanupUnknown: true });
+
+    const replacementOwner = Object.freeze({ conversationId: old.owner.conversationId, runId: "after-abort" });
+    const replacement = makeFixture(async () => ({ exitCode: 0 }), {
+      owner: replacementOwner,
+      budget,
+      conversationKey: `cwd\0${replacementOwner.conversationId}`,
+      base: simpleBase,
+    });
+    await expect(invoke(replacement.tool("bash"), { command: "blocked" })).rejects.toThrow(/previous Bash execution/);
+
+    pending.resolve({ exitCode: 0 });
+    for (let index = 0; index < 8; index++) await Promise.resolve();
+    const result = await invoke(replacement.tool("bash"), { command: "released" });
+    expect(resultText(result)).toContain("(no output)");
   });
 
   it("rejects a pre-aborted SDK call before admitting or starting native work", async () => {
@@ -391,12 +452,16 @@ describe("run-scoped Bash execution", () => {
     });
     const signal = new AbortController();
     signal.abort();
-    await expect(invoke(fixture.tool("bash"), { command: "must-not-start", yieldMs: 0 }, signal.signal))
+    await expect(invoke(fixture.tool("bash"), { command: "must-not-start" }, signal.signal))
       .rejects.toThrow(/cancelled before admission/);
-    await expect(invoke(fixture.tool("bash"), { command: "bad-yield", yieldMs: 5001 }))
+    await expect(invoke(fixture.tool("bash"), { command: "legacy-yield", yieldMs: 1 }))
       .rejects.toThrow(/Invalid bash input/);
-    await expect(invoke(fixture.tool("bash"), { command: "bad-timeout", timeout: 0, yieldMs: 0 }))
-      .rejects.toThrow(/Invalid timeout/);
+    await expect(invoke(fixture.tool("bash"), { command: "bad-timeout", timeout: 0 }))
+      .rejects.toThrow(/Invalid bash input/);
+    await expect(invoke(fixture.tool("bash"), { command: "fractional-timeout", timeout: 1.5 }))
+      .rejects.toThrow(/Invalid bash input/);
+    await expect(invoke(fixture.tool("bash"), { command: "excessive-timeout", timeout: 600001 }))
+      .rejects.toThrow(/Invalid bash input/);
     expect(calls).toBe(0);
   });
 
@@ -413,7 +478,7 @@ describe("run-scoped Bash execution", () => {
       }, { owner, conversationKey: `cwd\\0${owner.conversationId}`, budget, base: simpleBase });
       fixtures.push(fixture);
       for (let index = 0; index < 4; index++) {
-        await invoke(fixture.tool("bash"), { command: `hold-${index}`, yieldMs: 0 });
+        await invoke(fixture.tool("bash"), { command: `hold-${index}`, run_in_background: true });
       }
     }
     const overflowOwner = Object.freeze({ conversationId: "conversation-overflow", runId: "run-overflow" });
@@ -422,7 +487,7 @@ describe("run-scoped Bash execution", () => {
       conversationKey: `cwd\\0${overflowOwner.conversationId}`,
       budget,
     });
-    await expect(invoke(overflow.tool("bash"), { command: "overflow", yieldMs: 0 }))
+    await expect(invoke(overflow.tool("bash"), { command: "overflow", run_in_background: true }))
       .rejects.toThrow(/runtime Bash execution limit/);
     expect(pending).toHaveLength(32);
 
@@ -431,11 +496,95 @@ describe("run-scoped Bash execution", () => {
     await Promise.all(closing);
   });
 
+  it("waits in the foreground and passes the default millisecond timeout as Pi seconds", async () => {
+    const completion = deferred<{ exitCode: number | null }>();
+    let started!: () => void;
+    const operationStarted = new Promise<void>((resolve) => { started = resolve; });
+    let nativeTimeout: number | undefined;
+    const fixture = makeFixture(async (_command, _cwd, options) => {
+      nativeTimeout = options.timeout;
+      started();
+      return completion.promise;
+    });
+
+    const pending = invoke(fixture.tool("bash"), { command: "foreground" });
+    let finished = false;
+    void pending.finally(() => { finished = true; });
+    await operationStarted;
+    try {
+      expect(nativeTimeout).toBe(120);
+      expect(finished).toBe(false);
+    } finally {
+      completion.resolve({ exitCode: 0 });
+    }
+    const result = await pending;
+    expect(resultText(result)).toBe("(no output)");
+    expect(bashDetails(result).piwebBash).toBeUndefined();
+
+    let maximumTimeout: number | undefined;
+    const maximum = makeFixture(async (_command, _cwd, options) => {
+      maximumTimeout = options.timeout;
+      return { exitCode: 0 };
+    });
+    await invoke(maximum.tool("bash"), { command: "maximum", timeout: 600000 });
+    expect(maximumTimeout).toBe(600);
+  });
+
+  it("publishes an explicit background task_id and exposes bash_output", async () => {
+    const completion = deferred<{ exitCode: number | null }>();
+    const fixture = makeFixture(async () => completion.promise);
+    const bash = fixture.tool("bash");
+    expect(bash.description).toContain("default 120000; maximum 600000");
+    expect(bash.description).not.toMatch(/timeout in seconds/i);
+    const started = await invoke(bash, { command: "background", run_in_background: true });
+    const details = bashDetails(started).piwebBash as { taskId: string; executionId: string };
+    expect(details.taskId).toMatch(/^[0-9a-f-]{36}$/i);
+    expect(details.taskId).toBe(details.executionId);
+    expect(resultText(started)).toContain(`task_id: ${details.taskId}`);
+    expect(resultText(started)).not.toMatch(/notification|notify|wake/i);
+    expect(fixture.binding.tools.some((tool) => tool.name === "bash_poll")).toBe(false);
+
+    const snapshot = await invoke(fixture.tool("bash_output"), { task_id: details.taskId, block: false });
+    expect((bashDetails(snapshot).piwebBash as { taskId: string; state: string }).taskId).toBe(details.taskId);
+    expect((bashDetails(snapshot).piwebBash as { state: string }).state).toBe("in_progress");
+    await expect(invoke(fixture.tool("bash_output"), { block: true })).rejects.toThrow(/immediate task listing/);
+    await expect(invoke(fixture.tool("bash_output"), { timeout: 1 })).rejects.toThrow(/immediate task listing/);
+    completion.resolve({ exitCode: 0 });
+    const final = await invoke(fixture.tool("bash_output"), { task_id: details.taskId });
+    expect(resultText(final)).toBe("(no output)");
+    const stopped = await invoke(fixture.tool("bash_stop"), { task_id: details.taskId });
+    expect(resultText(stopped)).toBe("(no output)");
+  });
+
+  it("bash_output blocks for 30000ms by default and accepts a 600000ms maximum timeout", async () => {
+    vi.useFakeTimers();
+    const completion = deferred<{ exitCode: number | null }>();
+    const fixture = makeFixture(async () => completion.promise);
+    const started = await invoke(fixture.tool("bash"), { command: "waiting", run_in_background: true });
+    const taskId = (bashDetails(started).piwebBash as { taskId: string }).taskId;
+    const pending = invoke(fixture.tool("bash_output"), { task_id: taskId });
+    let settled = false;
+    void pending.then(() => { settled = true; });
+    try {
+      await vi.advanceTimersByTimeAsync(29999);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      const snapshot = await pending;
+      expect(resultText(snapshot)).toContain("in_progress");
+      await expect(invoke(fixture.tool("bash_output"), { task_id: taskId, timeout: 600001 }))
+        .rejects.toThrow(/Invalid bash_output input/);
+      completion.resolve({ exitCode: 0 });
+      const final = await invoke(fixture.tool("bash_output"), { task_id: taskId, timeout: 600000 });
+      expect(resultText(final)).toBe("(no output)");
+    } finally {
+      completion.resolve({ exitCode: 0 });
+    }
+  });
+
   it("runs a short command through the native Pi Bash formatter", async () => {
     const fixture = makeFixture(createLocalBashOperations().exec);
     const result = await invoke(fixture.tool("bash"), {
       command: "printf 'piweb-native-format'",
-      yieldMs: 5000,
     });
     expect(resultText(result)).toContain("piweb-native-format");
     expect(bashDetails(result).piwebBash).toBeUndefined();

@@ -222,8 +222,10 @@ describe("ToolCard", () => {
 
   it.each([
     ["bash", "in_progress", "返回时命令仍在执行", "tool-bash-in-progress"],
+    ["bash_output", "in_progress", "返回时命令仍在执行", "tool-bash-in-progress"],
+    ["bash_poll", "in_progress", "返回时命令仍在执行", "tool-bash-in-progress"],
     ["bash_stop", "stopping", "已请求停止，尚未确认退出", "tool-bash-stopping"],
-  ])("does not present a yielded or stopping Bash result as command success", (
+  ])("does not present a background or stopping Bash result as command success", (
     name,
     state,
     label,
@@ -232,7 +234,9 @@ describe("ToolCard", () => {
     const backgroundTool: ToolItem = {
       id: `background-${name}`,
       name,
-      args: { command: "npm test", executionId: "execution-1" },
+      args: name === "bash"
+        ? { command: "npm test", run_in_background: true }
+        : { task_id: "task-1" },
       result: {
         content: [{ type: "text", text: "The tool call returned." }],
         details: {
@@ -253,10 +257,10 @@ describe("ToolCard", () => {
     expect(container.querySelector("details")).toHaveClass(className);
   });
 
-  it("summarizes the planned bash_poll execution list without hiding live states", () => {
+  it("summarizes legacy execution lists and current Bash task lists", () => {
     const poll: ToolItem = {
       id: "poll-many",
-      name: "bash_poll",
+      name: "bash_output",
       args: {},
       result: {
         content: [{ type: "text", text: "Two active commands." }],
@@ -276,6 +280,65 @@ describe("ToolCard", () => {
 
     expect(summary).toHaveTextContent("本次查询时仍有 1 个执行中，1 个停止中");
     expect(container.querySelector("details")).toHaveClass("tool-bash-stopping");
+
+    const tasks: ToolItem = {
+      ...poll,
+      id: "tasks-many",
+      result: {
+        content: [{ type: "text", text: "Two background tasks." }],
+        details: {
+          piwebBash: {
+            tasks: [
+              { taskId: "task-one", state: "in_progress" },
+              { taskId: "task-two", state: "stopping" },
+            ],
+          },
+        },
+      },
+    };
+    const taskView = render(<ToolCard tool={tasks} />);
+    const taskSummary = taskView.container.querySelector("summary") as HTMLElement;
+
+    expect(taskSummary).toHaveTextContent("本次查询时仍有 1 个执行中，1 个停止中");
+    expect(taskView.container.querySelector("details")).toHaveClass("tool-bash-stopping");
+  });
+
+  it("shows bash_output task_id and blocking timeout using the new API labels", () => {
+    const outputTool: ToolItem = {
+      id: "bash-output-1",
+      name: "bash_output",
+      args: { task_id: "task-7", block: true, timeout: 30_000 },
+      result: {
+        content: [{ type: "text", text: "build finished" }],
+        details: {},
+      },
+      status: "done",
+    };
+    const { container } = render(<ToolCard tool={outputTool} />);
+    const summary = container.querySelector("summary") as HTMLElement;
+
+    expect(summary).toHaveTextContent("获取后台命令结果");
+    expect(summary).toHaveTextContent("task-7");
+    fireEvent.click(summary);
+    expect(screen.getByText("后台任务句柄")).toBeInTheDocument();
+    expect(screen.getByText("阻塞等待")).toBeInTheDocument();
+    expect(screen.getByText("30 秒")).toBeInTheDocument();
+    expect(screen.getByText("build finished")).toBeInTheDocument();
+  });
+
+  it("does not call partial output successful even with exit code zero", () => {
+    const { container } = render(<ToolCard tool={{
+      id: "partial-output",
+      name: "bash_output",
+      args: { task_id: "task-1" },
+      result: {
+        content: [{ type: "text", text: "partial output" }],
+        details: { piwebBash: { taskId: "task-1", state: "finished", exitCode: 0, partial: true } },
+      },
+      status: "done",
+    }} />);
+    expect(container.querySelector("summary")).toHaveTextContent("命令已结束，输出不完整");
+    expect(container.querySelector("summary")).not.toHaveTextContent("命令正常结束");
   });
 
   it("renders Agent session tool results as structured information", () => {

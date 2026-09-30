@@ -32,6 +32,7 @@ export type BashExecutionStopReason =
 
 export interface BashExecutionSummary {
   executionId: string;
+  taskId: string;
   state: "in_progress" | "stopping" | "finished";
   exitCode?: number | null;
   stopReason?: BashExecutionStopReason;
@@ -105,33 +106,35 @@ export class BashExecutionBudget {
 
 const MAX_RUNTIME_EXECUTIONS = 32;
 const MAX_RUN_EXECUTIONS = 4;
-const MAX_PUBLISHED_HANDLES = 64;
+const MAX_TASK_RECORDS = 64;
 const MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
 const MAX_PREVIEW_BYTES = 1024;
 const MAX_SUMMARY_FIELD_BYTES = 256;
-const MAX_POLL_WAIT_MS = 5000;
-const DEFAULT_WAIT_MS = 1000;
+const DEFAULT_TIMEOUT_MS = 120_000;
+const MAX_TIMEOUT_MS = 600_000;
+const DEFAULT_OUTPUT_TIMEOUT_MS = 30_000;
+const MAX_OUTPUT_TIMEOUT_MS = 600_000;
 const STOP_WAIT_MS = 1000;
 const CLOSE_WAIT_MS = 2000;
-const MAX_TIMEOUT_MS = 2_147_483_647;
 
 const bashParameters = Type.Object({
   command: Type.String({ description: "Shell command to execute" }),
-  timeout: Type.Optional(Type.Number({ description: "Timeout in seconds (optional, no default timeout)" })),
-  yieldMs: Type.Optional(Type.Integer({ minimum: 0, maximum: MAX_POLL_WAIT_MS })),
+  timeout: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_TIMEOUT_MS, description: "Timeout in milliseconds (default 120000; maximum 600000)" })),
+  run_in_background: Type.Optional(Type.Boolean({ description: "Return a run-scoped task_id immediately instead of waiting for completion" })),
 }, { additionalProperties: false });
 
-const pollParameters = Type.Object({
-  executionId: Type.Optional(Type.String({ minLength: 1 })),
-  waitMs: Type.Optional(Type.Integer({ minimum: 0, maximum: MAX_POLL_WAIT_MS })),
+const outputParameters = Type.Object({
+  task_id: Type.Optional(Type.String({ minLength: 1 })),
+  block: Type.Optional(Type.Boolean()),
+  timeout: Type.Optional(Type.Integer({ minimum: 0, maximum: MAX_OUTPUT_TIMEOUT_MS, description: "Maximum wait in milliseconds (default 30000)" })),
 }, { additionalProperties: false });
 
 const stopParameters = Type.Object({
-  executionId: Type.String({ minLength: 1 }),
+  task_id: Type.String({ minLength: 1 }),
 }, { additionalProperties: false });
 
 type BashInput = Static<typeof bashParameters>;
-type PollInput = Static<typeof pollParameters>;
+type OutputInput = Static<typeof outputParameters>;
 type StopInput = Static<typeof stopParameters>;
 type NativeResult = AgentToolResult<unknown>;
 type NativeError = { error: Error };
@@ -163,7 +166,8 @@ interface ExecutionRecord {
   latestUpdate?: ToolUpdate;
   outputFile?: string;
   outputBytes: number;
-  published: boolean;
+  observed: boolean;
+  readonly published: boolean;
 }
 
 function assertInput<T>(schema: unknown, input: unknown, name: string): asserts input is T {
@@ -225,13 +229,15 @@ function updateText(update: ToolUpdate | undefined): string {
 }
 
 function statusText(summary: BashExecutionSummary): string {
+  const identifier = `task_id: ${summary.taskId}`;
   const reason = summary.stopReason ? `; stop requested: ${summary.stopReason}` : "";
-  return `Bash execution ${summary.executionId} is ${summary.state}${reason}. It has not produced a final result.`;
+  return `Bash task ${identifier} is ${summary.state}${reason}. It has not produced a final result.`;
 }
 
 function summaryFor(record: ExecutionRecord): BashExecutionSummary {
   const summary: BashExecutionSummary = {
     executionId: record.executionId,
+    taskId: record.executionId,
     state: record.settlement ? "finished" : record.stopReason ? "stopping" : "in_progress",
   };
   if (record.exitCode !== undefined) summary.exitCode = record.exitCode;
@@ -308,19 +314,14 @@ function settledResult(record: ExecutionRecord): NativeResult {
 }
 
 function executionText(summaries: BashExecutionSummary[]): string {
-  if (summaries.length === 0) return "No Bash executions have been published for this run.";
-  const fullText = summaries.map((summary) => JSON.stringify(summary)).join("\n");
+  if (summaries.length === 0) return "No background Bash tasks have been published for this run.";
+  const fullText = summaries.map(({ executionId: _executionId, taskId, ...summary }) =>
+    JSON.stringify({ task_id: taskId, ...summary }),
+  ).join("\n");
   const marker = "\n[Text listing truncated; structured execution rows are complete.]";
   const textLimit = 48 * 1024;
   if (Buffer.byteLength(fullText) <= textLimit) return fullText;
   return `${boundedUtf8(fullText, textLimit - Buffer.byteLength(marker))}${marker}`;
-}
-
-function validateTimeout(timeout: number | undefined): void {
-  if (timeout === undefined) return;
-  if (!Number.isFinite(timeout) || timeout <= 0 || timeout * 1000 > MAX_TIMEOUT_MS) {
-    throw new Error("Invalid timeout: must be a finite positive number of seconds within the supported limit");
-  }
 }
 
 function waitForRecord(
@@ -430,10 +431,16 @@ export function createBashExecutionBinding(options: {
       .filter((record): record is ExecutionRecord => record !== undefined)
       .map(summaryFor);
 
-  const publish = (record: ExecutionRecord) => {
-    if (record.published) return;
-    record.published = true;
-    record.scope.published.add(record.executionId);
+  const releaseOldestObservedTask = (scope: ExecutionScope): boolean => {
+    for (const executionId of scope.published) {
+      const record = scope.executions.get(executionId);
+      if (record?.settlement && record.observed) {
+        scope.published.delete(executionId);
+        scope.executions.delete(executionId);
+        return true;
+      }
+    }
+    return false;
   };
 
   const launch = (
@@ -448,14 +455,15 @@ export function createBashExecutionBinding(options: {
     if (activeCount >= MAX_RUN_EXECUTIONS) {
       throw new Error(`This run already has ${MAX_RUN_EXECUTIONS} unsettled Bash executions`);
     }
-    const unpublishedActive = activeRecords(scope).filter((record) => !record.published).length;
-    if (scope.published.size + unpublishedActive >= MAX_PUBLISHED_HANDLES) {
-      throw new Error(`This run has reached the ${MAX_PUBLISHED_HANDLES} Bash handle limit`);
-    }
     if (scope.admissionClosed || disposed) throw new Error("Bash execution admission is closed for this run");
-    validateTimeout(input.timeout);
+    const background = input.run_in_background === true;
+    const timeoutSeconds = (input.timeout ?? DEFAULT_TIMEOUT_MS) / 1000;
 
     const budgetReservation = options.budget.reserve(options.conversationKey);
+    if (background && scope.published.size >= MAX_TASK_RECORDS && !releaseOldestObservedTask(scope)) {
+      budgetReservation.release();
+      throw new Error(`This run has reached the ${MAX_TASK_RECORDS} Bash task record limit`);
+    }
     const record = {
       executionId: randomUUID(),
       owner,
@@ -464,12 +472,14 @@ export function createBashExecutionBinding(options: {
       budgetReservation,
       settled: Promise.resolve(),
       partial: false,
-      updatesForwarded: true,
+      updatesForwarded: !background,
       outputBytes: 0,
-      published: false,
+      observed: false,
+      published: background,
     } satisfies Omit<ExecutionRecord, "settlement" | "exitCode" | "stopReason" | "error" | "latestUpdate" | "outputFile"> & Partial<Pick<ExecutionRecord, "settlement" | "exitCode" | "stopReason" | "error" | "latestUpdate" | "outputFile">> as ExecutionRecord;
 
     scope.executions.set(record.executionId, record);
+    if (record.published) scope.published.add(record.executionId);
     notify(owner);
 
     const operations: BashOperations = {
@@ -531,7 +541,7 @@ export function createBashExecutionBinding(options: {
       const baseTool = options.createBaseTool(operations);
       execution = Promise.resolve(baseTool.execute(
         toolCallId,
-        { command: input.command, ...(input.timeout === undefined ? {} : { timeout: input.timeout }) } as never,
+        { command: input.command, timeout: timeoutSeconds } as never,
         record.controller.signal,
         privateUpdate,
         context,
@@ -546,40 +556,83 @@ export function createBashExecutionBinding(options: {
     return record;
   };
 
-  const waitAndReturn = async (
+  const waitForForegroundSettlement = (
+    record: ExecutionRecord,
+    signal: AbortSignal | undefined,
+  ): Promise<void> => {
+    if (record.settlement) return Promise.resolve();
+    if (signal?.aborted) {
+      record.updatesForwarded = false;
+      return Promise.reject(new Error("Bash foreground wait was cancelled"));
+    }
+    return new Promise((resolve, reject) => {
+      const cleanup = () => signal?.removeEventListener("abort", cancel);
+      const cancel = () => {
+        record.updatesForwarded = false;
+        cleanup();
+        if (record.settlement) resolve();
+        else reject(new Error("Bash foreground wait was cancelled"));
+      };
+      signal?.addEventListener("abort", cancel, { once: true });
+      void record.settled.then(() => {
+        cleanup();
+        resolve();
+      });
+    });
+  };
+
+  const runForeground = async (record: ExecutionRecord, signal: AbortSignal | undefined): Promise<NativeResult> => {
+    await waitForForegroundSettlement(record, signal);
+    try {
+      return settledResult(record);
+    } finally {
+      record.scope.executions.delete(record.executionId);
+      removeClosedScopeIfSettled(record.scope);
+    }
+  };
+
+  const observeTask = async (
     record: ExecutionRecord,
     waitMs: number,
     signal: AbortSignal | undefined,
   ): Promise<NativeResult> => {
     await waitForRecord(record, waitMs, signal);
-    if (record.settlement) {
-      if (!record.published) {
-        record.scope.executions.delete(record.executionId);
-        removeClosedScopeIfSettled(record.scope);
-      }
-      return settledResult(record);
-    }
-    record.updatesForwarded = false;
-    publish(record);
-    return nonterminalResult(record);
+    if (!record.settlement) return nonterminalResult(record);
+    record.observed = true;
+    return settledResult(record);
   };
 
-  const findPublishedRecord = (owner: BashExecutionOwner, executionId: string): ExecutionRecord => {
+  const findTaskRecord = (owner: BashExecutionOwner, taskId: string): ExecutionRecord => {
     const scope = scopes.get(owner);
-    const record = scope?.executions.get(executionId);
-    if (!record || !scope?.published.has(executionId)) {
-      throw new Error("Bash execution handle is not available in this run");
+    const record = scope?.executions.get(taskId);
+    if (!scope || !record || !scope.published.has(taskId)) {
+      throw new Error("Bash task_id is not available in this run");
     }
     return record;
+  };
+
+  const backgroundResult = (record: ExecutionRecord): NativeResult => {
+    const taskId = record.executionId;
+    const summary = summaryFor(record);
+    return {
+      content: [{
+        type: "text",
+        text: `Background Bash task started. task_id: ${taskId}\nUse bash_output({task_id: "${taskId}"}) to wait for or retrieve its result. This task is scoped to the current run.`,
+      }],
+      details: { piwebBash: summary },
+    } as NativeResult;
   };
 
   const bashTemplate = options.createBaseTool(options.operations);
   const bashTool = defineTool({
     name: bashTemplate.name,
     label: bashTemplate.label,
-    description: `${bashTemplate.description} Long-running commands return an execution handle; use bash_poll to inspect or bash_stop to request termination. A returned handle is not a completed result.`,
+    description: "Run a shell command in the current working directory and return native stdout/stderr output and truncation details. The timeout is an integer number of milliseconds (default 120000; maximum 600000). Foreground commands wait until completion. Use run_in_background for parallel work or to avoid blocking; background tasks are scoped to the current run and may be stopped when it ends. Use bash_output to wait for or retrieve their results.",
     promptSnippet: bashTemplate.promptSnippet,
-    promptGuidelines: bashTemplate.promptGuidelines,
+    promptGuidelines: [
+      ...(bashTemplate.promptGuidelines ?? []),
+      "Bash timeout is an integer number of milliseconds (default 120000, maximum 600000). Use run_in_background for parallel work or to avoid blocking. Background tasks are run-scoped; use bash_output to wait for or retrieve their results.",
+    ],
     constrainedSampling: bashTemplate.constrainedSampling,
     renderShell: bashTemplate.renderShell,
     renderCall: bashTemplate.renderCall as ToolDefinition<typeof bashParameters>["renderCall"],
@@ -592,50 +645,51 @@ export function createBashExecutionBinding(options: {
       const owner = currentOwner();
       const scope = getScope(owner);
       const record = launch(owner, scope, rawInput, toolCallId, onUpdate, context);
-      const yieldMs = rawInput.yieldMs ?? DEFAULT_WAIT_MS;
-      return waitAndReturn(record, yieldMs, signal);
+      return record.published ? backgroundResult(record) : runForeground(record, signal);
     },
   });
 
-  const pollTool = defineTool({
-    name: "bash_poll",
-    label: "Bash poll",
-    description: "Inspect or wait briefly for a Bash execution published by this exact run. Without executionId, list this run's bounded execution handles. Polling never consumes output or changes command ownership.",
-    promptSnippet: "Use bash_poll to inspect a running Bash handle; it does not consume output.",
-    promptGuidelines: ["Finished commands still require an explicit successful exit code; a poll response alone is not proof of success."],
-    parameters: pollParameters,
+  const outputTool = defineTool({
+    name: "bash_output",
+    label: "Bash output",
+    description: "Wait for or inspect a background Bash task by task_id. block defaults to true and waits up to 30000 ms (maximum 600000 ms); block:false returns immediately. Without task_id, list this run's bounded task records.",
+    promptSnippet: "Use bash_output({task_id}) to wait once for a background result; use block:false for a nonblocking snapshot or omit task_id to list tasks.",
+    promptGuidelines: ["A finished task is not necessarily successful; require a known exitCode of zero and a complete result."],
+    parameters: outputParameters,
     async execute(_toolCallId, rawInput, signal) {
-      assertInput<PollInput>(pollParameters, rawInput, "bash_poll");
+      assertInput<OutputInput>(outputParameters, rawInput, "bash_output");
       const owner = currentOwner();
-      if (rawInput.executionId === undefined) {
-        if (rawInput.waitMs !== undefined && rawInput.waitMs !== 0) {
-          throw new Error("bash_poll without executionId does not accept a wait");
+      if (rawInput.task_id === undefined) {
+        if (rawInput.block === true || (rawInput.timeout !== undefined && rawInput.timeout > 0)) {
+          throw new Error("bash_output without task_id only supports an immediate task listing");
         }
         const scope = scopes.get(owner);
         const rows = scope ? recordSummaryRows(scope) : [];
         return {
           content: [{ type: "text", text: executionText(rows) }],
-          details: { piwebBash: { executions: rows } },
+          details: { piwebBash: { tasks: rows } },
         };
       }
-      const record = findPublishedRecord(owner, rawInput.executionId);
-      return waitAndReturn(record, rawInput.waitMs ?? DEFAULT_WAIT_MS, signal);
+      const record = findTaskRecord(owner, rawInput.task_id);
+      const block = rawInput.block ?? true;
+      const timeout = rawInput.timeout ?? DEFAULT_OUTPUT_TIMEOUT_MS;
+      return observeTask(record, block ? timeout : 0, signal);
     },
   });
 
   const stopTool = defineTool({
     name: "bash_stop",
     label: "Bash stop",
-    description: "Idempotently request termination of one Bash execution published by this exact run, then wait briefly for the native executor. A stopping response is not a completion result.",
-    promptSnippet: "Use bash_stop to request termination of one running Bash handle.",
-    promptGuidelines: ["A stopping response means termination is unconfirmed; use bash_poll to wait for the final native result."],
+    description: "Idempotently request termination of one background Bash task by task_id, then wait briefly for the native executor. A stopping response is not a completion result.",
+    promptSnippet: "Use bash_stop({task_id}) to request termination of one running background task.",
+    promptGuidelines: ["A stopping response means termination is unconfirmed; use bash_output({task_id}) to wait for the final result."],
     parameters: stopParameters,
     async execute(_toolCallId, rawInput, signal) {
       assertInput<StopInput>(stopParameters, rawInput, "bash_stop");
       const owner = currentOwner();
-      const record = findPublishedRecord(owner, rawInput.executionId);
+      const record = findTaskRecord(owner, rawInput.task_id);
       requestStopRecord(record, "manual");
-      return waitAndReturn(record, STOP_WAIT_MS, signal);
+      return observeTask(record, STOP_WAIT_MS, signal);
     },
   });
 
@@ -725,5 +779,5 @@ export function createBashExecutionBinding(options: {
     },
   };
 
-  return { tools: [bashTool, pollTool, stopTool], lifecycle };
+  return { tools: [bashTool, outputTool, stopTool], lifecycle };
 }

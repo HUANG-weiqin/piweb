@@ -151,15 +151,20 @@ function bashExecutionFact(value: unknown): unknown {
   if (!bash) return;
   const projectSummary = (value: unknown): Record<string, unknown> | undefined => {
     const summary = record(value);
+    const executionId = summary?.executionId;
+    const taskId = summary?.taskId;
+    const hasExecutionId = typeof executionId === "string" && executionId.length <= 256;
+    const hasTaskId = typeof taskId === "string" && taskId.length > 0 && taskId.length <= 256;
     if (
-      typeof summary?.executionId !== "string"
-      || summary.executionId.length > 256
+      !summary || (!hasExecutionId && !hasTaskId)
       || !["in_progress", "stopping", "finished"].includes(String(summary.state))
     ) return;
     const projected: Record<string, unknown> = {
-      executionId: summary.executionId,
+      ...(hasExecutionId ? { executionId } : {}),
+      ...(hasTaskId ? { taskId } : {}),
       state: summary.state,
     };
+    if (summary.partial === true) projected.partial = true;
     if (
       summary.exitCode === null
       || (typeof summary.exitCode === "number" && Number.isFinite(summary.exitCode))
@@ -173,10 +178,12 @@ function bashExecutionFact(value: unknown): unknown {
     }
     return projected;
   };
-  if (bash.executions !== undefined) {
-    if (!Array.isArray(bash.executions)) return;
+  const listKey = bash.tasks !== undefined ? "tasks" : "executions";
+  const summaries = bash[listKey];
+  if (summaries !== undefined) {
+    if (!Array.isArray(summaries)) return;
     return {
-      executions: bash.executions.slice(0, 4).flatMap((summary) => {
+      [listKey]: summaries.slice(0, 4).flatMap((summary) => {
         const projected = projectSummary(summary);
         return projected === undefined ? [] : [projected];
       }),

@@ -462,7 +462,11 @@ describe("createReadOnlyBashTool", { timeout: TEST_TIMEOUT_MS }, () => {
     expect(tool.parameters).toBe(piBash.parameters);
     expect(tool.description).toMatch(/reviewed query shell.*Git, rg/i);
     expect(tool.description).toMatch(/not an OS sandbox/i);
+    expect(tool.description).not.toMatch(/run_in_background|bash_output|10 minutes|milliseconds/i);
+    expect(JSON.stringify(tool.parameters)).toMatch(/timeout.{0,100}seconds/i);
     expect(tool.promptSnippet).toMatch(/Git, rg, and file queries/i);
+    expect(tool.promptSnippet).not.toMatch(/run_in_background|bash_output/i);
+    expect(tool.promptGuidelines?.join(" ")).not.toMatch(/run_in_background|bash_output/i);
     expect(tool.promptGuidelines).toEqual(expect.arrayContaining([
       expect.stringMatching(/cd.*do not persist/i),
       expect.stringMatching(/redirects.*rejected/i),
