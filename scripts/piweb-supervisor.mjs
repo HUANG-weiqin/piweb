@@ -16,7 +16,7 @@ import {
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   applyReloadResumeDispositions,
   completeReloadTarget,
@@ -31,12 +31,35 @@ const DEFAULT_PORT = 31415;
 const MAX_RESUME_ATTEMPTS = 6;
 const RESUME_RETRY_DELAY_MS = 1_000;
 const MAX_RESUME_PASS_DELAY_MS = 30_000;
-const args = process.argv.slice(2);
-if (args.length > 1 || (args.length === 1 && args[0] !== "--dev")) {
-  console.error("Usage: node scripts/piweb-supervisor.mjs [--dev]");
-  process.exitCode = 1;
-} else {
-  await runSupervisor(args[0] === "--dev");
+export function rejectBlockedReload(operation, child, message) {
+  if (
+    !operation
+    || message.type !== "piweb_reload_blocked"
+    || operation.child !== child
+    || operation.phase !== "preparing"
+    || message.requestId !== operation.requestId
+  ) {
+    return undefined;
+  }
+  const error = new Error(
+    typeof message.message === "string"
+      ? message.message
+      : "The server child blocked automatic reload.",
+  );
+  operation.rejectChildAcceptance(error);
+  return error;
+}
+
+const directExecution = process.argv[1] !== undefined
+  && import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
+if (directExecution) {
+  const args = process.argv.slice(2);
+  if (args.length > 1 || (args.length === 1 && args[0] !== "--dev")) {
+    console.error("Usage: node scripts/piweb-supervisor.mjs [--dev]");
+    process.exitCode = 1;
+  } else {
+    await runSupervisor(args[0] === "--dev");
+  }
 }
 
 async function runSupervisor(dev) {
@@ -368,6 +391,19 @@ async function runSupervisor(dev) {
         console.error("Could not acknowledge reload target completion.", error);
         if (child === serverChild && child.connected) child.kill("SIGTERM");
       });
+      return;
+    }
+
+    if (
+      message.type === "piweb_reload_blocked"
+      && typeof message.requestId === "string"
+    ) {
+      const error = rejectBlockedReload(reloadOperation, child, message);
+      if (!error) return;
+      reloadOperation = undefined;
+      console.error(
+        `Reload ${message.requestId} blocked; the old server remains running: ${error.message}`,
+      );
       return;
     }
 

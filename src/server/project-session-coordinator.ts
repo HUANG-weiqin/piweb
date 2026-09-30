@@ -67,6 +67,7 @@ import type {
   CreatePiSessionOptions,
   PiRuntimeLike,
 } from "./pi-runtime.js";
+import { BashCleanupUnconfirmedError } from "./bash-execution.js";
 import { ConversationExtensionUIRouter } from "./conversation-extension-ui-router.js";
 import type { PortableExtensionUI } from "./extension-ui.js";
 import {
@@ -528,6 +529,7 @@ export class ProjectSessionCoordinator {
   private projectActivityRevision = 0;
   private closing = false;
   private disposed = false;
+  private reloadBlockedByBashCleanup = false;
   private closePromise?: Promise<void>;
 
   constructor(
@@ -1892,19 +1894,23 @@ export class ProjectSessionCoordinator {
     force: boolean,
     onAdmissionFrozen: () => void,
   ): Promise<ReloadConversationTarget[]> {
-    if (this.closing || this.disposed) {
-      throw new Error("Project session coordinator is closing");
-    }
-    this.closing = true;
-    this.disposed = true;
     const lifecycleClosures = new Map<ProjectContext, Promise<void>>();
-    for (const context of this.contexts.values()) {
-      context.closing = true;
-      lifecycleClosures.set(context, context.lifecycle.close());
-      this.rejectContextWaiters(
-        context,
-        new Error("Session wait was interrupted by server reload"),
-      );
+    const retryingBlockedReload = this.closing || this.disposed;
+    if (retryingBlockedReload) {
+      if (!force || !this.reloadBlockedByBashCleanup) {
+        throw new Error("Project session coordinator is closing");
+      }
+    } else {
+      this.closing = true;
+      this.disposed = true;
+      for (const context of this.contexts.values()) {
+        context.closing = true;
+        lifecycleClosures.set(context, context.lifecycle.close());
+        this.rejectContextWaiters(
+          context,
+          new Error("Session wait was interrupted by server reload"),
+        );
+      }
     }
 
     const pendingProjectCwds = [...this.projectAcquisitionCwds.values()];
@@ -1990,6 +1996,7 @@ export class ProjectSessionCoordinator {
       await Promise.allSettled([...this.contextOpenings.values()]);
       this.contextOpenings.clear();
       await inspectDurableProjects();
+      this.reloadBlockedByBashCleanup = false;
       return [...targets.values()];
     }
 
@@ -2071,6 +2078,19 @@ export class ProjectSessionCoordinator {
         })
       ),
     );
+    const cleanupFailure = stopResults.find(
+      (result): result is PromiseRejectedResult => result.status === "rejected"
+        && result.reason instanceof BashCleanupUnconfirmedError,
+    );
+    const cleanupUnknown = [...this.contexts.values()].some((context) =>
+      [...context.actors.values()].some((actor) =>
+        actor.getBashActivity()?.cleanupUnknown === true
+      )
+    );
+    if (cleanupFailure || cleanupUnknown) {
+      this.reloadBlockedByBashCleanup = true;
+      throw cleanupFailure?.reason ?? new BashCleanupUnconfirmedError();
+    }
     for (const result of stopResults) {
       if (result.status === "rejected") {
         console.warn(
@@ -5605,6 +5625,7 @@ export class ProjectSessionCoordinator {
     envelopes: InboxEnvelope[],
     runId: string,
   ): Promise<"started" | "not_started"> {
+    if (target.getBashActivity()?.cleanupUnknown) return "not_started";
     this.assertRunStartAllowed(context, target.conversationId);
     if (target.getActivity().kind !== "idle") {
       throw new Error(`Conversation is already running: ${target.conversationId}`);
@@ -5826,15 +5847,18 @@ export class ProjectSessionCoordinator {
       finishAsDeleted();
       return;
     }
-    const retryAlreadyConsumed = context.failedBatchRetries.has(key);
     if (context.deleting.has(targetConversationId)) {
-      if (continuingAfterDeletionReservation || !retryAlreadyConsumed) {
+      if (continuingAfterDeletionReservation || !context.failedBatchRetries.has(key)) {
         requeueAfterDeletionReservation();
       } else {
         context.processingBatches.delete(key);
       }
       return;
     }
+    if (context.actors.get(targetConversationId)?.getBashActivity()?.cleanupUnknown) {
+      return;
+    }
+    const retryAlreadyConsumed = context.failedBatchRetries.has(key);
     if (retryAlreadyConsumed && !continuingAfterDeletionReservation) {
       context.processingBatches.delete(key);
       return;
@@ -6647,6 +6671,7 @@ export class ProjectSessionCoordinator {
     }
     const actor = context.actors.get(conversationId);
     if (!actor) return "no_work";
+    if (actor.getBashActivity()?.cleanupUnknown) return "no_work";
     if (!await this.reconcileInbox(context, conversationId, list)) return "no_work";
     const receiptRunIds = await this.readUnsettledReceiptRuns(
       context,

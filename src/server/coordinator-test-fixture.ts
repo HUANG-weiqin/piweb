@@ -528,6 +528,7 @@ class FakeRuntime implements PiRuntimeLike {
   projectModelRegistry?: ModelRegistry;
   readonly controls = new Map<string, FakeSessionControl>();
   readonly createOptions = new Map<string, CreatePiSessionOptions>();
+  bashExecutions?: CreatedPiSession["bashExecutions"];
   readonly modelListeners = new Set<() => void>();
   readonly createConversationIds: string[] = [];
   readonly availableModels: RoleCatalogModel[] = [
@@ -631,6 +632,9 @@ class FakeRuntime implements PiRuntimeLike {
       activateExtensions: () =>
         this.activateSession?.(conversationId, options)
         ?? Promise.resolve(),
+      ...(this.bashExecutions === undefined
+        ? {}
+        : { bashExecutions: this.bashExecutions }),
       activateExtensionErrors: (
         _handler: (error: ExtensionError) => void,
       ) => [],

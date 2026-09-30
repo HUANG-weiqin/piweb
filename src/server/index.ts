@@ -7,6 +7,7 @@ import { CustomProviderStore } from "./custom-provider-store.js";
 import { refreshModelCatalogOnStartup } from "./model-refresh.js";
 import { PiRuntime } from "./pi-runtime.js";
 import { attachSocketServer } from "./socket-server.js";
+import { BashCleanupUnconfirmedError } from "./bash-execution.js";
 import { UiPreferencesStore } from "./ui-preferences-store.js";
 import type {
   ReloadConversationTarget,
@@ -304,7 +305,9 @@ process.on("message", (message: unknown) => {
     })().catch(async (error) => {
       console.error("Failed to prepare hot reload", error);
       await sendToSupervisor({
-        type: "piweb_reload_failed",
+        type: error instanceof BashCleanupUnconfirmedError
+          ? "piweb_reload_blocked"
+          : "piweb_reload_failed",
         requestId,
         message: error instanceof Error ? error.message : String(error),
       }).catch(() => undefined);

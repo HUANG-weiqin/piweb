@@ -50,6 +50,10 @@ import type {
   CredentialChangeIntent,
   PiRuntimeLike,
 } from "./pi-runtime.js";
+import {
+  BashCleanupUnconfirmedError,
+  type BashExecutionOwner,
+} from "./bash-execution.js";
 import type { PortableExtensionUI } from "./extension-ui.js";
 import { WorkspaceLsp } from "./lsp/workspace.js";
 import {
@@ -528,6 +532,288 @@ describe("ProjectSessionCoordinator", () => {
       release.resolve();
     }
     await expect(running).resolves.toMatchObject({ outcome: "completed" });
+  });
+
+  it.each([
+    ["typed stop rejection", new BashCleanupUnconfirmedError(), false],
+    ["writer failure with unknown Bash still active", new Error("notice persistence failed"), true],
+  ])("blocks default reload for %s and allows explicit force", async (_case, error, cleanupUnknown) => {
+    const fixture = await createFixture();
+    const actor = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const started = deferred();
+    const release = deferred();
+    fixture.runtime.control(actor.conversationId).enqueue(
+      blocksUntil(started, release, "force can replace the blocked server"),
+    );
+    const running = fixture.coordinator.prompt(
+      fixture.handle,
+      actor.conversationId,
+      RUN_A,
+      "block safe reload when Bash cleanup is unknown",
+    );
+    await started.promise;
+
+    vi.spyOn(actor, "stopForReload").mockRejectedValue(error);
+    if (cleanupUnknown) {
+      vi.spyOn(actor, "getBashActivity").mockReturnValue({
+        runId: RUN_A,
+        running: 0,
+        stopping: 1,
+        cleanupUnknown: true,
+      });
+    }
+    try {
+      await expect(fixture.coordinator.prepareReload(false, () => undefined))
+        .rejects.toBeInstanceOf(BashCleanupUnconfirmedError);
+      await expect(fixture.coordinator.prepareReload(false, () => undefined))
+        .rejects.toThrow("Project session coordinator is closing");
+      await expect(fixture.coordinator.prepareReload(true, () => undefined))
+        .resolves.toEqual([{
+          cwd: fixture.cwd,
+          conversationId: actor.conversationId,
+          continueTask: true,
+        }]);
+    } finally {
+      release.resolve();
+      await running;
+    }
+  });
+
+  it("leaves queued inbox work untouched when a mapped actor has unknown Bash cleanup", async () => {
+    const fixture = await createFixture();
+    await settleFixtureRecovery(fixture);
+    let targetConversationId: string | undefined;
+    let targetRunId: string | undefined;
+    let unknownOwner: BashExecutionOwner | undefined;
+    const noCleanup = { executions: [], cleanupUnknown: false } as const;
+    fixture.runtime.bashExecutions = {
+      requestStop: () => undefined,
+      close: async (owner) => {
+        if (owner.conversationId !== targetConversationId || owner.runId !== targetRunId) {
+          return noCleanup;
+        }
+        unknownOwner = owner;
+        return {
+          executions: [{ executionId: "unknown-bash", state: "stopping" }],
+          cleanupUnknown: true,
+        };
+      },
+      dispose: async () => noCleanup,
+      activity: (owner) => owner === unknownOwner
+        ? { running: 0, stopping: 1, cleanupUnknown: true }
+        : { running: 0, stopping: 0, cleanupUnknown: false },
+    };
+    const source = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const target = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    targetConversationId = target.conversationId;
+    targetRunId = randomUUID();
+    const targetStarted = deferred();
+    const releaseTarget = deferred();
+    fixture.runtime.control(target.conversationId).enqueue(
+      blocksUntil(targetStarted, releaseTarget, "unknown Bash must stop inbox work"),
+    );
+    const targetCompletion = fixture.coordinator.prompt(
+      fixture.handle,
+      target.conversationId,
+      targetRunId,
+      "finish with unconfirmed Bash cleanup",
+    );
+    await targetStarted.promise;
+
+    const messageId = randomUUID();
+    const cardId = randomUUID();
+    const sentAt = new Date().toISOString();
+    const fromSnapshot = {
+      conversationId: source.conversationId,
+      role: { id: "default", name: "Default" },
+    };
+    const toSnapshot = {
+      conversationId: target.conversationId,
+      role: { id: "default", name: "Default" },
+    };
+    appendReservedCustomEntry(source.sessionManager, createConversationCardEntry({
+      cardId,
+      kind: "message",
+      summary: "queued while recipient runs",
+      body: "do not claim this after Bash cleanup becomes unknown",
+      fromSnapshot,
+      toSnapshot,
+      state: "sending",
+      messageId,
+      updatedAt: sentAt,
+    }));
+    const inbox = coordinatorInbox(fixture.handle);
+    await inbox.put({
+      messageId,
+      cardId,
+      fromConversationId: source.conversationId,
+      toConversationId: target.conversationId,
+      sentAt,
+      kind: "message",
+      summary: "queued while recipient runs",
+      body: "do not claim this after Bash cleanup becomes unknown",
+      fromRunId: randomUUID(),
+      fromSnapshot,
+      toSnapshot,
+    });
+
+    releaseTarget.resolve();
+    await expect(targetCompletion).resolves.toMatchObject({ outcome: "failed" });
+    const context = (fixture.handle as unknown as {
+      context: {
+        backgroundTasks: Set<Promise<void>>;
+        scheduledPumps: Set<string>;
+      };
+    }).context;
+    await waitUntil(
+      () => target.getBashActivity()?.cleanupUnknown === true
+        && context.backgroundTasks.size === 0
+        && !context.scheduledPumps.has(target.conversationId),
+      "unknown-cleanup inbox pump to stop",
+    );
+
+    expect(target.getBashActivity()).toMatchObject({ cleanupUnknown: true });
+    expect(fixture.runtime.createConversationIds.filter((id) => id === target.conversationId))
+      .toHaveLength(1);
+    expect(await inbox.list()).toEqual([expect.objectContaining({
+      messageId,
+      state: "queued",
+    })]);
+    expect(fixture.runtime.control(target.conversationId).received)
+      .not.toContainEqual(expect.objectContaining({ details: expect.objectContaining({ messageId }) }));
+  });
+
+  it("does not replace an actor or retry its batch after inbox-run Bash cleanup becomes unknown", async () => {
+    const fixture = await createFixture();
+    await settleFixtureRecovery(fixture);
+    let targetConversationId: string | undefined;
+    let unknownOwner: BashExecutionOwner | undefined;
+    const noCleanup = { executions: [], cleanupUnknown: false } as const;
+    fixture.runtime.bashExecutions = {
+      requestStop: () => undefined,
+      close: async (owner) => {
+        if (owner.conversationId !== targetConversationId) return noCleanup;
+        unknownOwner = owner;
+        return {
+          executions: [{ executionId: "unknown-bash", state: "stopping" }],
+          cleanupUnknown: true,
+        };
+      },
+      dispose: async () => noCleanup,
+      activity: (owner) => owner === unknownOwner
+        ? { running: 0, stopping: 1, cleanupUnknown: true }
+        : { running: 0, stopping: 0, cleanupUnknown: false },
+    };
+    const source = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    const target = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    targetConversationId = target.conversationId;
+    const targetStarted = deferred();
+    const releaseTarget = deferred();
+    fixture.runtime.control(target.conversationId).enqueue(
+      blocksUntil(targetStarted, releaseTarget, "preserve both durable inbox items"),
+    );
+    const sourceRun = await startBlockedSourceRun(
+      fixture,
+      source.conversationId,
+      "send inbox work to the target",
+    );
+    await executeTool(
+      fixture.runtime.control(source.conversationId),
+      "send_session_message",
+      "unknown-bash-first-inbox-item",
+      {
+        conversationId: target.conversationId,
+        summary: "first queued item",
+        message: "this item starts the target run",
+      },
+    );
+    await targetStarted.promise;
+    const inbox = coordinatorInbox(fixture.handle);
+    const secondMessageId = randomUUID();
+    const secondCardId = randomUUID();
+    const secondSentAt = new Date().toISOString();
+    const fromSnapshot = {
+      conversationId: source.conversationId,
+      role: { id: "default", name: "Default" },
+    };
+    const toSnapshot = {
+      conversationId: target.conversationId,
+      role: { id: "default", name: "Default" },
+    };
+    appendReservedCustomEntry(source.sessionManager, createConversationCardEntry({
+      cardId: secondCardId,
+      kind: "message",
+      summary: "second queued item",
+      body: "this item must remain queued",
+      fromSnapshot,
+      toSnapshot,
+      state: "sending",
+      messageId: secondMessageId,
+      updatedAt: secondSentAt,
+    }));
+    await inbox.put({
+      messageId: secondMessageId,
+      cardId: secondCardId,
+      fromConversationId: source.conversationId,
+      toConversationId: target.conversationId,
+      sentAt: secondSentAt,
+      kind: "message",
+      summary: "second queued item",
+      body: "this item must remain queued",
+      fromRunId: sourceRun.runId,
+      fromSnapshot,
+      toSnapshot,
+    });
+
+    fixture.runtime.control(target.conversationId).skipNextCustomMessagePersistence = true;
+    releaseTarget.resolve();
+    const context = (fixture.handle as unknown as {
+      context: {
+        backgroundTasks: Set<Promise<void>>;
+        scheduledPumps: Set<string>;
+      };
+    }).context;
+    await waitUntil(
+      () => target.getBashActivity()?.cleanupUnknown === true
+        && target.getState().fatalError !== undefined
+        && target.getActivity().kind === "idle",
+      "inbox-run to fail after Bash cleanup becomes unknown",
+    );
+    sourceRun.release.resolve();
+    await sourceRun.completion;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await waitUntil(
+      () => context.backgroundTasks.size === 0
+        && !context.scheduledPumps.has(target.conversationId),
+      "failed inbox recovery and source completion to settle",
+    );
+
+    expect(target.getState().fatalError).toContain("durably appended");
+    expect(fixture.runtime.createConversationIds.filter((id) => id === target.conversationId))
+      .toHaveLength(1);
+    expect(fixture.runtime.control(target.conversationId).disposeCalls).toBe(0);
+    expect(await inbox.list()).toEqual([
+      expect.objectContaining({ messageId: secondMessageId, state: "queued" }),
+    ]);
+    expect(fixture.runtime.control(target.conversationId).received)
+      .not.toContainEqual(expect.objectContaining({
+        details: expect.objectContaining({ messageId: secondMessageId }),
+      }));
   });
 
   it("interrupts a session wait before draining reload boundaries", async () => {
