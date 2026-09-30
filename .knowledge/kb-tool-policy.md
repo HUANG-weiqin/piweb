@@ -1,6 +1,6 @@
 # 工具权限
 
-`updated: 2026-09-12`
+`updated: 2026-09-30`
 
 ## 这个模块是干什么的
 
@@ -34,14 +34,16 @@ conversation role snapshot
 ## 策略
 
 - `full_access` 在角色授权层允许所有工具和命令，不区分来源或目标位置；项目外路径和 `.piweb` 也不额外拦截。ConversationActor 另对 builtin `edit/write` 执行 run-scoped 首次写入 LoopList 门，它是认知承诺而不是权限或路径 sandbox，`bash`、脚本和扩展工具仍可绕过。
-- `read_only` 对模型只展示 `source=builtin` 的 Pi 原生 `read / grep / find / ls`，以及 `source=sdk` 的宿主受审查 `bash`、conversation-scoped `notebook_write / notebook_list / notebook_grep / notebook_read`、本机时间 `current_time`、只读 LSP `lsp_symbols / lsp_definition / lsp_references`、LoopList `todo_read / todo_write / todo_pause`、`request_context_compaction` 和 `list_roles / read_role / propose_role_revision`；builtin `bash`、`edit / write`、会话编排 meta 和其他扩展工具不进入有效 registry、model tools 或 system prompt。
-- 执行 gate 独立重复同一 identity 约束；`read_only` 直接拒绝项目写入、unknown、会话编排 meta，以及同名 builtin/extension/project Bash。宿主 Bash、`current_time` 和三个角色工具只有 `source=sdk` 时放行；工具不可见不是权限边界，硬拒绝仍不可删除。
+- `read_only` 对模型只展示 `source=builtin` 的 Pi 原生 `read / grep / find / ls`，以及 `source=sdk` 的宿主受审查 `bash` 及其 run-scoped `bash_poll / bash_stop`、conversation-scoped `notebook_write / notebook_list / notebook_grep / notebook_read`、本机时间 `current_time`、只读 LSP `lsp_symbols / lsp_definition / lsp_references`、LoopList `todo_read / todo_write / todo_pause`、`request_context_compaction` 和 `list_roles / read_role / propose_role_revision`；builtin `bash`、`edit / write`、会话编排 meta 和其他扩展工具不进入有效 registry、model tools 或 system prompt。
+- 执行 gate 独立重复同一 identity 约束；`read_only` 直接拒绝项目写入、unknown、会话编排 meta，以及同名 builtin/extension/project Bash。宿主 `bash / bash_poll / bash_stop`、`current_time` 和三个角色工具只有 `source=sdk` 时放行；工具不可见不是权限边界，硬拒绝仍不可删除。
 - 扩展可以用 `read` 等名称覆盖内置工具；策略必须同时检查最终 `toolName` 和 SDK `ToolInfo.sourceInfo.source`，不能只按名称放行。PiRuntime 对每次 `setActiveToolsByName`（包括 extension refresh 和 `setActiveTools`）重新做 source-aware 投影，同名覆盖发生后宁可移除该工具，也不把扩展 schema/snippet 暴露给只读模型。
 - Agent 的 `read_only` 只限制经过 Pi 工具入口的调用；工作台宿主仍会写 manifest 和 transcript。
 
 ## 受审查的只读 Bash
 
-`read_only` 会话由 `PiRuntime` 在 session services 解析完成后注入一个 `source=sdk`、名称仍为 `bash` 的宿主包装器，它使用同一 `SettingsManager` 的有效 `shellPath`，覆盖并替代 Pi builtin Bash；`full_access` 会话继续直接使用 Pi builtin Bash。包装器保留 Pi Bash 的参数 schema、timeout、AbortSignal、流式更新、输出截断和结果语义，但在任何进程执行前先审查最终 `command`，通过后才委托 `createBashToolDefinition(cwd, { shellPath })`。包装器不接受或追加 `shellCommandPrefix`，避免审查后再改变命令文本。
+Actor-owned 会话由 `PiRuntime` 在 session services 解析完成后注入 `source=sdk` 的 `bash / bash_poll / bash_stop`，用同一 `SettingsManager` 的有效 `shellPath`，替代 Pi builtin Bash。`read_only` 的启动工具仍在任何执行前审查最终 `command`，通过后才委托公开的 Pi `createBashToolDefinition` 与 local operations，保留原生输出、截断、全文临时文件和失败语义；它不接受或追加 `shellCommandPrefix`，避免审查后再改变文本。`full_access` 使用同一有界生命周期，但允许有效配置中的原生 command prefix。没有 Actor ownership 的独立 runtime 兼容路径仍保留原生同步 Bash。
+
+`bash` 默认只等 1000ms，`yieldMs` 为 0–5000 的整数，未结束则返回当前逻辑 run 的 executionId；`bash_poll` 是非消费快照，`bash_stop` 是停止请求，不是停止证明。两者不能提交命令、cwd 或其它 run 的句柄，所以不会扩大查询审查目录。SDK signal 只取消当前等待；真正执行使用独立 controller，预先 aborted 的启动调用仍必须在任何准入/执行前拒绝。权限 gate 保持 sequential；可并发的是已经准入的有限命令，不是工具预检。详见 [kb-server-runtime.md](kb-server-runtime.md) 的 Bash 执行边界。
 
 审查只接受有长度上限、整串锚定的安全词法子集。每个程序名都必须是字面量并属于固定查询目录：受约束的 Git 查询、`rg`，以及目录/文件查看和纯 stdout 变换工具。未引用且处于 word 起始的 `~`（包括 `~/…`、`~user`、`~+`、`~-`）属于 shell expansion，必须在执行前拒绝；引用或 token 中间的字面 `~` 不因此拒绝。 受审查命令可以用 `|` 或 `&&` 组合；每个 segment 都独立复核。`cd [--] path` 只能位于同一次调用的后续查询之前，不能持久改变下一次工具调用的 cwd。换行、`; / || / &`、重定向、Shell 展开、环境赋值、命令路径和未知程序一律拒绝。`find` 的删除/执行/文件输出 action、`rg` 的 preprocessor/hostname program、Git 外部 filter/pager/output、`sort` 文件输出/外部 compressor/显式临时目录、`uniq` 输出文件、`tail` follow 和 `file` 解压/compile 等命令级副作用入口及其实际可用长选项缩写另行拒绝。允许安全的裸参数、单引号字面量，以及不含展开或转义的双引号字面量。
 
@@ -67,7 +69,7 @@ Archive 是可恢复隐藏，不是删除：默认 list 不显示 archived，但
 ConversationActor 按角色模式和会话管理能力注入宿主工具：
 
 ```text
-read_only only: bash（受审查的 Git/rg/文件查询 shell 包装器）
+all Actor-owned roles: bash / bash_poll / bash_stop（read_only 的 bash 仍只接受受审查查询）
 all roles: notebook_write / notebook_list / notebook_grep / notebook_read
 all roles: current_time（本机 RFC 3339 offset 时间与 IANA 时区）
 all roles: lsp_symbols / lsp_definition / lsp_references（已配置启用的本机 LSP，无信任询问）
@@ -126,6 +128,7 @@ recovered exact run 从 active branch 的 marker 恢复该 latch。为保持旧 
 - `src/server/project-session-coordinator.ts`
 - `src/server/meta-tools.ts`
 - `src/server/read-only-bash.ts`
+- `src/server/bash-execution.ts`
 - `src/server/notebook-tools.ts`
 - `src/server/conversation-notebook.ts`
 - `src/shared/protocol.ts`

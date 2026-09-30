@@ -1,6 +1,6 @@
 # 服务端运行时
 
-`updated: 2026-09-25`
+`updated: 2026-09-30`
 
 ## 这个模块是干什么的
 
@@ -29,6 +29,18 @@
 - Windows 极简 `computer` 只在 frozen role 为 `full_access` 且 Actor 提供 exact active `ConversationRunOwnership` 时作为 custom tool 安装；`read_only` 既不可见也由既有 source-aware gate 拒绝。`PiRuntime` 惰性创建一个进程级 `DesktopController`，其 Koffi/Win32 adapter 只在真实首次调用加载；非 vision model 或 `images.blockImages=true` 会在 adapter 创建和任何桌面副作用前拒绝。controller 以 ownership 对象 identity fail-fast 串行 desktop lease；取消、terminal、reload、dispose 请求 release，但 native in-flight primitive settle 后才交给下一 owner。成功 capture 在 tool 返回前归一化成标准 durable content：结果 JSON text、安全 scope/size label 与一张 `image/png` 或 `image/jpeg`；空动作标为 `current`，非空动作只附新的 `after action batch`，不复制前图。原始 desktop PNG 受共享 16 MiB 输入上限约束，归一化结果最大 2000×2000 且 base64 严格小于 4.5 MiB，以确保 Pi SDK 后续 normalization 是 no-op；Pi 写入 SessionManager/JSONL 后，provider conversion 按这份持久 block 的原字节自然重放，连续截图形成 append-only `A → B → C`。没有 provider-only injector、before/after 滑动窗口或 controller 图片缓存；compaction 可把旧 entry 排除出模型上下文但不物理删除 JSONL。普通 tool event/history snapshot 仍只投影 image marker 与 `(messageId,imageOrdinal)` ref，base64 由既有 `open_image` 精确读取；`details`、PublicState 和普通 wire 不含图片字节。通用 durable read 仍以 16 MiB decoded bytes 为协议上限，其 canonical base64 落在 64 MiB server event envelope 内。
 - 图片事实与坐标能力严格分离：controller 只瞬态保存不含图片字节的 pending/authorized `Frame` 几何、foreground binding、owner、source/exact decision IDs 及 label/MIME/哈希交付证据。同一次 validated capture 构造归一化 image result 与 pending frame；Frame 的模型坐标尺寸随实际持久图更新，`captureBounds` 仍是物理映射目标。宿主在项目 `tool_result` hook 与 Pi normalization 之后复核完整 content，任何改写或 hook 异常都 fail closed 并清 frame；最终 `convertToLlm` 边界再按 source toolCallId、规范 details text、label、MIME、图片哈希证明模型确实会看到同一像素与坐标元数据，`context`/`message_end` 删除或替换图片时不得授权。下一 assistant `toolUse` decision 才可把已证明 frame 授权给其中 exact computer IDs，local preflight 不消费，首个实际 controller primitive/capture 消费整次 decision；无 computer call、capture 失败、普通 assistant 结束、abort、compaction、reload、terminal 或 dispose 都清除 frame，持久旧图永不能恢复坐标能力。非空 `observe:true` action batch 默认 settle 150ms；失败只返回 unavailable，不保留历史前图。`keypress` hold、`mouseHold`、`drag` 均在调用内清理；只有可能按下而 up 未确认才永久 fail-close desktop controller，普通 unknown 不 taint。capture 内部以归一化 HWND+PID 绑定前台身份并检查 capture 前后稳定，授权批在首个 primitive 前复核；mismatch 清除 stale frame，身份永不投影。HWND/PID reuse 与 check→SendInput TOCTOU 是明确保留的 Windows 限制。
 - `computer` 的 `foregroundWindow?: boolean` 默认 `false`，仅 `observe:true` 生效；它不是 selector，而是在 PMv2 DPI context 中以当前 foreground `GetWindowRect` 和主显示器求交的 crop。`captureBounds` 只负责 model-image-local→physical 映射，完整主显示器 `inputBounds` 只负责 `SendInput` absolute normalization，二者不可混用；原始 PNG 尺寸必须等于 crop，持久图可按上述 provider 边界等比缩小，因此 Frame 图像尺寸与物理 crop 尺寸不得合并。第一版不支持任意 region、副屏-only、virtual desktop 或 `MOUSEEVENTF_VIRTUALDESK`。minimized、空交集、Win32 读取失败或 capture binding 前后漂移均 fail closed、不 fallback 全屏。首个实际 primitive 保留既有 foreground identity 检查；window frame 的每个 coordinate primitive 还紧邻 dispatch 复核 identity、raw rect、crop 与 primary topology。任一 `foreground_mismatch` 都可能已有 `sent`；第一个 `not_started` action 和余项均未派发，必须由逐项 status 如实报告。durable image label 仅有 scope/size，绝不含 identity/title/物理 bounds；after 以动作后的当前 foreground 重新 capture，因此可与此前持久图有不同安全 scope/尺寸。
+
+### 逻辑 run 范围的 Bash
+
+`src/server/bash-execution.ts` 只拥有有界命令执行，不是 terminal、stdin、持久 shell 或调度器。Actor 把 exact `ConversationRunOwnership` 对象交给 session-local binding；executionId 是独立 UUID，不是 PID、toolCallId 或正文指纹。`PiRuntime` 共享 32 个真实未终结执行的预算，每个逻辑 run 最多 4 个未终结执行、64 个已发布句柄；快速未发布结果仍返回 Pi 原生形状。`bash_poll` 返回非消费的最新快照，列表查询不等待；没有退出码 0 且无 error/partial 的事实，就不能宣称成功。
+
+- 复用 Pi 公开 local operations 和 Bash factory，每个执行有独立 AbortController。SDK signal 仅取消工具等待，已经 aborted 的启动调用在准入前拒绝；命令 timeout 从启动起只计一次，不随 poll 重置。
+- 输出先在 operations 边界限制原始 stdout+stderr 为 16 MiB，超限 stop/drop 并明确 `partial`；运行预览最多 1 KiB，最终继续用 Pi 的 50 KiB/2000 行截断、错误文本及全文临时文件。latest payload 是防御复制，不另建 collector、游标或输出持久库；yield 后不再向旧 toolCallId 发更新。
+- 普通工具返回、物理 `agent_end`、压缩与 LoopList 续跑不销毁执行，同一逻辑 run 继续查询。真正 terminal、abort、reload 和 dispose 先停止准入并 stop，再按整组约 2 秒宽限收尾。执行尚未确认终结时仍占预算，隔离同 conversation 的后继 Bash；迟到 callback 只能释放旧资源/计数，不能追加消息或复活 run。
+- 收尾由 Actor 健康、non-streaming 的 writer 追加一次 `piweb.bash_execution_notice.v1` 可见 context custom message；复核 exact durable entry 后才写 run settlement。callback 没有写入权。writer/SDK 边界不健康时不伪造摘要；清理未知使 Actor fatal、暂停自动工作，inbox pump/recovery 不能借 fresh Actor 绕过。
+- Bash 清理未知不是可忽略的普通 reload 错误。默认 reload 在 Coordinator 与内部 `piweb_reload_blocked` IPC 上拒绝，不写新的 handoff manifest、不 kill/restart 旧 child，并保持 admission 冻结；只有显式 force 才允许 best-effort 替换。这个拒绝不是公共 WebSocket 命令。
+
+重启后句柄失效，不重跑旧命令，不保证 daemon/disown、逃逸子孙或 force 的副作用 exactly-once；本机生命周期控制不是 OS sandbox。
 
 `ProjectStoreRegistry` 也是进程级对象：
 
@@ -139,6 +151,7 @@
 ## 入口
 
 - `src/server/pi-runtime.ts`
+- `src/server/bash-execution.ts`
 - `src/server/model-refresh.ts`
 - `src/server/manual-model-refresh.ts`
 - `src/server/agent-turn-boundary.ts`
