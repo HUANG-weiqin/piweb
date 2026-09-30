@@ -467,6 +467,330 @@ describe("run-scoped Bash execution", () => {
     expect(registry.activity()).toEqual({ running: 0, stopping: 0, cleanupUnknown: false });
   });
 
+  it("moves a foreground native wait into the conversation registry when guidance is accepted", async () => {
+    const completion = deferred<{ exitCode: number | null }>();
+    const completed: BashTaskCompletion[] = [];
+    const registry = new BashBackgroundTaskRegistry({
+      onCompleted: (task) => completed.push(task),
+      onObserved: () => {},
+    });
+    const taggedBase = (prefix: string, factories: { count: number }) =>
+      (operations: BashOperations): ToolDefinition<any, any, any> => {
+        factories.count++;
+        return {
+          ...simpleBase(operations),
+          async execute(_toolCallId, input: FakeBaseInput, signal, onUpdate) {
+            const output: Buffer[] = [];
+            await operations.exec(input.command, cwd, {
+              onData: (data) => {
+                output.push(Buffer.from(data));
+                onUpdate?.({
+                  content: [{ type: "text", text: Buffer.concat(output).toString("utf8") }],
+                  details: { source: prefix },
+                });
+              },
+              signal,
+              timeout: input.timeout,
+              env: process.env,
+            });
+            return { content: [{ type: "text", text: `${prefix}:${input.command}:${Buffer.concat(output).toString("utf8")}` }], details: { source: prefix } };
+          },
+        };
+      };
+    const oldBaseFactories = { count: 0 };
+    const nextBaseFactories = { count: 0 };
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    let nativeStarts = 0;
+    let command = "";
+    let nativeCwd = "";
+    let nativeTimeout: number | undefined;
+    let executionSignal: AbortSignal | undefined;
+    let emitOutput!: (data: Buffer) => void;
+    const updates: unknown[] = [];
+    const old = makeFixture(async (receivedCommand, receivedCwd, options) => {
+      nativeStarts++;
+      command = receivedCommand;
+      nativeCwd = receivedCwd;
+      nativeTimeout = options.timeout;
+      executionSignal = options.signal;
+      emitOutput = options.onData;
+      markStarted();
+      return completion.promise;
+    }, { backgroundTasks: registry, base: taggedBase("old-prefix", oldBaseFactories) });
+    const foreground = invoke(old.tool("bash"), { command: "long-foreground", timeout: 300_000 }, undefined, (update) => updates.push(update));
+    try {
+      await started;
+      expect(old.binding.lifecycle.promoteForeground(Object.freeze({
+        conversationId: old.owner.conversationId,
+        runId: old.owner.runId,
+      }))).toBe(0);
+      emitOutput(Buffer.from("early output"));
+      expect(updates).toHaveLength(1);
+      expect(old.binding.lifecycle.promoteForeground(old.owner)).toBe(1);
+      emitOutput(Buffer.from("late output"));
+      expect(updates).toHaveLength(1);
+
+      const handoff = await foreground;
+      const handoffText = resultText(handoff);
+      expect(handoffText).toContain("moved to background because a new message was accepted");
+      expect(handoffText).toContain("completion notification");
+      expect(handoffText).toContain("do not poll");
+      const taskId = (bashDetails(handoff).piwebBash as { taskId: string }).taskId;
+      expect(registry.summaries()).toMatchObject([{ taskId, state: "in_progress" }]);
+
+      await old.binding.lifecycle.close(old.owner, "run_end");
+      expect(executionSignal?.aborted).toBe(false);
+      expect(nativeStarts).toBe(1);
+      expect(command).toBe("long-foreground");
+      expect(nativeCwd).toBe(cwd);
+      expect(nativeTimeout).toBe(300);
+      expect(oldBaseFactories.count).toBe(2);
+
+      let replacementStarts = 0;
+      const nextOwner = Object.freeze({ conversationId: old.owner.conversationId, runId: "replacement-run" });
+      const next = makeFixture(async () => {
+        replacementStarts++;
+        return { exitCode: 0 };
+      }, {
+        owner: nextOwner,
+        backgroundTasks: registry,
+        base: taggedBase("new-prefix", nextBaseFactories),
+      });
+      completion.resolve({ exitCode: 0 });
+      const final = await invoke(next.tool("bash_output"), { task_id: taskId });
+      expect(resultText(final)).toContain("old-prefix:long-foreground");
+      expect(resultText(final)).not.toContain("new-prefix");
+      expect(replacementStarts).toBe(0);
+      expect(nextBaseFactories.count).toBe(1);
+      expect(completed).toMatchObject([{ taskId, status: "completed", exitCode: 0 }]);
+    } finally {
+      completion.resolve({ exitCode: 0 });
+      await foreground.catch(() => {});
+      await registry.close("dispose");
+    }
+  });
+
+  it("returns zero without a conversation registry and leaves the foreground result unchanged", async () => {
+    const completion = deferred<{ exitCode: number | null }>();
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    const fixture = makeFixture(async () => {
+      markStarted();
+      return completion.promise;
+    }, { base: simpleBase });
+    const foreground = invoke(fixture.tool("bash"), { command: "standalone-foreground" });
+    try {
+      await started;
+      expect(fixture.binding.lifecycle.promoteForeground(fixture.owner)).toBe(0);
+      completion.resolve({ exitCode: 0 });
+      const result = await foreground;
+      expect(resultText(result)).toContain("(no output)");
+      expect(bashDetails(result).piwebBash).toBeUndefined();
+    } finally {
+      completion.resolve({ exitCode: 0 });
+      await foreground.catch(() => {});
+    }
+  });
+
+  it.each(["promotion-first", "settlement-first"] as const)(
+    "does not double-publish when foreground settlement races promotion (%s)",
+    async (order) => {
+      const completion = deferred<{ exitCode: number | null }>();
+      const completed: BashTaskCompletion[] = [];
+      let markCompleted!: () => void;
+      const completedSignal = new Promise<void>((resolve) => { markCompleted = resolve; });
+      const registry = new BashBackgroundTaskRegistry({
+        onCompleted: (task) => {
+          completed.push(task);
+          markCompleted();
+        },
+        onObserved: () => {},
+      });
+      let markStarted!: () => void;
+      const started = new Promise<void>((resolve) => { markStarted = resolve; });
+      const fixture = makeFixture(async () => {
+        markStarted();
+        return completion.promise;
+      }, { backgroundTasks: registry, base: simpleBase });
+      const foreground = invoke(fixture.tool("bash"), { command: `race-${order}` });
+      try {
+        await started;
+        if (order === "settlement-first") {
+          completion.resolve({ exitCode: 0 });
+          await completion.promise;
+          for (let turn = 0; turn < 12; turn++) await Promise.resolve();
+          expect(fixture.binding.lifecycle.promoteForeground(fixture.owner)).toBe(0);
+          const nativeResult = await foreground;
+          expect(resultText(nativeResult)).toContain("(no output)");
+          expect(bashDetails(nativeResult).piwebBash).toBeUndefined();
+          expect(registry.summaries()).toEqual([]);
+          expect(completed).toEqual([]);
+        } else {
+          completion.resolve({ exitCode: 0 });
+          expect(fixture.binding.lifecycle.promoteForeground(fixture.owner)).toBe(1);
+          const handoff = await foreground;
+          const taskId = (bashDetails(handoff).piwebBash as { taskId: string }).taskId;
+          await completedSignal;
+          expect(completed).toMatchObject([{ taskId, status: "completed", exitCode: 0 }]);
+          expect(resultText(await invoke(fixture.tool("bash_output"), { task_id: taskId })))
+            .toContain("(no output)");
+          expect(completed).toHaveLength(1);
+        }
+      } finally {
+        completion.resolve({ exitCode: 0 });
+        await foreground.catch(() => {});
+        await registry.close("dispose");
+      }
+    },
+  );
+
+  it("uses registry-backed bash_stop and bash_output for a promoted task", async () => {
+    vi.useFakeTimers();
+    const completion = deferred<{ exitCode: number | null }>();
+    const completed: BashTaskCompletion[] = [];
+    const observed: string[] = [];
+    const registry = new BashBackgroundTaskRegistry({
+      onCompleted: (task) => completed.push(task),
+      onObserved: (taskId) => observed.push(taskId),
+    });
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    let executionSignal: AbortSignal | undefined;
+    const fixture = makeFixture(async (_command, _cwd, options) => {
+      executionSignal = options.signal;
+      markStarted();
+      return completion.promise;
+    }, { backgroundTasks: registry, base: simpleBase });
+    const foreground = invoke(fixture.tool("bash"), { command: "promote-then-stop" });
+    try {
+      await started;
+      expect(fixture.binding.lifecycle.promoteForeground(fixture.owner)).toBe(1);
+      const handoff = await foreground;
+      const taskId = (bashDetails(handoff).piwebBash as { taskId: string }).taskId;
+      const stopping = invoke(fixture.tool("bash_stop"), { task_id: taskId });
+      await vi.advanceTimersByTimeAsync(1000);
+      const stopped = await stopping;
+      expect((bashDetails(stopped).piwebBash as { state: string }).state).toBe("stopping");
+      expect(executionSignal?.aborted).toBe(true);
+
+      completion.resolve({ exitCode: 0 });
+      for (let turn = 0; turn < 12; turn++) await Promise.resolve();
+      const final = await invoke(fixture.tool("bash_output"), { task_id: taskId });
+      expect(resultText(final)).toContain("(no output)");
+      expect(completed).toMatchObject([{ taskId, status: "killed", stopReason: "manual", exitCode: 0 }]);
+      expect(observed).toEqual([taskId]);
+    } finally {
+      completion.resolve({ exitCode: 0 });
+      await foreground.catch(() => {});
+      await registry.close("dispose");
+    }
+  });
+
+  it("keeps the original native timeout deadline after foreground promotion", async () => {
+    vi.useFakeTimers();
+    const completion = deferred<{ exitCode: number | null }>();
+    const completed: BashTaskCompletion[] = [];
+    let markCompleted!: () => void;
+    const nativeCompleted = new Promise<void>((resolve) => { markCompleted = resolve; });
+    const registry = new BashBackgroundTaskRegistry({
+      onCompleted: (task) => {
+        completed.push(task);
+        markCompleted();
+      },
+      onObserved: () => {},
+    });
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    let executionSignal: AbortSignal | undefined;
+    let nativeTimeout: number | undefined;
+    let nativeStarts = 0;
+    const fixture = makeFixture(async (_command, _cwd, options) => {
+      nativeStarts++;
+      executionSignal = options.signal;
+      nativeTimeout = options.timeout;
+      markStarted();
+      return completion.promise;
+    }, { backgroundTasks: registry, base: simpleBase });
+    const foreground = invoke(fixture.tool("bash"), { command: "deadline", timeout: 10_000 });
+    try {
+      await started;
+      expect(nativeTimeout).toBe(10);
+      await vi.advanceTimersByTimeAsync(6_000);
+      expect(executionSignal?.aborted).toBe(false);
+      expect(fixture.binding.lifecycle.promoteForeground(fixture.owner)).toBe(1);
+      const handoff = await foreground;
+      const taskId = (bashDetails(handoff).piwebBash as { taskId: string }).taskId;
+
+      await vi.advanceTimersByTimeAsync(3_999);
+      expect(executionSignal?.aborted).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(executionSignal?.aborted).toBe(true);
+      expect(registry.activity()).toEqual({ running: 0, stopping: 1, cleanupUnknown: false });
+      expect(nativeStarts).toBe(1);
+
+      completion.resolve({ exitCode: 0 });
+      await nativeCompleted;
+      expect(completed).toMatchObject([{ taskId, status: "killed", stopReason: "timeout", exitCode: 0 }]);
+      await expect(invoke(fixture.tool("bash_output"), { task_id: taskId }))
+        .rejects.toThrow(/timeout:10/);
+    } finally {
+      completion.resolve({ exitCode: 0 });
+      await foreground.catch(() => {});
+      await registry.close("dispose");
+    }
+  });
+
+  it("leaves foreground waiting when background slots and record retention are both full", async () => {
+    const pending: Array<ReturnType<typeof deferred<{ exitCode: number | null }>>> = [];
+    const registry = new BashBackgroundTaskRegistry({ onCompleted: () => {}, onObserved: () => {} });
+    const fixture = makeFixture(async (command) => {
+      if (command.startsWith("history-")) return { exitCode: 0 };
+      const next = deferred<{ exitCode: number | null }>();
+      pending.push(next);
+      return next.promise;
+    }, { backgroundTasks: registry, base: simpleBase });
+    const taskIds: string[] = [];
+    for (let index = 0; index < 60; index++) {
+      const handle = await invoke(fixture.tool("bash"), { command: `history-${index}`, run_in_background: true });
+      taskIds.push((bashDetails(handle).piwebBash as { taskId: string }).taskId);
+      for (let turn = 0; turn < 6; turn++) await Promise.resolve();
+    }
+    for (let index = 0; index < 4; index++) {
+      const handle = await invoke(fixture.tool("bash"), { command: `running-${index}`, run_in_background: true });
+      taskIds.push((bashDetails(handle).piwebBash as { taskId: string }).taskId);
+    }
+    const foreground = invoke(fixture.tool("bash"), { command: "wait-for-capacity" });
+    for (let turn = 0; turn < 8 && pending.length < 5; turn++) await Promise.resolve();
+    expect(pending).toHaveLength(5);
+    let foregroundSettled = false;
+    void foreground.then(() => { foregroundSettled = true; }, () => { foregroundSettled = true; });
+
+    try {
+      expect(registry.summaries()).toHaveLength(64);
+      expect(fixture.binding.lifecycle.promoteForeground(fixture.owner)).toBe(0);
+      await Promise.resolve();
+      expect(foregroundSettled).toBe(false);
+
+      pending[0]!.resolve({ exitCode: 0 });
+      for (let turn = 0; turn < 12; turn++) await Promise.resolve();
+      await invoke(fixture.tool("bash_output"), { task_id: taskIds[60] });
+      expect(registry.summaries()).toHaveLength(64);
+      expect(fixture.binding.lifecycle.promoteForeground(fixture.owner)).toBe(1);
+      const handoff = await foreground;
+      const promotedTaskId = (bashDetails(handoff).piwebBash as { taskId: string }).taskId;
+      expect(registry.summaries()).toHaveLength(64);
+      expect(registry.summaries().some((summary) => summary.taskId === taskIds[60])).toBe(false);
+      expect(registry.summaries().some((summary) => summary.taskId === promotedTaskId)).toBe(true);
+    } finally {
+      pending.forEach((execution) => execution.resolve({ exitCode: 0 }));
+      await Promise.all(pending.map((execution) => execution.promise));
+      for (let turn = 0; turn < 12; turn++) await Promise.resolve();
+      await registry.close("dispose");
+      await foreground.catch(() => {});
+    }
+  });
+
   it("cancels a foreground tool wait promptly while bounded close retains an unresponsive native execution", async () => {
     vi.useFakeTimers();
     const pending = deferred<{ exitCode: number | null }>();
@@ -619,12 +943,21 @@ describe("run-scoped Bash execution", () => {
       onObserved: () => {},
     });
     let executionSignal: AbortSignal | undefined;
-    const original = makeFixture(async (_command, _cwd, options) => {
-      executionSignal = options.signal;
-      return completion.promise;
+    let markForegroundStarted!: () => void;
+    const foregroundStarted = new Promise<void>((resolve) => { markForegroundStarted = resolve; });
+    const foregroundCompletion = deferred<{ exitCode: number | null }>();
+    const original = makeFixture(async (command, _cwd, options) => {
+      if (command === "ignore-abort") {
+        executionSignal = options.signal;
+        return completion.promise;
+      }
+      markForegroundStarted();
+      return foregroundCompletion.promise;
     }, { owner, budget, backgroundTasks: registry, base: simpleBase });
     const handle = await invoke(original.tool("bash"), { command: "ignore-abort", run_in_background: true });
     expect(bashDetails(handle).piwebBash).toBeDefined();
+    const foreground = invoke(original.tool("bash"), { command: "foreground-wait" });
+    await foregroundStarted;
 
     const closing = registry.close("reload");
     expect(executionSignal?.aborted).toBe(true);
@@ -633,6 +966,11 @@ describe("run-scoped Bash execution", () => {
     expect(report.cleanupUnknown).toBe(true);
     expect(registry.activity()).toEqual({ running: 0, stopping: 1, cleanupUnknown: true });
     expect(report.executions[0]).toMatchObject({ state: "stopping", stopReason: "reload" });
+    let foregroundSettled = false;
+    void foreground.then(() => { foregroundSettled = true; }, () => { foregroundSettled = true; });
+    expect(original.binding.lifecycle.promoteForeground(owner)).toBe(0);
+    await Promise.resolve();
+    expect(foregroundSettled).toBe(false);
 
     const replacementOwner = Object.freeze({ conversationId: owner.conversationId, runId: "after-reload" });
     const replacement = makeFixture(async () => ({ exitCode: 0 }), {
@@ -650,6 +988,9 @@ describe("run-scoped Bash execution", () => {
     expect(registry.activity()).toEqual({ running: 0, stopping: 0, cleanupUnknown: false });
     expect(completed).toHaveLength(1);
     expect(completed[0]).toMatchObject({ status: "killed", stopReason: "reload", exitCode: 0 });
+    foregroundCompletion.resolve({ exitCode: 0 });
+    expect(resultText(await foreground)).toContain("(no output)");
+    await original.binding.lifecycle.close(owner, "run_end");
     const result = await invoke(replacement.tool("bash"), { command: "budget-released" });
     expect(resultText(result)).toContain("(no output)");
   });
@@ -735,6 +1076,7 @@ describe("run-scoped Bash execution", () => {
     const budget = new BashExecutionBudget();
     const registries: BashBackgroundTaskRegistry[] = [];
     const pending: Array<ReturnType<typeof deferred<{ exitCode: number | null }>>> = [];
+    let promotionFixture: ReturnType<typeof makeFixture> | undefined;
     for (let conversation = 0; conversation < 8; conversation++) {
       const owner = Object.freeze({ conversationId: `conversation-${conversation}`, runId: `run-${conversation}` });
       const registry = new BashBackgroundTaskRegistry({ onCompleted: () => {}, onObserved: () => {} });
@@ -750,10 +1092,23 @@ describe("run-scoped Bash execution", () => {
         base: simpleBase,
       });
       registries.push(registry);
-      for (let index = 0; index < 4; index++) {
+      if (conversation === 7) promotionFixture = fixture;
+      const backgroundCount = conversation === 7 ? 3 : 4;
+      for (let index = 0; index < backgroundCount; index++) {
         await invoke(fixture.tool("bash"), { command: `hold-${index}`, run_in_background: true });
       }
     }
+    expect(pending).toHaveLength(31);
+    const foreground = invoke(promotionFixture!.tool("bash"), { command: "promoted-hold" });
+    for (let turn = 0; turn < 8 && pending.length < 32; turn++) await Promise.resolve();
+    expect(pending).toHaveLength(32);
+    expect(promotionFixture!.binding.lifecycle.promoteForeground(promotionFixture!.owner)).toBe(1);
+    const handoff = await foreground;
+    const promotedTaskId = (bashDetails(handoff).piwebBash as { taskId: string }).taskId;
+    expect(registries[7]!.summaries().some((summary) =>
+      summary.taskId === promotedTaskId && summary.state === "in_progress"))
+      .toBe(true);
+
     const overflowOwner = Object.freeze({ conversationId: "conversation-overflow", runId: "run-overflow" });
     const overflow = makeFixture(async () => ({ exitCode: 0 }), {
       owner: overflowOwner,

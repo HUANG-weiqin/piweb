@@ -701,12 +701,181 @@ function fakeBashLifecycle() {
     close: vi.fn<BashExecutionLifecycle["close"]>(async () => ({ executions: [], cleanupUnknown: false })),
     dispose: vi.fn<BashExecutionLifecycle["dispose"]>(async () => ({ executions: [], cleanupUnknown: false })),
     activity: vi.fn<BashExecutionLifecycle["activity"]>(() => ({ running: 0, stopping: 0, cleanupUnknown: false })),
+    promoteForeground: vi.fn<BashExecutionLifecycle["promoteForeground"]>(() => 0),
   } satisfies BashExecutionLifecycle;
 }
 
 const BASH_EXECUTION_ID = "ac738f02-4c4d-4fb7-9b53-ea3bb9c5d5d";
 
 describe("ConversationActor Bash lifecycle", () => {
+  it("promotes the exact run owner on each accepted live SDK input", async () => {
+    const runtime = new FakeRuntime();
+    runtime.enableBackgroundBashBinding = true;
+    const fixture = await openActor({ runtime });
+    const promptStarted = deferred<void>();
+    const promptFinished = deferred<void>();
+    runtime.session.promptImplementation = async (text, options) => {
+      if (options?.streamingBehavior === "steer") {
+        runtime.session.steeringMessages.push(text);
+        options.preflightResult?.(true);
+        return;
+      }
+      (runtime.session as unknown as { isStreaming: boolean }).isStreaming = true;
+      promptStarted.resolve();
+      await promptFinished.promise;
+      (runtime.session as unknown as { isStreaming: boolean }).isStreaming = false;
+    };
+    const running = fixture.actor.startPrompt({
+      runId: RUN_A,
+      text: "long foreground work",
+      origin: "browser",
+    });
+    await promptStarted.promise;
+    const owner = fixture.actor.currentRunOwnership(RUN_A)!;
+    const promote = vi.spyOn(runtime.bashBinding!.lifecycle, "promoteForeground")
+      .mockReturnValue(1);
+
+    await fixture.actor.admitBrowserPrompt({
+      runId: RUN_A,
+      promptId: RUN_B,
+      text: "accepted browser message",
+    });
+    expect(promote).toHaveBeenNthCalledWith(1, owner);
+
+    const explicitSteer = fixture.actor.steer(RUN_A, "accepted explicit steer");
+    void explicitSteer.catch(() => undefined);
+    await vi.waitFor(() => expect(promote).toHaveBeenCalledTimes(2));
+    expect(promote).toHaveBeenNthCalledWith(2, owner);
+
+    await fixture.actor.steerCustomMessage(RUN_A, {
+      customType: "piweb.conversation_message.v1",
+      content: "accepted peer message",
+      display: true,
+      details: { messageId: FOCUS_ID },
+    } as ConversationMessageEntry);
+    expect(promote).toHaveBeenNthCalledWith(3, owner);
+
+    const taskStarted = deferred<void>();
+    const taskFinished = deferred<{ exitCode: number | null }>();
+    runtime.bashExecutionImplementation = async () => {
+      taskStarted.resolve();
+      return taskFinished.promise;
+    };
+    await invokeActorBashTool(
+      fixture,
+      "bash",
+      { command: "accepted background completion", run_in_background: true },
+    );
+    await taskStarted.promise;
+    taskFinished.resolve({ exitCode: 0 });
+    await vi.waitFor(() => expect(promote).toHaveBeenCalledTimes(4));
+    expect(promote.mock.calls.map(([actualOwner]) => actualOwner)).toEqual([
+      owner,
+      owner,
+      owner,
+      owner,
+    ]);
+
+    await fixture.actor.abort(RUN_A);
+    promptFinished.resolve();
+    await running;
+    await fixture.actor.dispose();
+  });
+
+  it("does not promote rejected or stale SDK input", async () => {
+    const runtime = new FakeRuntime();
+    const bash = fakeBashLifecycle();
+    runtime.bashExecutions = bash;
+    const fixture = await openActor({ runtime });
+    const promptStarted = deferred<void>();
+    const promptFinished = deferred<void>();
+    runtime.session.promptImplementation = async (text, options) => {
+      if (options?.streamingBehavior === "steer") {
+        runtime.session.steeringMessages.push(text);
+        options.preflightResult?.(false);
+        return;
+      }
+      promptStarted.resolve();
+      await promptFinished.promise;
+    };
+    const running = fixture.actor.startPrompt({
+      runId: RUN_A,
+      text: "queued first prompt",
+      origin: "browser",
+    });
+    await promptStarted.promise;
+
+    await expect(fixture.actor.admitBrowserPrompt({
+      runId: RUN_A,
+      promptId: RUN_B,
+      text: "pre-stream",
+    })).rejects.toThrow("not streaming yet");
+    (runtime.session as unknown as { isStreaming: boolean }).isStreaming = true;
+    (runtime.session as unknown as { hasInputExtensionHandlers: boolean })
+      .hasInputExtensionHandlers = true;
+    await expect(fixture.actor.admitBrowserPrompt({
+      runId: RUN_A,
+      promptId: RUN_B,
+      text: "extension-handled",
+    })).rejects.toThrow("input extensions");
+    (runtime.session as unknown as { hasInputExtensionHandlers: boolean })
+      .hasInputExtensionHandlers = false;
+    await expect(fixture.actor.admitBrowserPrompt({
+      runId: RUN_A,
+      promptId: RUN_B,
+      text: "rejected preflight",
+    })).rejects.toThrow("preflight rejected");
+
+    runtime.nextSteeringCapture = agentMessage({
+      role: "user",
+      content: [{ type: "text", text: "rejected explicit steer" }],
+      timestamp: Date.now(),
+    });
+    runtime.session.steer = async () => {
+      throw new Error("SDK steer rejected");
+    };
+    await expect(fixture.actor.steer(RUN_A, "rejected explicit steer"))
+      .rejects.toThrow("SDK steer rejected");
+    expect(bash.promoteForeground).not.toHaveBeenCalled();
+
+    const queued = deferred<void>();
+    runtime.nextSteeringCapture = agentMessage({
+      role: "user",
+      content: [{ type: "text", text: "stale explicit steer" }],
+      timestamp: Date.now(),
+    });
+    runtime.session.steer = () => queued.promise;
+    const staleSteer = fixture.actor.steer(RUN_A, "stale explicit steer");
+    await fixture.actor.abort(RUN_A);
+    promptFinished.resolve();
+    await running;
+
+    const successorStarted = deferred<void>();
+    const successorFinished = deferred<void>();
+    runtime.session.promptImplementation = async () => {
+      (runtime.session as unknown as { isStreaming: boolean }).isStreaming = true;
+      successorStarted.resolve();
+      await successorFinished.promise;
+      (runtime.session as unknown as { isStreaming: boolean }).isStreaming = false;
+    };
+    const successor = fixture.actor.startPrompt({
+      runId: RUN_B,
+      text: "successor run",
+      origin: "browser",
+    });
+    await successorStarted.promise;
+    expect(fixture.actor.currentRunOwnership(RUN_B)).not.toBeUndefined();
+
+    queued.resolve();
+    await expect(staleSteer).rejects.toThrow();
+    expect(bash.promoteForeground).not.toHaveBeenCalled();
+
+    await fixture.actor.abort(RUN_B);
+    successorFinished.resolve();
+    await successor;
+    await fixture.actor.dispose();
+  });
+
   it("awaits Bash cleanup before publishing terminal settlement", async () => {
     const runtime = new FakeRuntime();
     const bash = fakeBashLifecycle();

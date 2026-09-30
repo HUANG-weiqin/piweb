@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   BashExecutionBudget,
   createBashExecutionBinding,
+  type BashExecutionLifecycle,
 } from "./bash-execution.js";
 import type { ConversationActor } from "./conversation-actor.js";
 import type { SerialTaskQueue } from "./serial-task-queue.js";
@@ -30,6 +31,8 @@ function backgroundTask(fixture: Fixture, actor: ConversationActor) {
   expect(options.backgroundTasks).toBeDefined();
   const completion = deferred<{ exitCode: number | null }>();
   let executionStarted = false;
+  let executionCount = 0;
+  const started = deferred();
   const binding = createBashExecutionBinding({
     getOwner: options.bashExecutions!.getOwner,
     onChange: options.bashExecutions!.onChange,
@@ -39,6 +42,8 @@ function backgroundTask(fixture: Fixture, actor: ConversationActor) {
     operations: {
       exec: async (_command, _cwd, executionOptions) => {
         executionStarted = true;
+        executionCount += 1;
+        started.resolve();
         executionOptions.onData(Buffer.from("background result\n"));
         executionOptions.signal?.addEventListener("abort", () => {
           completion.resolve({ exitCode: null });
@@ -50,6 +55,17 @@ function backgroundTask(fixture: Fixture, actor: ConversationActor) {
   });
   return {
     completion,
+    started: started.promise,
+    executionCount: () => executionCount,
+    binding,
+    async startForeground() {
+      const bash = binding.tools.find((tool) => tool.name === "bash")!;
+      return bash.execute("foreground-task", {
+        command: "printf 'foreground result'", timeout: 600000,
+      }, undefined, undefined, {
+        cwd: fixture.cwd, sessionManager: actor.sessionManager,
+      } as never);
+    },
     async start(): Promise<string> {
       const bash = binding.tools.find((tool) => tool.name === "bash")!;
       const result = await bash.execute("background-task", {
@@ -121,6 +137,90 @@ function notifications(fixture: Fixture, actor: ConversationActor) {
 }
 
 describe("ProjectSessionCoordinator background Bash", () => {
+  it.each(["browser", "peer"] as const)("promotes a real foreground wait after accepted %s input without restarting the command", async (source) => {
+    const fixture = await createFixture();
+    let lifecycle: BashExecutionLifecycle | undefined;
+    // The fixture owns runtime creation. Forward Actor lifecycle calls to the
+    // same real native binding executing this test's foreground tool.
+    fixture.runtime.bashExecutions = {
+      promoteForeground: (owner) => lifecycle?.promoteForeground(owner) ?? 0,
+      requestStop: (owner, reason) => lifecycle?.requestStop(owner, reason),
+      close: async (owner, reason) => lifecycle?.close(owner, reason)
+        ?? { executions: [], cleanupUnknown: false },
+      dispose: async () => lifecycle?.dispose() ?? { executions: [], cleanupUnknown: false },
+      activity: (owner) => lifecycle?.activity(owner)
+        ?? { running: 0, stopping: 0, cleanupUnknown: false },
+    };
+    const caller = await fixture.coordinator.createUserConversation(
+      fixture.handle, { roleId: "default", title: "Caller" },
+    );
+    const task = backgroundTask(fixture, caller);
+    lifecycle = task.binding.lifecycle;
+    const acceptedRun = deferred();
+    let taskId!: string;
+    let nativeResult: unknown;
+    const control = fixture.runtime.control(caller.conversationId);
+    control.enqueue(async (current) => {
+      current.emitUserMessage("long foreground work");
+      nativeResult = await task.startForeground();
+      taskId = (nativeResult as { details: { piwebBash: { taskId: string } } }).details.piwebBash.taskId;
+      expect(taskId).toMatch(/^[0-9a-f-]{36}$/);
+      current.beginNextModelTurn();
+      if (source === "browser") current.emitUserMessage("handle this input now");
+      acceptedRun.resolve();
+      current.emitFinal("new input processed while the command is still running");
+    });
+    const runId = randomUUID();
+    const completion = fixture.coordinator.prompt(
+      fixture.handle, caller.conversationId, runId, "long foreground work",
+    );
+    let sender: Awaited<ReturnType<typeof startBlockedSourceRun>> | undefined;
+    let guidance: Promise<unknown> | undefined;
+    try {
+      await task.started;
+      expect(nativeResult).toBeUndefined();
+      expect(caller.getBashActivity()).toMatchObject({ running: 1 });
+      if (source === "browser") {
+        guidance = fixture.coordinator.prompt(fixture.handle, caller.conversationId, runId,
+          "handle this input now", randomUUID());
+      } else {
+        const peer = await fixture.coordinator.createUserConversation(
+          fixture.handle, { roleId: "default", title: "Sender" },
+        );
+        sender = await startBlockedSourceRun(fixture, peer.conversationId);
+        await executeTool(fixture.runtime.control(peer.conversationId), "send_session_message",
+          "interrupt-foreground", { conversationId: caller.conversationId,
+            summary: "handle this input now", message: "handle this input now" });
+      }
+      await Promise.race([
+        acceptedRun.promise,
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error("Accepted input did not release foreground wait")), 1500)),
+      ]);
+      await expect(completion).resolves.toMatchObject({ outcome: "completed" });
+      await guidance;
+      expect(caller.getActivity().kind).toBe("idle");
+      expect(task.executionCount()).toBe(1);
+      expect(fixture.runtime.createOptions.get(caller.conversationId)!.backgroundTasks!.summaries())
+        .toEqual([expect.objectContaining({ taskId, state: "in_progress" })]);
+      if (source === "peer") {
+        expect(control.modelRequestCustomMessages.at(-1)?.some((message) =>
+          message.customType === "piweb.conversation_message.v1")).toBe(true);
+      }
+      task.completion.resolve({ exitCode: 0 });
+      await waitUntil(() => notifications(fixture, caller).length === 1,
+        "promoted task to complete and notify");
+      expect(notifications(fixture, caller)[0]).toMatchObject({
+        details: { tasks: [{ taskId, status: "completed", exitCode: 0 }] },
+      });
+    } finally {
+      task.completion.resolve({ exitCode: 0 });
+      sender?.release.resolve();
+      await sender?.completion;
+      await guidance?.catch(() => undefined);
+      await completion.catch(() => undefined);
+    }
+  });
+
   it("wakes an idle conversation once and releases the lifecycle lane before the notification turn ends", async () => {
     const fixture = await createFixture();
     const actor = await fixture.coordinator.createUserConversation(

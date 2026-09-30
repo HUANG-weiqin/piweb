@@ -1901,7 +1901,6 @@ export class ConversationActor {
           taskIds: Object.freeze(taskIds),
           waited: false,
         });
-        this.fireWaitingSteerInterrupt(ticket);
       }
     }
   }
@@ -2277,7 +2276,7 @@ export class ConversationActor {
                     ));
                     return;
                   }
-                  this.fireWaitingSteerInterrupt(ticket);
+                  this.onRunInputAccepted(ticket);
                   resolve();
                 });
               },
@@ -2461,7 +2460,7 @@ export class ConversationActor {
     }
     return queued.then(
       () => {
-        this.fireWaitingSteerInterrupt(ticket);
+        this.onRunInputAccepted(ticket);
         return delivery.promise;
       },
     ).catch((error: unknown) => {
@@ -2705,6 +2704,7 @@ export class ConversationActor {
           if (next.acceptedMessageId !== undefined) {
             this.recordAcceptedCustomMessage(ticket, next.acceptedMessageId);
           }
+          this.onRunInputAccepted(ticket);
           ticket.customSteerDeliveries.shift();
           next.delivery.resolve();
         }
@@ -2740,6 +2740,15 @@ export class ConversationActor {
       }
       delivery.delivery.reject(error);
     }
+  }
+
+  private onRunInputAccepted(ticket: RunTicket): void {
+    if (
+      this.activeRun !== ticket
+      || (ticket.state.phase !== "running" && ticket.state.phase !== "waiting")
+    ) return;
+    this.created?.bashExecutions?.promoteForeground(ticket.ownership);
+    this.fireWaitingSteerInterrupt(ticket);
   }
 
   private recordAcceptedCustomMessage(ticket: RunTicket, messageId: string): void {

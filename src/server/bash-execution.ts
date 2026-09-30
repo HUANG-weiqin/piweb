@@ -58,6 +58,7 @@ export interface BashExecutionLifecycle {
   ): Promise<{ executions: BashExecutionSummary[]; cleanupUnknown: boolean }>;
   dispose(): Promise<{ executions: BashExecutionSummary[]; cleanupUnknown: boolean }>;
   activity(owner: BashExecutionOwner): BashExecutionActivity;
+  promoteForeground(owner: BashExecutionOwner): number;
 }
 
 export interface BashExecutionBinding {
@@ -157,8 +158,8 @@ interface ExecutionScope {
 interface ExecutionRecord {
   readonly executionId: string;
   readonly owner: BashExecutionOwner;
-  readonly scope?: ExecutionScope;
-  readonly backgroundRegistry?: BashBackgroundTaskRegistry;
+  scope?: ExecutionScope;
+  backgroundRegistry?: BashBackgroundTaskRegistry;
   readonly controller: AbortController;
   readonly budgetReservation: ReturnType<BashExecutionBudget["reserve"]>;
   readonly command: string;
@@ -176,7 +177,10 @@ interface ExecutionRecord {
   outputTail: Buffer;
   observed: boolean;
   notified: boolean;
-  readonly published: boolean;
+  published: boolean;
+  promoted: boolean;
+  foregroundWaiting: boolean;
+  resolveForegroundHandoff?: () => void;
   notifyChange: () => void;
 }
 
@@ -445,15 +449,33 @@ export class BashBackgroundTaskRegistry {
     }
   }
 
-  /** Internal binding registration; completed unobserved/unnotified records are never silently evicted. */
-  register(record: ExecutionRecord): void {
-    if (this.admissionClosed) throw new Error("Background Bash task admission is closed for this conversation");
-    if (this.records.size >= MAX_TASK_RECORDS && !this.releaseOldestEligible()) {
-      throw new Error(`This conversation has reached the ${MAX_TASK_RECORDS} Bash task record limit`);
-    }
+  private store(record: ExecutionRecord): void {
     record.notifyChange = () => this.changed();
     this.records.set(record.executionId, record);
     this.changed();
+  }
+
+  /** Internal binding registration; completed unobserved/unnotified records are never silently evicted. */
+  register(record: ExecutionRecord): void {
+    if (this.admissionClosed) throw new Error("Background Bash task admission is closed for this conversation");
+    if (this.activeRecords().length >= MAX_BACKGROUND_EXECUTIONS) {
+      throw new Error(`This conversation already has ${MAX_BACKGROUND_EXECUTIONS} unsettled background Bash tasks`);
+    }
+    if (this.records.size >= MAX_TASK_RECORDS && !this.releaseOldestEligible()) {
+      throw new Error(`This conversation has reached the ${MAX_TASK_RECORDS} Bash task record limit`);
+    }
+    this.store(record);
+  }
+
+  /** Internal atomic admission for a foreground record crossing into this registry. */
+  tryPromote(record: ExecutionRecord): boolean {
+    if (this.admissionClosed || this.activeRecords().length >= MAX_BACKGROUND_EXECUTIONS) return false;
+    if (this.records.size >= MAX_TASK_RECORDS && !this.releaseOldestEligible()) return false;
+    record.scope = undefined;
+    record.backgroundRegistry = this;
+    record.published = true;
+    this.store(record);
+    return true;
   }
 
   /** Internal task lookup shared by every runtime binding for this conversation. */
@@ -675,6 +697,8 @@ export function createBashExecutionBinding(options: {
       observed: false,
       notified: false,
       published: background,
+      promoted: false,
+      foregroundWaiting: false,
       notifyChange: () => notify(owner),
     } satisfies Omit<ExecutionRecord, "settlement" | "exitCode" | "stopReason" | "error" | "latestUpdate" | "outputFile"> & Partial<Pick<ExecutionRecord, "settlement" | "exitCode" | "stopReason" | "error" | "latestUpdate" | "outputFile">> as ExecutionRecord;
 
@@ -776,35 +800,56 @@ export function createBashExecutionBinding(options: {
   const waitForForegroundSettlement = (
     record: ExecutionRecord,
     signal: AbortSignal | undefined,
-  ): Promise<void> => {
-    if (record.settlement) return Promise.resolve();
+  ): Promise<"settled" | "promoted"> => {
+    if (record.promoted) return Promise.resolve("promoted");
+    if (record.settlement) return Promise.resolve("settled");
     if (signal?.aborted) {
       record.updatesForwarded = false;
       return Promise.reject(new Error("Bash foreground wait was cancelled"));
     }
+    record.foregroundWaiting = true;
     return new Promise((resolve, reject) => {
-      const cleanup = () => signal?.removeEventListener("abort", cancel);
+      let finished = false;
+      const cleanup = () => {
+        record.foregroundWaiting = false;
+        signal?.removeEventListener("abort", cancel);
+        if (record.resolveForegroundHandoff === promoted) record.resolveForegroundHandoff = undefined;
+      };
+      const finish = (outcome: "settled" | "promoted") => {
+        if (finished) return;
+        finished = true;
+        cleanup();
+        resolve(outcome);
+      };
       const cancel = () => {
+        if (record.promoted) {
+          finish("promoted");
+          return;
+        }
         record.updatesForwarded = false;
         cleanup();
-        if (record.settlement) resolve();
+        if (record.settlement) finish("settled");
         else reject(new Error("Bash foreground wait was cancelled"));
       };
+      const promoted = () => finish("promoted");
+      record.resolveForegroundHandoff = promoted;
       signal?.addEventListener("abort", cancel, { once: true });
-      void record.settled.then(() => {
-        cleanup();
-        resolve();
-      });
+      void record.settled.then(() => finish("settled"));
+      if (record.promoted) finish("promoted");
     });
   };
 
   const runForeground = async (record: ExecutionRecord, signal: AbortSignal | undefined): Promise<NativeResult> => {
-    await waitForForegroundSettlement(record, signal);
+    const outcome = await waitForForegroundSettlement(record, signal);
+    if (outcome === "promoted" || record.promoted) return backgroundResult(record);
     try {
       return settledResult(record);
     } finally {
-      record.scope!.executions.delete(record.executionId);
-      removeClosedScopeIfSettled(record.scope!);
+      const scope = record.scope;
+      if (scope) {
+        scope.executions.delete(record.executionId);
+        removeClosedScopeIfSettled(scope);
+      }
     }
   };
 
@@ -840,9 +885,11 @@ export function createBashExecutionBinding(options: {
     return {
       content: [{
         type: "text",
-        text: options.backgroundTasks
-          ? `Background Bash task started. task_id: ${taskId}\nThis task belongs to the current conversation and continues across runs. You will receive a completion notification; do not poll. Use bash_output({task_id: "${taskId}"}) to retrieve its result.`
-          : `Background Bash task started. task_id: ${taskId}\nUse bash_output({task_id: "${taskId}"}) to wait for or retrieve its result. This task is scoped to the current run.`,
+        text: record.promoted
+          ? `Foreground Bash task moved to background because a new message was accepted. task_id: ${taskId}\nA completion notification will be sent; do not poll. Use bash_output({task_id: "${taskId}"}) only when you need the final result.`
+          : options.backgroundTasks
+            ? `Background Bash task started. task_id: ${taskId}\nThis task belongs to the current conversation and continues across runs. You will receive a completion notification; do not poll. Use bash_output({task_id: "${taskId}"}) to retrieve its result.`
+            : `Background Bash task started. task_id: ${taskId}\nUse bash_output({task_id: "${taskId}"}) to wait for or retrieve its result. This task is scoped to the current run.`,
       }],
       details: { piwebBash: summary },
     } as NativeResult;
@@ -992,10 +1039,43 @@ export function createBashExecutionBinding(options: {
     return { executions, cleanupUnknown };
   };
 
+  const promoteForeground = (owner: BashExecutionOwner): number => {
+    const registry = options.backgroundTasks;
+    const scope = scopes.get(owner);
+    if (!registry || !scope || scope.admissionClosed || disposed) return 0;
+
+    let promotedCount = 0;
+    for (const record of [...scope.executions.values()]) {
+      if (record.scope !== scope
+        || record.backgroundRegistry !== undefined
+        || record.published
+        || record.promoted
+        || record.settlement
+        || !record.foregroundWaiting) continue;
+
+      const wasForwardingUpdates = record.updatesForwarded;
+      scope.executions.delete(record.executionId);
+      record.promoted = true;
+      record.updatesForwarded = false;
+      record.foregroundWaiting = false;
+      if (!registry.tryPromote(record)) {
+        record.promoted = false;
+        record.updatesForwarded = wasForwardingUpdates;
+        record.foregroundWaiting = true;
+        scope.executions.set(record.executionId, record);
+        continue;
+      }
+      record.resolveForegroundHandoff?.();
+      promotedCount++;
+    }
+    return promotedCount;
+  };
+
   const lifecycle: BashExecutionLifecycle = {
     requestStop,
     close,
     dispose,
+    promoteForeground,
     activity(owner) {
       const scope = scopes.get(owner);
       if (!scope) return { running: 0, stopping: 0, cleanupUnknown: false };
