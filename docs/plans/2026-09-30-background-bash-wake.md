@@ -24,7 +24,7 @@ Codex unified exec 采用同样的轮询模型，已有公开 issue 记录相同
 
 ### `bash({command, timeout?, run_in_background?})`
 
-- `timeout`：**毫秒**，整数，默认 120000，上限 600000。包装层换算为秒交给 Pi 原生 bash 的 timeout 语义（超时终止并报错）。这是对当前"秒、无默认"语义的有意变更，需同步工具描述与测试。
+- `timeout`：**毫秒**，整数，上限 600000；前台默认 120000，后台未显式给出时不设期限（对齐 Claude Code，只由 `bash_stop`、reload 或 dispose 终止）。包装层换算为秒交给 Pi 原生 bash 的 timeout 语义（超时终止并报错）。这是对当前"秒、无默认"语义的有意变更，需同步工具描述与测试。
 - 前台（默认）：阻塞到命令结束或超时，直接返回 Pi 原生结果/错误；不发布句柄、不返回 id。
 - `run_in_background: true`：准入后立即返回 `task_id`（独立 UUID，不是 PID/toolCallId/runId）和"完成时会收到通知，不要轮询"的说明；不等待。
 - 删除 `yieldMs`。
@@ -44,7 +44,7 @@ Codex unified exec 采用同样的轮询模型，已有公开 issue 记录相同
 
 - 删除 `bash_poll`，由 `bash_output` 取代；`bash_stop` 参数由 `executionId` 改为 `task_id`。
 - 同步 `src/server/tool-policy.ts` 只读白名单（`bash_poll` → `bash_output`）及其中文 reason、`src/client/components/ToolCard.tsx` 的工具卡片分支、AGENTS.md 与知识页中的工具名单。
-- 工具描述明确写出：前台可阻塞最长 10 分钟；需要并行或不想阻塞等待的命令用 `run_in_background`（后台仍受相同 timeout 硬期限约束）；后台任务完成时会自动收到通知，**不要轮询**；需要结果时用一次阻塞的 `bash_output`。
+- 工具描述明确写出：前台可阻塞最长 10 分钟；长时间运行、需要并行或不想阻塞等待的命令用 `run_in_background`（后台默认不设 timeout）；后台任务完成时会自动收到通知，**不要轮询**；需要结果时用一次阻塞的 `bash_output`。
 
 ## 归属模型
 
@@ -90,7 +90,8 @@ actor 持有内存中的待送达通知队列（会话级，随 actor 生命周�
 
 ### 通知去重
 
-- `bash_output` 已把最终结果返回给 Agent 时，任务标记为已观测：若其通知仍在 actor 内存队列、尚未交给 SDK，则移出不再发送。
+- `bash_output` 或 `bash_stop` 已把最终结果返回给 Agent 时，任务标记为已观测：若其通知仍在 actor 内存队列、尚未交给 SDK，则移出不再发送。
+- 任务终结时若有 `bash_output`/`bash_stop` 正在等待它，registry 暂扣完成回调：等待调用返回最终结果即视为已观测、不再通知；只有全部等待都结束且未观测时才补发。否则 streaming 时通知会在同一同步调用栈内交给 SDK，早于等待调用返回，最常见的"后台启动、需要时阻塞读取"模式将每次都重复送达。
 - 通知一旦交给 SDK（steer 已被接受或已 `sendCustomMessage`），不撤回；此时与 `bash_output` 结果重复可接受，内容一致且都不声称成功以外的事实。
 - 同一任务最多入队一次。
 

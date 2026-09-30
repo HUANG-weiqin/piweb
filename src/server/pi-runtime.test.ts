@@ -1006,7 +1006,8 @@ describe("PiRuntime session ownership", () => {
       expect(resultText).toContain("old-prefix");
       expect(resultText).toContain("runtime-background-marker");
       expect(resultText).not.toContain("new-prefix");
-      expect(completions).toMatchObject([{ taskId, status: "completed" }]);
+      // The blocking read returned the final result itself, so no notification is due.
+      expect(completions).toEqual([]);
       expect(observed).toEqual([taskId]);
     } finally {
       if (second) await second.dispose();

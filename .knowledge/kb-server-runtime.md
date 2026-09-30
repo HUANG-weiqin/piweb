@@ -34,7 +34,7 @@
 
 `src/server/bash-execution.ts` 只拥有有界命令执行，不是 terminal、stdin、持久 shell 或调度器。前台使用 exact `ConversationRunOwnership` 的 session-local binding；后台由 Actor 的 `BashBackgroundTaskRegistry` 持有，并通过顶层 `CreatePiSessionOptions.backgroundTasks` 跨 runtime 重建复用。`task_id` 是独立 UUID，不是 PID、toolCallId 或 runId。每 run 最多 4 个前台、每 conversation 最多 4 个后台未终结及 64 个任务记录，`PiRuntime` 共享 32 个真正未终结执行的预算；已观测或已通知的终结记录才可 FIFO 回收。
 
-`bash` timeout 为整数毫秒，默认 120000、上限 600000（后台同样有硬期限）；前台等待并返回 Pi 原生结果，显式 `run_in_background:true` 立即返回 id。`bash_output` 默认阻塞等 30000ms（上限 600000），`block:false` 或等待超时返回非消费快照，无 id 立即列出本会话记录；`bash_stop({task_id})` 幂等短等且不标记已观测。没有正常原生结果、exitCode 0 且无 error/partial/stopReason 的事实，就不能宣称成功。
+`bash` timeout 为整数毫秒，上限 600000；前台默认 120000，后台未显式给出时不设期限，只由 `bash_stop`、reload 或 dispose 终止。前台等待并返回 Pi 原生结果，显式 `run_in_background:true` 立即返回 id。`bash_output` 默认阻塞等 30000ms（上限 600000），`block:false` 或等待超时返回非消费快照，无 id 立即列出本会话记录；`bash_stop({task_id})` 幂等短等。两者实际返回最终结果或错误时标记已观测；任务终结时若有这类调用仍在等待，registry 暂扣完成回调，由该调用直接返回结果而不再推送通知，避免 Agent 同一结果收到两次。没有正常原生结果、exitCode 0 且无 error/partial/stopReason 的事实，就不能宣称成功。
 
 - 复用 Pi 公开 local operations 和 Bash factory，每个执行有独立 AbortController。SDK signal 仅取消工具等待，已经 aborted 的启动调用在准入前拒绝；命令 timeout 从启动起只计一次，不随 poll 重置。
 - 输出先在 operations 边界限制原始 stdout+stderr 为 16 MiB，超限 stop/drop 并明确 `partial`；仅另捕获最多 1 KiB 原始滚动尾，最终仍复用 Pi 截断、错误文本及全文临时文件。latest payload 防御复制，不建完整 collector、游标或输出持久库；后台准入返回后不再更新旧 toolCallId。启动 shell/prefix/read-only/operations/budget 冻结，角色切换不改变已运行进程权限。

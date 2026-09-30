@@ -124,7 +124,7 @@ const CLOSE_WAIT_MS = 2000;
 
 const bashParameters = Type.Object({
   command: Type.String({ description: "Shell command to execute" }),
-  timeout: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_TIMEOUT_MS, description: "Timeout in milliseconds (default 120000; maximum 600000)" })),
+  timeout: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_TIMEOUT_MS, description: "Timeout in milliseconds (foreground default 120000; maximum 600000). Background tasks have no timeout unless one is given." })),
   run_in_background: Type.Optional(Type.Boolean({ description: "Return a task_id immediately instead of waiting for completion" })),
 }, { additionalProperties: false });
 
@@ -177,6 +177,10 @@ interface ExecutionRecord {
   outputTail: Buffer;
   observed: boolean;
   notified: boolean;
+  /** Active bash_output/bash_stop waits that may return this task's final result. */
+  observers: number;
+  /** Completion held while an observer may still return the final result itself. */
+  deferredCompletion?: BashTaskCompletion;
   published: boolean;
   promoted: boolean;
   foregroundWaiting: boolean;
@@ -488,19 +492,41 @@ export class BashBackgroundTaskRegistry {
     return [...this.records.values()].map(summaryFor);
   }
 
-  /** Internal completion hook; invocation is exactly once because native settlement is guarded. */
-  settled(record: ExecutionRecord): void {
-    if (this.records.get(record.executionId) !== record) return;
+  private complete(task: BashTaskCompletion): void {
     try {
-      this.onCompleted(taskCompletion(record));
+      this.onCompleted(task);
     } catch {
       // Actor owns notification error reporting; callback failure must not strand native resources.
     }
+  }
+
+  /** Internal completion hook; invocation is exactly once because native settlement is guarded. */
+  settled(record: ExecutionRecord): void {
+    if (this.records.get(record.executionId) !== record) return;
+    const completion = taskCompletion(record);
+    // A waiting observer returns this final result itself before any notification
+    // is handed to the SDK; notify only if that observer ends without it.
+    if (record.observers > 0) record.deferredCompletion = completion;
+    else this.complete(completion);
     if (this.cleanupUnknown && this.activeRecords().length === 0) this.cleanupUnknown = false;
     this.changed();
   }
 
-  /** Internal observation hook; only bash_output calls this after a final result/error is returned. */
+  /** Internal wait bookkeeping for bash_output/bash_stop. */
+  observationStarted(record: ExecutionRecord): void {
+    record.observers++;
+  }
+
+  /** Releases a deferred completion when the last observer ended without observing it. */
+  observationEnded(record: ExecutionRecord): void {
+    record.observers = Math.max(0, record.observers - 1);
+    const completion = record.deferredCompletion;
+    if (record.observers > 0 || completion === undefined) return;
+    record.deferredCompletion = undefined;
+    if (!record.observed) this.complete(completion);
+  }
+
+  /** Internal observation hook; bash_output/bash_stop call this after a final result/error is returned. */
   observed(record: ExecutionRecord): void {
     if (record.observed) return;
     record.observed = true;
@@ -674,7 +700,9 @@ export function createBashExecutionBinding(options: {
     }
     if (backgroundRegistry) backgroundRegistry.assertCanStart();
     if (scope.admissionClosed || disposed) throw new Error("Bash execution admission is closed for this run");
-    const timeoutSeconds = (input.timeout ?? DEFAULT_TIMEOUT_MS) / 1000;
+    // Foreground calls get a default deadline; background tasks run until they exit or are stopped.
+    const timeoutMs = input.timeout ?? (background ? undefined : DEFAULT_TIMEOUT_MS);
+    const timeoutSeconds = timeoutMs === undefined ? undefined : timeoutMs / 1000;
 
     const budgetReservation = options.budget.reserve(options.conversationKey);
     if (!backgroundRegistry && background && scope.published.size >= MAX_TASK_RECORDS && !releaseOldestObservedTask(scope)) {
@@ -696,6 +724,7 @@ export function createBashExecutionBinding(options: {
       outputTail: Buffer.alloc(0),
       observed: false,
       notified: false,
+      observers: 0,
       published: background,
       promoted: false,
       foregroundWaiting: false,
@@ -782,7 +811,7 @@ export function createBashExecutionBinding(options: {
       const baseTool = options.createBaseTool(operations);
       execution = Promise.resolve(baseTool.execute(
         toolCallId,
-        { command: input.command, timeout: timeoutSeconds } as never,
+        { command: input.command, ...(timeoutSeconds === undefined ? {} : { timeout: timeoutSeconds }) } as never,
         record.controller.signal,
         privateUpdate,
         context,
@@ -857,15 +886,18 @@ export function createBashExecutionBinding(options: {
     record: ExecutionRecord,
     waitMs: number,
     signal: AbortSignal | undefined,
-    observeFinal: boolean,
   ): Promise<NativeResult> => {
-    await waitForRecord(record, waitMs, signal);
-    if (!record.settlement) return nonterminalResult(record);
-    if (observeFinal) {
-      if (record.backgroundRegistry) record.backgroundRegistry.observed(record);
+    const registry = record.backgroundRegistry;
+    registry?.observationStarted(record);
+    try {
+      await waitForRecord(record, waitMs, signal);
+      if (!record.settlement) return nonterminalResult(record);
+      if (registry) registry.observed(record);
       else record.observed = true;
+      return settledResult(record);
+    } finally {
+      registry?.observationEnded(record);
     }
-    return settledResult(record);
   };
 
   const findTaskRecord = (owner: BashExecutionOwner, taskId: string): ExecutionRecord => {
@@ -900,14 +932,14 @@ export function createBashExecutionBinding(options: {
     name: bashTemplate.name,
     label: bashTemplate.label,
     description: options.backgroundTasks
-      ? "Run a shell command in the current working directory and return native stdout/stderr output and truncation details. The timeout is an integer number of milliseconds (default 120000; maximum 600000). Foreground commands wait for at most 10 minutes. Use run_in_background for parallel work or to avoid blocking; background tasks belong to this conversation, survive run end/abort/runtime replacement, and produce one completion notification. Do not poll; use bash_output only when you need the final result."
-      : "Run a shell command in the current working directory and return native stdout/stderr output and truncation details. The timeout is an integer number of milliseconds (default 120000; maximum 600000). Foreground commands wait until completion. Use run_in_background for parallel work or to avoid blocking; background tasks are scoped to the current run and may be stopped when it ends. Use bash_output to wait for or retrieve their results.",
+      ? "Run a shell command in the current working directory and return native stdout/stderr output and truncation details. The timeout is an integer number of milliseconds (foreground default 120000; maximum 600000). Foreground commands wait for at most 10 minutes. Use run_in_background for long-running or parallel work; background tasks have no timeout unless one is given, belong to this conversation, survive run end/abort/runtime replacement, and produce one completion notification. Do not poll; use bash_output only when you need the final result."
+      : "Run a shell command in the current working directory and return native stdout/stderr output and truncation details. The timeout is an integer number of milliseconds (foreground default 120000; maximum 600000). Foreground commands wait until completion. Use run_in_background for parallel work or to avoid blocking; background tasks have no timeout unless one is given, are scoped to the current run, and may be stopped when it ends. Use bash_output to wait for or retrieve their results.",
     promptSnippet: bashTemplate.promptSnippet,
     promptGuidelines: [
       ...(bashTemplate.promptGuidelines ?? []),
       options.backgroundTasks
-        ? "Bash timeout is an integer number of milliseconds (default 120000, maximum 600000). Foreground calls block; run_in_background creates a conversation-scoped task that completes with a notification, so do not poll."
-        : "Bash timeout is an integer number of milliseconds (default 120000, maximum 600000). Use run_in_background for parallel work or to avoid blocking. Background tasks are run-scoped; use bash_output to wait for or retrieve their results.",
+        ? "Bash timeout is an integer number of milliseconds (foreground default 120000, maximum 600000; background tasks have no default timeout). Foreground calls block; run_in_background creates a conversation-scoped task that completes with a notification, so do not poll."
+        : "Bash timeout is an integer number of milliseconds (foreground default 120000, maximum 600000; background tasks have no default timeout). Use run_in_background for parallel work or to avoid blocking. Background tasks are run-scoped; use bash_output to wait for or retrieve their results.",
     ],
     constrainedSampling: bashTemplate.constrainedSampling,
     renderShell: bashTemplate.renderShell,
@@ -953,7 +985,7 @@ export function createBashExecutionBinding(options: {
       const record = findTaskRecord(owner, rawInput.task_id);
       const block = rawInput.block ?? true;
       const timeout = rawInput.timeout ?? DEFAULT_OUTPUT_TIMEOUT_MS;
-      return observeTask(record, block ? timeout : 0, signal, true);
+      return observeTask(record, block ? timeout : 0, signal);
     },
   });
 
@@ -969,7 +1001,7 @@ export function createBashExecutionBinding(options: {
       const owner = currentOwner();
       const record = findTaskRecord(owner, rawInput.task_id);
       requestStopRecord(record, "manual");
-      return observeTask(record, STOP_WAIT_MS, signal, false);
+      return observeTask(record, STOP_WAIT_MS, signal);
     },
   });
 

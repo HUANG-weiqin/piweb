@@ -443,6 +443,8 @@ describe("run-scoped Bash execution", () => {
     expect((bashDetails(snapshot).piwebBash as { state: string }).state).toBe("in_progress");
 
     completion.resolve({ exitCode: 0 });
+    // Let the task settle unobserved so its completion is reported before the read.
+    await vi.waitFor(() => expect(completions).toHaveLength(1));
     const firstResult = await invoke(next.tool("bash_output"), { task_id: taskId, timeout: 1000 });
     const nativeText = resultText(firstResult);
     expect(nativeText).toContain(`${"你".repeat(400)}:${command}:old`);
@@ -558,6 +560,7 @@ describe("run-scoped Bash execution", () => {
         base: taggedBase("new-prefix", nextBaseFactories),
       });
       completion.resolve({ exitCode: 0 });
+      await vi.waitFor(() => expect(completed).toHaveLength(1));
       const final = await invoke(next.tool("bash_output"), { task_id: taskId });
       expect(resultText(final)).toContain("old-prefix:long-foreground");
       expect(resultText(final)).not.toContain("new-prefix");
@@ -1019,6 +1022,7 @@ describe("run-scoped Bash execution", () => {
     });
     const started = await invoke(fixture.tool("bash"), { command: "large-output-file", run_in_background: true });
     const taskId = (bashDetails(started).piwebBash as { taskId: string }).taskId;
+    await vi.waitFor(() => expect(completions).toHaveLength(1));
     const final = await invoke(fixture.tool("bash_output"), { task_id: taskId });
     const summary = bashDetails(final).piwebBash as { outputFile?: string };
     expect(completions).toMatchObject([{ taskId, status: "completed" }]);
@@ -1027,7 +1031,7 @@ describe("run-scoped Bash execution", () => {
     expect(bashDetails(final).fullOutputPath).toBe(longPath);
   });
 
-  it("classifies post-exit formatter failures as failed and only bash_output observes them", async () => {
+  it("classifies post-exit formatter failures as failed and observes a final result once", async () => {
     const completions: BashTaskCompletion[] = [];
     const observed: string[] = [];
     let markCompleted!: () => void;
@@ -1067,9 +1071,93 @@ describe("run-scoped Bash execution", () => {
     }]);
 
     await expect(invoke(fixture.tool("bash_stop"), { task_id: taskId })).rejects.toThrow(/native formatter failed/);
-    expect(observed).toEqual([]);
+    expect(observed).toEqual([taskId]);
     await expect(invoke(fixture.tool("bash_output"), { task_id: taskId })).rejects.toThrow(/native formatter failed/);
     expect(observed).toEqual([taskId]);
+  });
+
+  it("runs background tasks without a default timeout but honors an explicit one", async () => {
+    const timeouts: Array<number | undefined> = [];
+    const fixture = makeFixture(async (_command, _cwd, options) => {
+      timeouts.push(options.timeout);
+      return { exitCode: 0 };
+    }, { base: simpleBase });
+    await invoke(fixture.tool("bash"), { command: "unbounded", run_in_background: true });
+    await invoke(fixture.tool("bash"), { command: "bounded", run_in_background: true, timeout: 600_000 });
+    await invoke(fixture.tool("bash"), { command: "foreground" });
+    for (let turn = 0; turn < 6; turn++) await Promise.resolve();
+    expect(timeouts).toEqual([undefined, 600, 120]);
+  });
+
+  it("does not report a completion that a waiting bash_output returns itself", async () => {
+    const completions: BashTaskCompletion[] = [];
+    const observed: string[] = [];
+    const registry = new BashBackgroundTaskRegistry({
+      onCompleted: (task) => completions.push(task),
+      onObserved: (taskId) => observed.push(taskId),
+    });
+    const completion = deferred<{ exitCode: number | null }>();
+    const fixture = makeFixture(async () => completion.promise, { backgroundTasks: registry, base: simpleBase });
+    const started = await invoke(fixture.tool("bash"), { command: "awaited", run_in_background: true });
+    const taskId = (bashDetails(started).piwebBash as { taskId: string }).taskId;
+
+    const waiting = invoke(fixture.tool("bash_output"), { task_id: taskId });
+    completion.resolve({ exitCode: 0 });
+    expect(resultText(await waiting)).toBe("(no output)");
+    expect(observed).toEqual([taskId]);
+    expect(completions).toEqual([]);
+  });
+
+  it("reports a completion after a waiting bash_output times out first", async () => {
+    vi.useFakeTimers();
+    const completions: BashTaskCompletion[] = [];
+    const registry = new BashBackgroundTaskRegistry({
+      onCompleted: (task) => completions.push(task),
+      onObserved: () => {},
+    });
+    const completion = deferred<{ exitCode: number | null }>();
+    const fixture = makeFixture(async () => completion.promise, { backgroundTasks: registry, base: simpleBase });
+    const started = await invoke(fixture.tool("bash"), { command: "slow", run_in_background: true });
+    const taskId = (bashDetails(started).piwebBash as { taskId: string }).taskId;
+
+    const waiting = invoke(fixture.tool("bash_output"), { task_id: taskId, timeout: 10 });
+    await vi.advanceTimersByTimeAsync(10);
+    expect(resultText(await waiting)).toContain("in_progress");
+    completion.resolve({ exitCode: 0 });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(completions).toMatchObject([{ taskId, status: "completed" }]);
+  });
+
+  it("does not notify a stop whose final result bash_stop returned, but notifies one still stopping", async () => {
+    vi.useFakeTimers();
+    const completions: BashTaskCompletion[] = [];
+    const registry = new BashBackgroundTaskRegistry({
+      onCompleted: (task) => completions.push(task),
+      onObserved: () => {},
+    });
+    const lateExit = deferred<{ exitCode: number | null }>();
+    const fixture = makeFixture((command, _cwd, options) => {
+      if (command === "late") return lateExit.promise;
+      return new Promise((resolve) => {
+        options.signal?.addEventListener("abort", () => resolve({ exitCode: null }), { once: true });
+      });
+    }, { backgroundTasks: registry, base: simpleBase });
+
+    const prompt = await invoke(fixture.tool("bash"), { command: "prompt", run_in_background: true });
+    const promptId = (bashDetails(prompt).piwebBash as { taskId: string }).taskId;
+    const promptStop = expect(invoke(fixture.tool("bash_stop"), { task_id: promptId })).rejects.toThrow();
+    await vi.advanceTimersByTimeAsync(0);
+    await promptStop;
+    expect(completions).toEqual([]);
+
+    const late = await invoke(fixture.tool("bash"), { command: "late", run_in_background: true });
+    const lateId = (bashDetails(late).piwebBash as { taskId: string }).taskId;
+    const lateStop = invoke(fixture.tool("bash_stop"), { task_id: lateId });
+    await vi.advanceTimersByTimeAsync(1000);
+    expect((bashDetails(await lateStop).piwebBash as { state: string }).state).toBe("stopping");
+    lateExit.resolve({ exitCode: 0 });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(completions).toMatchObject([{ taskId: lateId, status: "killed", stopReason: "manual" }]);
   });
 
   it("enforces the runtime-shared limit of 32 unsettled executions", async () => {

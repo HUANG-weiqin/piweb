@@ -985,6 +985,45 @@ describe("ConversationActor Bash lifecycle", () => {
     await fixture.actor.dispose();
   });
 
+  it("does not send a completion notification for a task whose result a blocking bash_output returned", async () => {
+    const runtime = new FakeRuntime();
+    runtime.enableBackgroundBashBinding = true;
+    const fixture = await openActor({ runtime });
+    const promptStarted = deferred<void>();
+    const promptFinished = deferred<void>();
+    runtime.session.promptImplementation = async () => {
+      runtime.session.isStreaming = true;
+      promptStarted.resolve();
+      await promptFinished.promise;
+      runtime.session.isStreaming = false;
+    };
+    const running = fixture.actor.startPrompt({
+      runId: RUN_A,
+      text: "start a task and wait for it",
+      origin: "browser",
+    });
+    await promptStarted.promise;
+
+    const taskFinished = deferred<{ exitCode: number | null }>();
+    runtime.bashExecutionImplementation = async () => taskFinished.promise;
+    const taskId = actorBashTaskId(await invokeActorBashTool(
+      fixture,
+      "bash",
+      { command: "awaited", run_in_background: true },
+    ));
+    const output = invokeActorBashTool(fixture, "bash_output", { task_id: taskId });
+    taskFinished.resolve({ exitCode: 0 });
+    await output;
+
+    promptFinished.resolve();
+    await running;
+    expect(runtime.session.customMessages.filter(
+      ({ message }) => message.customType === BASH_TASK_NOTIFICATION_CUSTOM_TYPE,
+    )).toHaveLength(0);
+    expect(fixture.actor.hasPendingBashNotifications()).toBe(false);
+    await fixture.actor.dispose();
+  });
+
   it("does not resubmit an accepted streaming notification lost before raw observation", async () => {
     const runtime = new FakeRuntime();
     runtime.enableBackgroundBashBinding = true;
