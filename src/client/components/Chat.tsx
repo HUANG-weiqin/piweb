@@ -17,7 +17,6 @@ import {
   MAX_PROMPT_IMAGE_COUNT,
   MIN_COMPACTION_THRESHOLD_PERCENT,
   promptImageMimeType,
-  type ConversationBashNotice,
   type ConversationCompactionMarker,
   type ConversationImageLocator,
   type ConversationRoleSnapshot,
@@ -205,12 +204,6 @@ function formatTimelineTime(timestamp: string): string {
   return Number.isNaN(date.valueOf())
     ? timestamp
     : TIMELINE_TIME_FORMAT.format(date);
-}
-
-function bashNoticeSeverityLabel(severity: ConversationBashNotice["severity"]): string {
-  if (severity === "warning") return "警告";
-  if (severity === "error") return "错误";
-  return "提示";
 }
 
 function editBudgetRemainingFilesByRun(
@@ -893,21 +886,6 @@ function ChatView({
       </div>}
       {conversationReady && !blocks.length && <div className="empty"><div>π</div><h1>想做点什么？</h1><p>Pi 可以读取、修改文件并执行命令。</p></div>}
       {blocks.map((block) => {
-        if (block.kind === "bash_notice") {
-          const severityLabel = bashNoticeSeverityLabel(block.severity);
-          return <aside
-            key={`${transcriptRenderScopeKey}:bash-notice:${block.id}`}
-            className={`bash-notice bash-notice-${block.severity}`}
-            role="note"
-            aria-label={`后台 Bash ${severityLabel}`}
-          >
-            <time dateTime={block.timestamp}>
-              {formatTimelineTime(block.timestamp)}
-            </time>
-            <strong>BASH · {severityLabel}</strong>
-            <span>{block.text}</span>
-          </aside>;
-        }
         if (block.kind === "compaction") {
           const provenanceLabel = compactionMarkerLabel(block.provenance);
           return <div

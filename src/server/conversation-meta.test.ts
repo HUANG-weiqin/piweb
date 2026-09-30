@@ -7,7 +7,6 @@ import {
 } from "../shared/protocol.js";
 import { EDIT_BUDGET_CUSTOM_TYPE } from "./edit-budget.js";
 import {
-  BASH_EXECUTION_NOTICE_CUSTOM_TYPE,
   COMPACTION_THRESHOLD_CUSTOM_TYPE,
   CONTEXT_HINT_CUSTOM_TYPE,
   CONVERSATION_CARD_CUSTOM_TYPE,
@@ -27,7 +26,6 @@ import {
   SERVICE_TIER_CUSTOM_TYPE,
   aggregateReservedConversationEntries,
   appendReservedCustomEntry,
-  createBashExecutionNoticeEntry,
   createCompactionThresholdEntry,
   createConversationCardEntry,
   createConversationMessageEntry,
@@ -42,7 +40,6 @@ import {
   createMessageDeliveryReceiptEntry,
   normalizeConversationMessageSummary,
   parseConversationCardEntry,
-  parseBashExecutionNoticeEntry,
   parseCompactionThresholdEntry,
   parseEditGateEntry,
   parseConversationMessageEntry,
@@ -946,11 +943,12 @@ describe("conversation reserved entries", () => {
     const messageEntry = createConversationMessageEntry(message());
     const run = createRunSettlementEntry(settlement());
     const operation = createMetaOperationEntry(startedOperation());
-    const notice = createBashExecutionNoticeEntry({
-      runId: randomUUID(),
-      severity: "warning",
-      text: "测试或构建已返回，但后台命令仍在运行。",
-    });
+    const legacyNotice = {
+      customType: "piweb.bash_execution_notice.v1",
+      content: "测试或构建已返回，但后台命令仍在运行。",
+      display: true,
+      details: { runId: randomUUID(), severity: "warning" },
+    };
 
     expect(parseReservedConversationEntry(meta)).toEqual({
       kind: "conversation_meta",
@@ -972,34 +970,28 @@ describe("conversation reserved entries", () => {
       kind: "meta_operation",
       entry: operation,
     });
-    expect(notice).toEqual({
-      customType: BASH_EXECUTION_NOTICE_CUSTOM_TYPE,
-      content: "测试或构建已返回，但后台命令仍在运行。",
-      display: true,
-      details: { runId: notice.details.runId, severity: "warning" },
+    expect(parseReservedConversationEntry(legacyNotice)).toEqual({
+      kind: "legacy_bash_execution_notice",
+      entry: legacyNotice,
     });
-    expect(parseReservedConversationEntry(notice)).toEqual({
-      kind: "bash_execution_notice",
-      entry: notice,
-    });
-    expect(aggregateReservedConversationEntries([notice])).toMatchObject({
+    expect(aggregateReservedConversationEntries([legacyNotice])).toMatchObject({
       deliveredMessageIds: [],
       runSettlements: [],
     });
-    expect(() => parseBashExecutionNoticeEntry({
-      ...notice,
+    expect(() => parseReservedConversationEntry({
+      ...legacyNotice,
       display: false,
     })).toThrow();
-    expect(() => parseBashExecutionNoticeEntry({
-      ...notice,
-      details: { ...notice.details, extra: true },
+    expect(() => parseReservedConversationEntry({
+      ...legacyNotice,
+      details: { ...legacyNotice.details, extra: true },
     })).toThrow();
-    expect(() => parseBashExecutionNoticeEntry({
-      ...notice,
+    expect(() => parseReservedConversationEntry({
+      ...legacyNotice,
       extra: true,
     })).toThrow();
-    expect(() => parseBashExecutionNoticeEntry({
-      ...notice,
+    expect(() => parseReservedConversationEntry({
+      ...legacyNotice,
       content: "界".repeat(2_731),
     })).toThrow(/UTF-8 bytes/);
     expect(() => parseReservedConversationEntry({
@@ -1007,12 +999,12 @@ describe("conversation reserved entries", () => {
       id: "00000002",
       parentId: null,
       timestamp,
-      customType: BASH_EXECUTION_NOTICE_CUSTOM_TYPE,
-      data: notice,
+      customType: "piweb.bash_execution_notice.v1",
+      data: legacyNotice,
     })).toThrow();
     expect(() => appendReservedCustomEntry(
       { appendCustomEntry: () => "entry" },
-      notice as never,
+      legacyNotice as never,
     )).toThrow(/non-context/i);
     const resume = {
       customType: "piweb.compaction_resume.v1",
@@ -1109,28 +1101,29 @@ describe("conversation reserved entries", () => {
       kind: "conversation_message",
       entry: incoming,
     });
-    const notice = createBashExecutionNoticeEntry({
-      runId: randomUUID(),
-      severity: "info",
-      text: "后台命令仍在运行。",
-    });
+    const legacyNotice = {
+      customType: "piweb.bash_execution_notice.v1",
+      content: "后台命令仍在运行。",
+      display: true,
+      details: { runId: randomUUID(), severity: "info" },
+    };
     const noticeId = manager.appendCustomMessageEntry(
-      notice.customType,
-      notice.content,
-      notice.display,
-      notice.details,
+      legacyNotice.customType,
+      legacyNotice.content,
+      legacyNotice.display,
+      legacyNotice.details,
     );
     expect(parseReservedConversationEntry(manager.getEntry(noticeId))).toEqual({
-      kind: "bash_execution_notice",
-      entry: notice,
+      kind: "legacy_bash_execution_notice",
+      entry: legacyNotice,
     });
     expect(manager.buildSessionContext().messages).toContainEqual(
       expect.objectContaining({
         role: "custom",
-        customType: BASH_EXECUTION_NOTICE_CUSTOM_TYPE,
-        content: notice.content,
+        customType: "piweb.bash_execution_notice.v1",
+        content: legacyNotice.content,
         display: true,
-        details: notice.details,
+        details: legacyNotice.details,
       }),
     );
     expect(manager.buildSessionContext().messages).toEqual([
@@ -1142,10 +1135,10 @@ describe("conversation reserved entries", () => {
       }),
       expect.objectContaining({
         role: "custom",
-        customType: BASH_EXECUTION_NOTICE_CUSTOM_TYPE,
-        content: notice.content,
+        customType: "piweb.bash_execution_notice.v1",
+        content: legacyNotice.content,
         display: true,
-        details: notice.details,
+        details: legacyNotice.details,
       }),
     ]);
 

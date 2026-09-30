@@ -36,17 +36,17 @@ schema 使用平坦 TypeBox object，不引入 anyOf/oneOf。参数不接受 cwd
 
 Actor 普通 terminal、abort、safe reload（包括 preserveSettlement=true 路径）和 runtime dispose 汇入幂等 close：同步关闭新 launch admission、请求停止、给整组执行最多约 2 秒清理宽限。停止请求与完成竞争以已观测最终结果为准；poll 取消不消费结果。
 
-未确认终结时执行仍为 stopping，收尾报告 cleanup_unknown；会话停止自动执行，默认 reload 失败而不是偷偷 force。旧执行继续占共享额度，旧 closed owner 的未终结资源使同 conversation 新 Bash fail closed，迟到 callback 只清理旧资源，不写 transcript/新 run。显式 force/crash 保持 best-effort；旧句柄不可恢复，不自动重启历史命令。
+未确认终结时执行仍为 stopping，Actor 以 fatal/cleanup_unknown 瞬时状态阻止自动执行；默认 reload 失败而不是偷偷 force。旧执行继续占共享额度，旧 closed owner 的未终结资源使同 conversation 新 Bash fail closed，迟到 callback 只清理旧资源，不写 transcript/新 run。显式 force/crash 保持 best-effort；旧句柄不可恢复，不自动重启历史命令。
 
-## 持久收尾与 UI
+## 收尾清理与 UI
 
-收尾时追加一条有界、context-bearing 宿主 custom_message：piweb.bash_execution_notice.v1，display=true，content 为最多 8192 UTF-8 bytes 的自解释中文摘要，details 为严格 {runId, severity: info|warning|error}。摘要明确列出已发布执行的结束/停止/未知事实；未知和失败优先保留，不把 run completed 当成全部命令成功。
+terminal、abort、reload 和 dispose 必须等待 Bash 整组有界清理，再写既有 run settlement；cleanup_unknown 仍将 Actor 标记 fatal 并暂停自动工作。清理 callback 不写 transcript。新逻辑 run 收尾不追加 custom_message 或额外 assistant/tool result 摘要；工具原始返回仍是命令状态的唯一新增历史内容，不能把工具返回成功显示成命令通过。
 
-必须在 Actor 健康 writer 边界、SDK 当前工具轮已收尾后通过 sendCustomMessage(triggerTurn:false) 追加并复核 durable entry，再持久 run settlement。后台 callback 无追加权。摘要不能伪装 assistant message 或 tool result。重启恢复无 live registry，使用保留的收尾/恢复提示说明旧句柄不提供存活能力。
+旧 JSONL 中可能已有 `piweb.bash_execution_notice.v1`。服务端保留严格 reserved parser 仅为使这些旧会话仍可读取；读路径不重写该物理记录，也不投影到浏览器 history/wire，新的执行绝不追加它。重启后无 live registry，旧句柄不提供存活能力或恢复授权。
 
-持久浏览器投影是 ConversationBashNotice：kind=bash_notice，id/timestamp/runId/severity/text。focused completion 已有 conversation_snapshot 刷新可承载它，必要的安全 reload/错误边界再显式触发 focused history 刷新。工具卡片注明“返回时执行尚未结束/请求停止”，不能把工具返回成功显示成命令通过。
+瞬时浏览器状态仅为 ConversationBashActivity={runId,running,stopping,cleanupUnknown}。focused snapshot 与精确 focus 关联的低频事件投影它；工具卡片注明“返回时执行尚未结束/请求停止”，不能把工具返回成功显示成命令通过。
 
-用户补充要求：本会话仍有后台命令时应在 UI 告知，先做简单表现。只在输入区上方加轻量状态条，显示执行/停止数量及 cleanup_unknown 警示，不展开任务列表或控制面板。新增瞬态 ConversationBashActivity={runId,running,stopping,cleanupUnknown}，各计数及合计不超过 4；focused snapshot 的 nullable bashActivity 和精确 sessionId+conversationId+focusId 关联的低频 bash_activity 事件投影它。启动、停止、实际终结及清理超时才通知；stdout 不触发事件。恢复时从当前 actor hydrate，冷进程没有执行 registry，因此 null 不证明历史命令的 OS 子孙已消失。迟到通知必须校验同 runtime generation 与 exact owner（包括保留的未知清理 owner），不得覆盖新 run。
+用户补充要求：本会话仍有后台命令时应在 UI 告知，先做简单表现。只在输入区上方加轻量状态条，显示执行/停止数量及 cleanup_unknown 警示，不展开任务列表或控制面板。新增瞬态 ConversationBashActivity={runId,running,stopping,cleanupUnknown}，各计数及合计不超过 4；focused snapshot 的 nullable bashActivity 和精确 sessionId+conversationId+focusId 关联的低频 bash_activity 事件投影它。启动、停止、实际终结及清理超时才通知；stdout 不触发事件。恢复时从当前 actor hydrate，冷进程没有执行 registry，因此 null 不证明历史命令的 OS 子孙已消失。迟到通知必须校验同 runtime generation 与 exact owner（包括保留的未知清理 owner），不得覆盖新 run。协议 v64 不再接受/发送持久收尾摘要 item。
 
 不新增浏览器命令、PublicState/sidebar job 表或单个 job 实时事件系统。同步 PROTOCOL_VERSION、validator、reserved registry、snapshot/window/peek 的 exhaustive 消费点和薄 UI。
 
@@ -54,8 +54,8 @@ Actor 普通 terminal、abort、safe reload（包括 preserveSettlement=true 路
 
 - 新 src/server/bash-execution.ts 与测试：一个窄 controller、共享额度和三个工具。owner 为结构类型 {conversationId, runId}，授权使用对象 identity。
 - PiRuntime：解析有效 shellPath/full_access commandPrefix；以 createBaseTool(operations) factory 复用 Pi 或受审查 Bash，注入 shared budget、conversationKey 和 getOwner；CreatedPiSession 暴露 bashExecutions lifecycle，失败和 dispose 均覆盖清理。
-- ConversationActor：传 exact owner、控制 abort/terminal/reload/基础设施失败；持久收尾摘要；不在物理 agent_end 清理。
-- conversation-meta/history/shared protocol/client：只有摘要格式和纯投影，不拥有进程或调度。
+- ConversationActor：传 exact owner、控制 abort/terminal/reload/基础设施失败；等待清理后写 settlement，不追加持久收尾摘要；不在物理 agent_end 清理。
+- conversation-meta/history/shared protocol/client：只保留旧摘要格式的只读兼容解析；新协议不定义摘要 item，旧摘要不再投影；不拥有进程或调度。
 
 Controller seam：createBashExecutionBinding({getOwner, conversationKey, budget, operations, createBaseTool, onChange?}) 返回 {tools, lifecycle}。lifecycle.requestStop(owner, reason) 同步关闭该 owner 准入；lifecycle.close(owner, reason) 有界返回 {executions, cleanupUnknown}；lifecycle.dispose() 覆盖全部 scope；activity(owner) 只读推导 {running,stopping,cleanupUnknown}，onChange(owner) 不携带输出并隔离 observer 错误。summary 行含 executionId/state、可选 exitCode/stopReason/error/outputFile；reason 为 manual|timeout|output_limit|run_end|abort|reload|dispose。实际类型和源工具结果保持可验证且不使用文本解析猜退出码。
 
@@ -63,4 +63,4 @@ Controller seam：createBashExecutionBinding({getOwner, conversationKey, budget,
 
 先写永不退出短 yield、退出/停止竞态、取消 poll、输出洪泛和特殊 reload 路径的最小反例。再覆盖：同文独立执行、foreign/expired ID、late error、timeout 不因 poll 重置、UTF-8/cap 边界、read_only/source/settings/hook、compaction/LoopList 继续持有、所有终态清理、unknown 不假回收额度、迟到 callback 隔离、历史恢复不授权 live job、工具状态与宿主摘要 UI。
 
-最终集成状态必须通过 npm test、npm run test:slow、npm run typecheck、npm run build、git diff --check，并在真实浏览器窗口走并发执行、查询、停止、UI abort、安全 reload/恢复及持久摘要路径。同步长期知识页，保留无关 worktree 变更。
+最终集成状态必须通过 npm test、npm run test:slow、npm run typecheck、npm run build、git diff --check，并在真实浏览器窗口走并发执行、查询、停止、UI abort、安全 reload/恢复及瞬时状态条路径；验证不产生新的持久 Bash 收尾摘要。同步长期知识页，保留无关 worktree 变更。

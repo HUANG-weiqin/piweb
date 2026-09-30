@@ -15,7 +15,6 @@ export const MAX_PROJECT_CONVERSATION_PREVIEW_CHARACTERS = 500;
 /** 用户可见的跨会话消息摘要：有界载荷，但可写成短段落。 */
 export const MAX_SESSION_MESSAGE_SUMMARY_CHARACTERS = 500;
 export const MAX_SESSION_MESSAGE_SUMMARY_BYTES = 2 * 1024;
-export const MAX_BASH_NOTICE_TEXT_BYTES = 8 * 1024;
 export const MAX_PROMPT_CHARACTERS = 200_000;
 /** 每条浏览器 prompt 最多携带四张小型本地图片，合计解码后不超过 512 KiB。 */
 export const MAX_PROMPT_IMAGE_COUNT = 4;
@@ -34,8 +33,10 @@ export const DEFAULT_COMPACTION_THRESHOLD_PERCENT = 70;
 export const MIN_COMPACTION_THRESHOLD_PERCENT = 20;
 export const MAX_COMPACTION_THRESHOLD_PERCENT = 90;
 export const MAX_TRANSITION_DIAGNOSTIC_PHASE_MS = 60 * 60 * 1_000;
+// v64: Bash cleanup notices are no longer written or projected; run-scoped
+// activity remains an aggregate focused snapshot/event only.
 // v63: focused snapshots and low-frequency exact-focus events project only
-// aggregate run-scoped Bash activity; durable Bash notices are transcript items.
+// aggregate run-scoped Bash activity, with no individual job rows.
 // v62: output-rate timing is measured at the server's first-token/completion
 // boundary and the latest settled run is recoverable from focused snapshots.
 // v58: rename commands are command-correlated and settle through the existing
@@ -96,7 +97,7 @@ export const MAX_TRANSITION_DIAGNOSTIC_PHASE_MS = 60 * 60 * 1_000;
 // their OpenAI-compatible model list before saving.
 // v59: idle current-leaf fork copies LLM-effective context into a fresh host
 // lifecycle via `fork_conversation`; history anchors stay unsupported.
-export const PROTOCOL_VERSION = 63;
+export const PROTOCOL_VERSION = 64;
 export const OBSERVATION_FATAL_CLOSE_CODE = 4002;
 export const COLOR_SCHEMES = ["quiet-rebel", "classic-rebel"] as const;
 export type ColorScheme = typeof COLOR_SCHEMES[number];
@@ -1094,15 +1095,6 @@ export interface ConversationCompactionMarker {
   provenance?: ConversationCompactionProvenance;
 }
 
-export interface ConversationBashNotice {
-  kind: "bash_notice";
-  id: string;
-  timestamp: string;
-  runId: string;
-  severity: "info" | "warning" | "error";
-  text: string;
-}
-
 /** Focused aggregate only; never identifies individual background commands. */
 export interface ConversationBashActivity {
   runId: string;
@@ -1114,7 +1106,6 @@ export interface ConversationBashActivity {
 export type ConversationHistoryItem =
   | ({ kind: "message" } & ConversationHistoryMessage)
   | ConversationCompactionMarker
-  | ConversationBashNotice
   | ConversationMessageCard;
 
 export interface ConversationWindowCoverage {
@@ -1797,15 +1788,6 @@ const conversationHistoryItemSchema: z.ZodType<ConversationHistoryItem> =
       tokensBefore: z.number().finite().nonnegative(),
       provenance: conversationCompactionProvenanceSchema.optional(),
     }),
-    z.object({
-      kind: z.literal("bash_notice"),
-      id: z.string().min(1).max(256),
-      timestamp: z.string().datetime(),
-      runId: runIdSchema,
-      severity: z.enum(["info", "warning", "error"]),
-      text: boundedUtf8String(MAX_BASH_NOTICE_TEXT_BYTES, "bash notice text")
-        .refine((value) => value.trim().length > 0, "bash notice text must not be blank"),
-    }).strict(),
     z.object({
       kind: z.literal("session_message"),
       id: z.string(),

@@ -115,7 +115,7 @@ Project store handle 按 canonical cwd 引用计数；ProjectSessionCoordinator 
 - `piweb.meta_operation.v1`：破坏性 meta 工具的 started/completed 幂等状态；
 - `piweb.compaction_threshold.v1`：当前会话 20%–90% 的自动压缩阈值，缺省为 70%，最后一条单调时间记录生效。
 - `piweb.compaction_resume.v1`：压缩后继续同一 workbench run 的隐藏 `custom_message`，必须 `display=false` 且只携带合法 `runId`，只校验不投影为卡片或 settlement。默认压缩由 Pi 0.85.1 私有 `_runDefaultCompaction` 在 `session_before_compact` 后执行；custom 结果直接采用并跳过模型解析，否则每次 attempt fresh-resolve 冻结的 compaction identity。显式模型必须可用、contextWindow 为有限正数且不小于本次 primary，失败无 fallback；缺少当前必填 role snapshot 字段的 JSONL 一律 fail closed，不做读时补值或语义迁移。
-- `piweb.bash_execution_notice.v1`：逻辑 run 收尾时的可见 context `custom_message`，`display=true`、content 为最多 8192 UTF-8 bytes 的 string，details 严格只有 UUID `runId` 和 `info | warning | error` severity。Actor 必须在健康且 non-streaming 的 writer 边界追加并证明 exact durable entry 后才 settlement；它不是 assistant 回复、伪造 tool result、执行 registry 或重启恢复授权。普通 custom carrier、对象 content、额外 details 和错误 display 都拒绝。历史投影为独立 `bash_notice` 边界，Agent peek 有意省略此 UI 元数据。
+- `piweb.bash_execution_notice.v1`：已退役的旧版 context `custom_message`。reserved parser 仅保留严格读取兼容，避免已有 JSONL 会话变为不可读；新 run 不再写入，history/wire 不再投影。旧物理记录不由读路径改写，也不构成执行存活或恢复授权。
 - `piweb.context_hint.v1`：LoopList 注入器写入的隐藏 `custom_message`，必须 `display=false`、`content` 为有界字符串且没有 `details`；它只承载每轮 `<piweb_ctx>`/`piweb_work` 提示，不恢复任何宿主状态，也不投影为卡片或 settlement。读取端对未知 `piweb.*` 一律 fail closed，因此新增此类提示必须与写入端同步注册进 reserved registry，否则含该提示的会话文件会被整体判为损坏。
 - 历史 `piweb.wait_poll.v1` 只接受严格合法的旧 `custom` carrier（UUID `runId`、1–8 整数 `count`、无额外字段），验证后不恢复任何 poll/quota/wait 生命周期状态；畸形记录和其它未知 `piweb.*` 仍 fail closed。
 

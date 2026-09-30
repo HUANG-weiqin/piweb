@@ -41,7 +41,6 @@ import {
   createRunSettlementEntry,
   createServiceTierSelectionEntry,
   LOOP_LIST_CUSTOM_TYPE,
-  BASH_EXECUTION_NOTICE_CUSTOM_TYPE,
 } from "./conversation-meta.js";
 import { EDIT_BUDGET_CUSTOM_TYPE } from "./edit-budget.js";
 import {
@@ -616,27 +615,16 @@ function fakeBashLifecycle() {
   } satisfies BashExecutionLifecycle;
 }
 
-function appendBashNoticeLikeSdk(fixture: ActorFixture): void {
-  fixture.runtime.session.resumeImplementation = async (message, options) => {
-    expect(options?.triggerTurn).toBe(false);
-    expect(message.customType).toBe(BASH_EXECUTION_NOTICE_CUSTOM_TYPE);
-    fixture.manager.appendCustomMessageEntry(
-      message.customType, message.content, message.display, message.details,
-    );
-  };
-}
-
 const BASH_EXECUTION_ID = "ac738f02-4c4d-4fb7-9b53-ea3bb9c5d5d";
 
 describe("ConversationActor Bash lifecycle", () => {
-  it("awaits cleanup and durable notice before publishing terminal", async () => {
+  it("awaits Bash cleanup before publishing terminal settlement", async () => {
     const runtime = new FakeRuntime();
     const bash = fakeBashLifecycle();
     const cleanup = deferred<Awaited<ReturnType<BashExecutionLifecycle["close"]>>>();
     bash.close.mockImplementation(() => cleanup.promise);
     runtime.bashExecutions = bash;
     const fixture = await openActor({ runtime });
-    appendBashNoticeLikeSdk(fixture);
     const promptFinished = deferred();
     runtime.session.promptImplementation = () => promptFinished.promise;
     const running = fixture.actor.startPrompt({ runId: RUN_A, text: "background", origin: "inbox" });
@@ -656,11 +644,13 @@ describe("ConversationActor Bash lifecycle", () => {
     cleanup.resolve({ executions: [{ executionId: BASH_EXECUTION_ID, state: "finished", exitCode: 0 }], cleanupUnknown: false });
     await expect(running).resolves.toMatchObject({ outcome: "completed" });
     const branch = fixture.manager.getBranch();
-    const noticeIndex = branch.findIndex((entry) => entry.type === "custom_message" && entry.customType === BASH_EXECUTION_NOTICE_CUSTOM_TYPE);
     const settlementIndex = branch.findIndex((entry) => entry.type === "custom" && entry.customType === "piweb.run_settlement.v1");
-    expect(noticeIndex).toBeGreaterThanOrEqual(0);
-    expect(settlementIndex).toBeGreaterThan(noticeIndex);
-    expect(fixture.actor.projectConversationItems().items).toContainEqual(expect.objectContaining({ kind: "bash_notice", runId: RUN_A }));
+    expect(settlementIndex).toBeGreaterThanOrEqual(0);
+    expect(runtime.session.resumeCalls).toBe(0);
+    expect(branch).not.toContainEqual(expect.objectContaining({
+      type: "custom_message",
+      customType: "piweb.bash_execution_notice.v1",
+    }));
     await fixture.actor.dispose();
   });
 
@@ -695,7 +685,6 @@ describe("ConversationActor Bash lifecycle", () => {
     bash.activity.mockReturnValue({ running: 0, stopping: 1, cleanupUnknown: true });
     runtime.bashExecutions = bash;
     const fixture = await openActor({ runtime });
-    appendBashNoticeLikeSdk(fixture);
     const promptFinished = deferred();
     runtime.session.promptImplementation = () => promptFinished.promise;
     const running = fixture.actor.startPrompt({ runId: RUN_A, text: "reload", origin: "inbox" });

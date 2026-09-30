@@ -42,7 +42,7 @@ const transitionDiagnostics = {
 
 describe("parseClientCommand", () => {
   it("uses the run-correlated protocol version", () => {
-    expect(PROTOCOL_VERSION).toBe(63);
+    expect(PROTOCOL_VERSION).toBe(64);
   });
 
   it("accepts supported commands", () => {
@@ -1907,20 +1907,12 @@ describe("parseServerEvent", () => {
     })).toThrow();
   });
 
-  it("validates focused Bash notices and aggregate activity without job rows", () => {
+  it("validates focused aggregate Bash activity without job rows", () => {
     const bashActivity = {
       runId,
       running: 2,
       stopping: 1,
       cleanupUnknown: true,
-    };
-    const notice = {
-      kind: "bash_notice",
-      id: "00000002",
-      timestamp: "2026-09-30T10:00:00.000Z",
-      runId,
-      severity: "warning",
-      text: "后台命令未能确认停止。",
     };
     expect(parseServerEvent({
       type: "conversation_snapshot",
@@ -1928,13 +1920,13 @@ describe("parseServerEvent", () => {
       conversationId,
       focusId,
       projectionSeq: 0,
-      items: [notice],
+      items: [],
       pendingPrompts: [],
       bashActivity,
       window: { omittedBefore: false, startsMidTurn: false, contentTruncated: false },
     })).toMatchObject({
       type: "conversation_snapshot",
-      items: [notice],
+      items: [],
       bashActivity,
     });
     expect(parseServerEvent({
@@ -1982,10 +1974,17 @@ describe("parseServerEvent", () => {
       conversationId,
       focusId,
       projectionSeq: 0,
-      items: [{ ...notice, text: "界".repeat(2_731) }],
+      items: [{
+        kind: "bash_notice",
+        id: "00000002",
+        timestamp: "2026-09-30T10:00:00.000Z",
+        runId,
+        severity: "warning",
+        text: "legacy notice",
+      }],
       pendingPrompts: [],
       window: { omittedBefore: false, startsMidTurn: false, contentTruncated: false },
-    })).toThrow(/UTF-8 bytes/);
+    })).toThrow();
   });
 
   it("requires a transcript checkpoint and complete pending prompt FIFO", () => {

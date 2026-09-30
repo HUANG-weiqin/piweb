@@ -536,7 +536,7 @@ describe("ProjectSessionCoordinator", () => {
 
   it.each([
     ["typed stop rejection", new BashCleanupUnconfirmedError(), false],
-    ["writer failure with unknown Bash still active", new Error("notice persistence failed"), true],
+    ["stop boundary failure with unknown Bash still active", new Error("Bash cleanup failed"), true],
   ])("blocks default reload for %s and allows explicit force", async (_case, error, cleanupUnknown) => {
     const fixture = await createFixture();
     const actor = await fixture.coordinator.createUserConversation(
@@ -780,7 +780,6 @@ describe("ProjectSessionCoordinator", () => {
       toSnapshot,
     });
 
-    fixture.runtime.control(target.conversationId).skipNextCustomMessagePersistence = true;
     releaseTarget.resolve();
     const context = (fixture.handle as unknown as {
       context: {
@@ -803,7 +802,7 @@ describe("ProjectSessionCoordinator", () => {
       "failed inbox recovery and source completion to settle",
     );
 
-    expect(target.getState().fatalError).toContain("durably appended");
+    expect(target.getState().fatalError).toContain("Bash cleanup is unconfirmed");
     expect(fixture.runtime.createConversationIds.filter((id) => id === target.conversationId))
       .toHaveLength(1);
     expect(fixture.runtime.control(target.conversationId).disposeCalls).toBe(0);

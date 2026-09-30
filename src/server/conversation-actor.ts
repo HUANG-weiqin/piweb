@@ -15,7 +15,6 @@ import {
 import { Type } from "typebox";
 import {
   DEFAULT_COMPACTION_THRESHOLD_PERCENT,
-  MAX_BASH_NOTICE_TEXT_BYTES,
   MAX_PROJECT_CONVERSATION_NAME_CHARACTERS,
   parseConversationImage,
   type AverageOutputRate,
@@ -45,7 +44,6 @@ import {
   advanceLoopListTiming,
   aggregateReservedConversationEntries,
   appendReservedCustomEntry,
-  createBashExecutionNoticeEntry,
   createCompactionThresholdEntry,
   createCompactionResumeEntry,
   createEditGateEntry,
@@ -98,46 +96,6 @@ type AgentMessage = Extract<
 >;
 
 type BashRunCleanup = Awaited<ReturnType<BashExecutionLifecycle["close"]>>;
-
-function bashCleanupNotice(cleanup: BashRunCleanup): {
-  text: string;
-  severity: "info" | "warning" | "error";
-} {
-  const rows = cleanup.executions;
-  const failed = rows.some((row) => row.error !== undefined || row.partial
-    || (row.state === "finished" && row.exitCode !== 0 && row.stopReason === undefined));
-  let severity: "info" | "warning" | "error" = "info";
-  if (cleanup.cleanupUnknown || failed) severity = "error";
-  else if (rows.some((row) => row.stopReason !== undefined)) severity = "warning";
-  const lines = [
-    "Bash 后台任务收尾。finished 仅表示执行已结束；只有 exitCode=0 且无 error/partial 才证明成功。",
-    cleanup.cleanupUnknown
-      ? "cleanup_unknown：停止状态未确认，资源未释放；会话自动执行已停止，安全重载拒绝继续。"
-      : "受管执行均已结束。重载后旧句柄失效，不自动恢复或重跑命令。",
-    ...rows.map((row) => `${row.executionId} ${row.state} exitCode=${row.exitCode ?? "unknown"}`
-      + (row.stopReason === undefined ? "" : ` stop=${row.stopReason}`)
-      + (row.error === undefined ? "" : " error")
-      + (row.partial ? " partial" : "")),
-  ];
-  const omittedText = "部分详细输出未写入此有界摘要；请结合原工具结果及 Pi 全文路径核对。";
-  let text = lines.join("\n");
-  let omitted = false;
-  // Keep every status row; optional diagnostics may be omitted as whole lines,
-  // never turn a clipped path into a seemingly valid full-output reference.
-  for (const row of [...rows].sort((a, b) => Number(b.error !== undefined) - Number(a.error !== undefined))) {
-    for (const detail of [
-      row.error === undefined ? undefined : `${row.executionId} error: ${row.error}`,
-      row.outputFile === undefined ? undefined : `${row.executionId} fullOutputPath: ${row.outputFile}`,
-    ]) {
-      if (detail === undefined) continue;
-      const next = `${text}\n${detail}`;
-      if (Buffer.byteLength(`${next}\n${omittedText}`, "utf8") <= MAX_BASH_NOTICE_TEXT_BYTES) text = next;
-      else omitted = true;
-    }
-  }
-  if (omitted) text += `\n${omittedText}`;
-  return { text, severity };
-}
 
 function isBuiltinFileMutation(toolName: string, toolSource: string): boolean {
   return toolSource === "builtin"
@@ -3400,30 +3358,8 @@ export class ConversationActor {
   }
 
   private closeBashForRun(ticket: RunTicket, reason: BashExecutionStopReason): Promise<BashRunCleanup> {
-    ticket.bashCleanupPromise ??= (async () => {
-      const created = this.requireCreated();
-      const cleanup = await created.bashExecutions?.close(ticket.ownership, reason)
-        ?? { executions: [], cleanupUnknown: false };
-      if (cleanup.executions.length === 0 && !cleanup.cleanupUnknown) return cleanup;
-      if (this.activeRun !== ticket || created !== this.created || this.sessionPersistenceQuarantined) {
-        throw new Error("Bash cleanup notice lost its healthy conversation writer");
-      }
-      if (created.session.isStreaming) {
-        throw new Error("Bash cleanup notice cannot append during an active SDK tool turn");
-      }
-      const notice = createBashExecutionNoticeEntry({ runId: ticket.id, ...bashCleanupNotice(cleanup) });
-      const before = this.sessionManager.getEntries().length;
-      await created.session.sendCustomMessage(notice, { triggerTurn: false });
-      const appended = this.sessionManager.getEntries().slice(before);
-      const proof = appended.length === 1 ? parseReservedConversationEntry(appended[0]) : undefined;
-      if (proof?.kind !== "bash_execution_notice"
-        || proof.entry.content !== notice.content
-        || proof.entry.details.runId !== ticket.id
-        || proof.entry.details.severity !== notice.details.severity) {
-        throw new Error("Bash cleanup notice was not durably appended to its exact run");
-      }
-      return cleanup;
-    })();
+    ticket.bashCleanupPromise ??= this.requireCreated().bashExecutions?.close(ticket.ownership, reason)
+      ?? Promise.resolve({ executions: [], cleanupUnknown: false });
     return ticket.bashCleanupPromise;
   }
 

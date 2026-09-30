@@ -32,7 +32,7 @@ ServerEvent
 
 ## 决策
 
-- 后台 Bash 不建立浏览器执行 registry：chatReducer 只保存精确 focus 的 `{runId,running,stopping,cleanupUnknown}` 聚合，snapshot 整体恢复，live event 只替换 matching focus。输入区上方的简单 `aria-live=polite` 状态条显示执行中/停止中数量与“停止状态未确认”；没有详情列表、按钮或侧栏任务面板。尚未 `conversationReady` 的 preview/缓存恢复不得把旧计数画成实时事实。历史 `bash_notice` 是独立时间线项；ToolCard 根据 `details.piwebBash` 显示“返回时仍执行/停止”，工具成功返回或 `finished` 都不能直接显示命令成功，必须有退出码 0 且无 error/partial。历史 marker 不随实时聚合更新，也不恢复控制能力。
+- 后台 Bash 不建立浏览器执行 registry：chatReducer 只保存精确 focus 的 `{runId,running,stopping,cleanupUnknown}` 聚合，snapshot 整体恢复，live event 只替换 matching focus。输入区上方的简单 `aria-live=polite` 状态条显示执行中/停止中数量与“停止状态未确认”；没有详情列表、按钮或侧栏任务面板。尚未 `conversationReady` 的 preview/缓存恢复不得把旧计数画成实时事实。历史不增加持久收尾摘要；ToolCard 根据 `details.piwebBash` 显示“返回时仍执行/停止”，工具成功返回或 `finished` 都不能直接显示命令成功，必须有退出码 0 且无 error/partial。实时聚合不随历史 tool result 更新，也不恢复控制能力。
 - `PublicState.activeRun`（以及由它派生的 busy）只描述当前 focus；项目其余会话的 activity 来自 `project_snapshot`。聊天 reducer 不维护第二份 busy。
 - `outstandingRunId` 只保存尚未被 authoritative `PublicState.activeRun` 取代的 initial/queued run candidate，并在服务端状态尚未可见的间隙为 Stop 提供 fallback；Stop 总是优先使用当前 `activeRun.id`。busy prompt 自带的 disposable runId 不能覆盖已知 active/queued owner；只有 exact `run_queued` 才把一次 race-to-idle prompt 提升为新 owner，exact `prompt_admitted` 也只能移除它自己留下的 disposable candidate。matching state、terminal 或 error 会结算 candidate，它不伪装成第二份 Agent 状态。
 - `PiSocket.send() === true` 只表示浏览器 transport 接受了帧，不表示服务端接受 prompt。idle prompt 以匹配 focus 三元身份 + runId 的 `run_queued` 为接收点；busy prompt 则以匹配 focus 三元身份 + promptId 的 `prompt_admitted` 为接收点。只有对应回执才能清空草稿并投影 user intent。

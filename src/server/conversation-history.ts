@@ -5,7 +5,6 @@ import type {
   ConversationHistoryItem,
   ConversationHistoryMessage,
   ConversationHistoryMessagePart,
-  ConversationBashNotice,
   ConversationHistoryTool,
   ConversationHistoryToolImageReference,
   ConversationMessageCard,
@@ -403,9 +402,8 @@ function projectConversationHistorySlots(
       assistant = undefined;
       continue;
     }
-    if (reserved?.kind === "bash_execution_notice") {
-      // Keep later assistant output physically after this host notice without
-      // treating it as a run settlement or other execution authority.
+    if (reserved?.kind === "legacy_bash_execution_notice") {
+      // Preserve the old message boundary without exposing the retired notice.
       assistant = undefined;
       continue;
     }
@@ -696,9 +694,6 @@ export function projectConversationItemSlots(
     positionedIndex: number;
     direction: ConversationMessageCard["direction"];
   }>();
-  const activeBranchEntryIds = new Set(
-    sessionManager.getBranch().map((entry) => entry.id),
-  );
 
   for (
     let physicalIndex = 0;
@@ -708,26 +703,6 @@ export function projectConversationItemSlots(
     const physicalEntry = physicalEntries[physicalIndex];
     const reserved = parseReservedConversationEntry(physicalEntry);
     if (reserved === undefined) continue;
-    if (reserved.kind === "bash_execution_notice") {
-      if (!activeBranchEntryIds.has(physicalEntry.id)) continue;
-      const physical = physicalEntry as Readonly<{
-        id: string;
-        timestamp: string;
-      }>;
-      const notice: ConversationBashNotice = {
-        kind: "bash_notice",
-        id: physical.id,
-        timestamp: physical.timestamp,
-        runId: reserved.entry.details.runId,
-        severity: reserved.entry.details.severity,
-        text: reserved.entry.content,
-      };
-      positionedItems.push({
-        slot: { item: notice },
-        physicalIndex,
-      });
-      continue;
-    }
     if (
       reserved.kind === "conversation_meta"
       || reserved.kind === "conversation_role_change"
@@ -743,6 +718,7 @@ export function projectConversationItemSlots(
       || reserved.kind === "loop_list_continue"
       || reserved.kind === "fork_context"
       || reserved.kind === "context_hint"
+      || reserved.kind === "legacy_bash_execution_notice"
     ) {
       continue;
     }
@@ -816,15 +792,6 @@ function compactConversationItem(
       truncated: id.truncated,
     };
   }
-  if (item.kind === "bash_notice") {
-    const id = clipUtf8(item.id, MAX_HISTORY_ID_BYTES);
-    const text = clipUtf8(item.text, MAX_HISTORY_TEXT_BYTES);
-    return {
-      item: { ...item, id: id.value, text: text.value },
-      truncated: id.truncated || text.truncated,
-    };
-  }
-
   const body = clipUtf8(item.body, MAX_HISTORY_TEXT_BYTES);
   const result = item.result === undefined
     ? undefined
@@ -857,7 +824,7 @@ function agentPeekItem(
       text: item.text,
     };
   }
-  if (item.kind === "compaction" || item.kind === "bash_notice") return;
+  if (item.kind === "compaction") return;
   return { ...item };
 }
 
@@ -964,7 +931,6 @@ function minimalConversationItem(
     };
   }
   if (item.kind === "compaction") return { ...item };
-  if (item.kind === "bash_notice") return { ...item, text: "" };
   return {
     ...item,
     body: "",

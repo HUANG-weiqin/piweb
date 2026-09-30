@@ -1,7 +1,6 @@
 import type {
   AverageOutputRate,
   ConversationBashActivity,
-  ConversationBashNotice,
   ConversationCompactionMarker,
   ConversationHistoryItem,
   ConversationHistoryMessage,
@@ -48,7 +47,6 @@ export type ChatMessageItem = { kind: "message" } & ChatMessage;
 export type ChatItem =
   | ChatMessageItem
   | ConversationCompactionMarker
-  | ConversationBashNotice
   | ConversationMessageCard;
 
 interface ChatFocus {

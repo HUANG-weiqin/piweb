@@ -18,7 +18,6 @@ import {
 import {
   appendReservedCustomEntry,
   CONTEXT_HINT_CUSTOM_TYPE,
-  createBashExecutionNoticeEntry,
   createCompactionResumeEntry,
   createConversationCardEntry,
   createConversationMessageEntry,
@@ -1430,7 +1429,7 @@ describe("projectConversationHistory", () => {
     );
   });
 
-  it("projects durable Bash notices as bounded transcript items at their physical position", () => {
+  it("hides retired durable Bash notices while preserving old session readability", () => {
     const manager = SessionManager.inMemory("E:\\work");
     manager.appendMessage(message({
       role: "user",
@@ -1442,21 +1441,12 @@ describe("projectConversationHistory", () => {
       content: [{ type: "text", text: "Starting tests." }],
       timestamp: 2,
     }));
-    const noticeEntry = createBashExecutionNoticeEntry({
-      runId: randomUUID(),
-      severity: "warning",
-      text: "测试工具已返回，但命令仍在后台运行。",
-    });
-    const noticeId = manager.appendCustomMessageEntry(
-      noticeEntry.customType,
-      noticeEntry.content,
-      noticeEntry.display,
-      noticeEntry.details,
+    manager.appendCustomMessageEntry(
+      "piweb.bash_execution_notice.v1",
+      "测试工具已返回，但命令仍在后台运行。",
+      true,
+      { runId: randomUUID(), severity: "warning" },
     );
-    const physicalNotice = manager.getEntry(noticeId) as {
-      id: string;
-      timestamp: string;
-    };
     manager.appendMessage(message({
       role: "assistant",
       content: [{ type: "text", text: "The process has now finished." }],
@@ -1467,32 +1457,23 @@ describe("projectConversationHistory", () => {
     expect(projected.map((item) => item.kind)).toEqual([
       "message",
       "message",
-      "bash_notice",
       "message",
     ]);
-    expect(projected[2]).toEqual({
-      kind: "bash_notice",
-      id: physicalNotice.id,
-      timestamp: physicalNotice.timestamp,
-      runId: noticeEntry.details.runId,
-      severity: "warning",
-      text: noticeEntry.content,
-    });
     expect(projected[1]).toMatchObject({
       kind: "message",
       role: "assistant",
       text: "Starting tests.",
     });
-    expect(projected[3]).toMatchObject({
+    expect(projected[2]).toMatchObject({
       kind: "message",
       role: "assistant",
       text: "The process has now finished.",
     });
-    expect(projectConversationItemsSnapshot(manager).items).toContainEqual(
-      expect.objectContaining({ kind: "bash_notice", id: physicalNotice.id }),
-    );
-    expect(projectAgentConversationPeek(manager).items.map((item) => item.kind))
+    expect(projectConversationItemsSnapshot(manager).items.map((item) => item.kind))
       .not.toContain("bash_notice");
+    expect(JSON.stringify(projected)).not.toContain("测试工具已返回");
+    expect(projectAgentConversationPeek(manager).items.map((item) => item.kind))
+      .toEqual(["message", "message", "message"]);
   });
 
   it("skips the persisted LoopList context hint in the projection", () => {
