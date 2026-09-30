@@ -26,6 +26,11 @@ export const MAX_CONVERSATION_IMAGE_DATA_CHARACTERS =
 /** Durable history renders image input as this marker; image bytes stay out of snapshots. */
 export const PROMPT_IMAGE_PLACEHOLDER = "[图片]";
 export const MAX_PENDING_PROMPTS_PER_CONVERSATION = 64;
+export const MAX_BASH_TASK_NOTIFICATION_TASKS = 4;
+export const MAX_BASH_TASK_COMMAND_BYTES = 256;
+export const MAX_BASH_TASK_NOTIFICATION_TEXT_BYTES = 8 * 1024;
+export const MAX_BASH_TASK_NOTIFICATION_OUTPUT_TAIL_BYTES = 1024;
+export const MAX_BASH_TASK_OUTPUT_FILE_BYTES = 4096;
 export const MAX_LOOP_LIST_ITEMS = 100;
 export const MAX_LOOP_LIST_ITEM_ID_CHARACTERS = 128;
 export const MAX_LOOP_LIST_ITEM_TEXT_CHARACTERS = 512;
@@ -33,6 +38,8 @@ export const DEFAULT_COMPACTION_THRESHOLD_PERCENT = 70;
 export const MIN_COMPACTION_THRESHOLD_PERCENT = 20;
 export const MAX_COMPACTION_THRESHOLD_PERCENT = 90;
 export const MAX_TRANSITION_DIAGNOSTIC_PHASE_MS = 60 * 60 * 1_000;
+// v65: Bash task completion notifications are bounded durable history items;
+// focused activity is session-scoped and no longer carries a runId.
 // v64: Bash cleanup notices are no longer written or projected; run-scoped
 // activity remains an aggregate focused snapshot/event only.
 // v63: focused snapshots and low-frequency exact-focus events project only
@@ -97,7 +104,7 @@ export const MAX_TRANSITION_DIAGNOSTIC_PHASE_MS = 60 * 60 * 1_000;
 // their OpenAI-compatible model list before saving.
 // v59: idle current-leaf fork copies LLM-effective context into a fresh host
 // lifecycle via `fork_conversation`; history anchors stay unsupported.
-export const PROTOCOL_VERSION = 64;
+export const PROTOCOL_VERSION = 65;
 export const OBSERVATION_FATAL_CLOSE_CODE = 4002;
 export const COLOR_SCHEMES = ["quiet-rebel", "classic-rebel"] as const;
 export type ColorScheme = typeof COLOR_SCHEMES[number];
@@ -1095,9 +1102,28 @@ export interface ConversationCompactionMarker {
   provenance?: ConversationCompactionProvenance;
 }
 
+/** Bounded durable facts for one completed or killed background Bash task. */
+export interface ConversationBashTask {
+  taskId: string;
+  command: string;
+  status: "completed" | "failed" | "killed";
+  exitCode: number | null;
+  durationMs: number;
+  stopReason?: "manual" | "timeout" | "output_limit" | "reload" | "dispose";
+  partial?: boolean;
+  outputFile?: string;
+}
+
+export interface ConversationBashTaskNotification {
+  kind: "bash_task_notification";
+  id: string;
+  timestamp: string;
+  text: string;
+  tasks: ConversationBashTask[];
+}
+
 /** Focused aggregate only; never identifies individual background commands. */
 export interface ConversationBashActivity {
-  runId: string;
   running: number;
   stopping: number;
   cleanupUnknown: boolean;
@@ -1106,7 +1132,8 @@ export interface ConversationBashActivity {
 export type ConversationHistoryItem =
   | ({ kind: "message" } & ConversationHistoryMessage)
   | ConversationCompactionMarker
-  | ConversationMessageCard;
+  | ConversationMessageCard
+  | ConversationBashTaskNotification;
 
 export interface ConversationWindowCoverage {
   omittedBefore: boolean;
@@ -1778,6 +1805,81 @@ const conversationHistoryMessageSchema = z.object({
     .optional(),
   usage: tokenUsageSchema.optional(),
 });
+export const conversationBashTaskSchema: z.ZodType<ConversationBashTask> = z.object({
+  taskId: z.string().uuid(),
+  command: boundedUtf8String(
+    MAX_BASH_TASK_COMMAND_BYTES,
+    "Bash task command",
+  ).refine((value) => value.trim().length > 0, "command must not be blank"),
+  status: z.enum(["completed", "failed", "killed"]),
+  exitCode: z.number().finite().nullable(),
+  durationMs: z.number().finite().nonnegative(),
+  stopReason: z.enum([
+    "manual",
+    "timeout",
+    "output_limit",
+    "reload",
+    "dispose",
+  ]).optional(),
+  partial: z.boolean().optional(),
+  outputFile: boundedUtf8String(
+    MAX_BASH_TASK_OUTPUT_FILE_BYTES,
+    "Bash task outputFile",
+  ).refine((value) => value.trim().length > 0, "outputFile must not be blank")
+    .optional(),
+}).strict().superRefine((task, context) => {
+  if (task.status === "completed") {
+    if (task.exitCode !== 0) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "completed Bash tasks require exitCode 0",
+        path: ["exitCode"],
+      });
+    }
+    if (task.partial === true) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "partial Bash task results cannot be completed",
+        path: ["partial"],
+      });
+    }
+    if (task.stopReason !== undefined) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "completed Bash tasks cannot have a stopReason",
+        path: ["stopReason"],
+      });
+    }
+  } else if (task.status === "killed") {
+    if (task.stopReason === undefined) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "killed Bash tasks require a stopReason",
+        path: ["stopReason"],
+      });
+    }
+  } else if (task.stopReason !== undefined) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "Bash tasks with a stopReason must be killed",
+      path: ["stopReason"],
+    });
+  }
+});
+
+const conversationBashTaskNotificationSchema = z.object({
+  kind: z.literal("bash_task_notification"),
+  id: z.string().min(1).max(256),
+  timestamp: z.string().datetime(),
+  text: boundedUtf8String(
+    MAX_BASH_TASK_NOTIFICATION_TEXT_BYTES,
+    "Bash task notification text",
+  ).refine((value) => value.trim().length > 0, "text must not be blank"),
+  tasks: z.array(conversationBashTaskSchema)
+    .min(1)
+    .max(MAX_BASH_TASK_NOTIFICATION_TASKS),
+}).strict() satisfies z.ZodType<ConversationBashTaskNotification>;
+
 const conversationHistoryItemSchema: z.ZodType<ConversationHistoryItem> =
   z.discriminatedUnion("kind", [
     conversationHistoryMessageSchema.extend({ kind: z.literal("message") }),
@@ -1788,6 +1890,7 @@ const conversationHistoryItemSchema: z.ZodType<ConversationHistoryItem> =
       tokensBefore: z.number().finite().nonnegative(),
       provenance: conversationCompactionProvenanceSchema.optional(),
     }),
+    conversationBashTaskNotificationSchema,
     z.object({
       kind: z.literal("session_message"),
       id: z.string(),
@@ -1869,15 +1972,14 @@ const conversationWindowCoverageSchema: z.ZodType<ConversationWindowCoverage> = 
 
 const conversationBashActivitySchema: z.ZodType<ConversationBashActivity> =
   z.object({
-    runId: runIdSchema,
     running: z.number().int().min(0).max(4),
     stopping: z.number().int().min(0).max(4),
     cleanupUnknown: z.boolean(),
   }).strict().superRefine((activity, context) => {
-    if (activity.running + activity.stopping > 4) {
+    if (activity.running + activity.stopping > 8) {
       context.addIssue({
         code: z.ZodIssueCode.custom,
-        message: "Bash activity total must be at most 4",
+        message: "Bash activity total must be at most 8",
         path: ["stopping"],
       });
     }

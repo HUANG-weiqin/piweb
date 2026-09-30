@@ -18,6 +18,7 @@ import {
 import {
   appendReservedCustomEntry,
   CONTEXT_HINT_CUSTOM_TYPE,
+  createBashTaskNotificationEntry,
   createCompactionResumeEntry,
   createConversationCardEntry,
   createConversationMessageEntry,
@@ -1478,6 +1479,94 @@ describe("projectConversationHistory", () => {
     expect(JSON.stringify(projected)).not.toContain("测试工具已返回");
     expect(projectAgentConversationPeek(manager).items.map((item) => item.kind))
       .toEqual(["message", "message", "message"]);
+  });
+
+  it("projects ordered Bash task notifications into history, snapshots, and Agent peeks", () => {
+    const manager = SessionManager.inMemory("E:\\work");
+    manager.appendMessage(message({
+      role: "user",
+      content: "Run the background check",
+      timestamp: 1,
+    }));
+    manager.appendMessage(message({
+      role: "assistant",
+      content: [{ type: "text", text: "Starting the check." }],
+      timestamp: 2,
+    }));
+    const notification = createBashTaskNotificationEntry([{
+      taskId: randomUUID(),
+      command: "npm test",
+      status: "completed",
+      exitCode: 0,
+      durationMs: 125,
+      outputTail: "passed 42 tests",
+    }]);
+    const notificationId = manager.appendCustomMessageEntry(
+      notification.customType,
+      notification.content,
+      notification.display,
+      notification.details,
+    );
+    manager.appendMessage(message({
+      role: "assistant",
+      content: [{ type: "text", text: "The check passed." }],
+      timestamp: 3,
+    }));
+
+    const items = projectConversationItems(manager);
+    expect(items.map((item) => item.kind)).toEqual([
+      "message",
+      "message",
+      "bash_task_notification",
+      "message",
+    ]);
+    expect(items[2]).toMatchObject({
+      kind: "bash_task_notification",
+      id: notificationId,
+      text: notification.content,
+      tasks: [{ command: "npm test", status: "completed" }],
+    });
+    expect(projectConversationHistory(manager).map((item) => item.text))
+      .toEqual(["Run the background check", "Starting the check.", "The check passed."]);
+    expect(projectConversationItemsSnapshot(manager).items.map((item) => item.kind))
+      .toEqual(items.map((item) => item.kind));
+    expect(projectAgentConversationPeek(manager).items.map((item) => item.kind))
+      .toEqual(["message", "message", "bash_task_notification", "message"]);
+    expect(JSON.stringify(items[2])).not.toContain("outputTail");
+    expect(items[2]).not.toHaveProperty("tasks.0.outputTail");
+  });
+
+  it("keeps Bash notifications on the selected branch only", () => {
+    const manager = SessionManager.inMemory("E:\\work");
+    const root = manager.appendMessage(message({
+      role: "user",
+      content: "original branch",
+      timestamp: 1,
+    }));
+    const notification = createBashTaskNotificationEntry([{
+      taskId: randomUUID(),
+      command: "npm test",
+      status: "completed",
+      exitCode: 0,
+      durationMs: 10,
+    }]);
+    manager.appendCustomMessageEntry(
+      notification.customType,
+      notification.content,
+      notification.display,
+      notification.details,
+    );
+    manager.appendMessage(message({
+      role: "assistant",
+      content: [{ type: "text", text: "old branch result" }],
+      timestamp: 2,
+    }));
+
+    manager.branch(root);
+    expect(projectConversationItems(manager).map((item) => item.kind))
+      .toEqual(["message"]);
+    expect(JSON.stringify(projectConversationItems(manager)))
+      .not.toContain("bash_task_notification");
   });
 
   it("skips the persisted LoopList context hint in the projection", () => {

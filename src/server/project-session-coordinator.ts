@@ -212,6 +212,12 @@ interface SessionGuidanceWaitResult {
   outcome: "guidance";
 }
 
+interface SessionBashTaskWaitResult {
+  outcome: "bash_task";
+  /** The notification body is delivered once through its SDK custom message. */
+  taskIds: string[];
+}
+
 interface SessionCheckpointWaitResult {
   outcome: "checkpoint";
 }
@@ -226,6 +232,7 @@ type SessionWaitResult =
   | (RunSettlement & { conversationId: string })
   | SessionMessageWaitResult
   | SessionGuidanceWaitResult
+  | SessionBashTaskWaitResult
   | SessionCheckpointWaitResult
   | SessionTargetUnreachableResult;
 
@@ -1624,7 +1631,9 @@ export class ProjectSessionCoordinator {
       }
       this.assertRunStartAllowed(context, conversationId);
       return context.inbox.withListSnapshot(async (list) => {
-        const pump = await this.pumpTarget(context, conversationId, list);
+        // Browser admission checks durable inbox priority only. Any pending
+        // Bash notification belongs in this prompt, not a competing auto-run.
+        const pump = await this.pumpTarget(context, conversationId, list, false);
         if (pump === "blocked_by_deletion" || context.deleting.has(conversationId)) {
           throw new Error(`Conversation is being deleted: ${conversationId}`);
         }
@@ -2812,6 +2821,15 @@ export class ProjectSessionCoordinator {
     let projectedCompacting = actor.isCompacting();
     const unsubscribe = actor.subscribe((event) => {
       if (
+        event.type === "bash_tasks_ready"
+        && !context.closing
+        && !context.deleting.has(conversationId)
+        && context.actors.get(conversationId) === actor
+        && !actor.getState().disposed
+      ) {
+        this.requestPumpTarget(context, conversationId);
+      }
+      if (
         event.type === "session_event"
         && (
           event.event.type === "run_started"
@@ -3001,13 +3019,19 @@ export class ProjectSessionCoordinator {
       candidate: SessionWaitResult | InboxEnvelope,
     ): candidate is InboxEnvelope => "version" in candidate;
     const immediate = async (
-      includePendingGuidance = true,
+      includePendingRunInputs = true,
       includeEnvelopeReplies = true,
     ): Promise<SessionWaitResult | InboxEnvelope | undefined> => {
       assertOwnership();
-      if (includePendingGuidance && source.claimPendingGuidanceForWait(ownership)) {
-        this.emit(context, { type: "project_changed" });
-        return { outcome: "guidance" };
+      if (includePendingRunInputs) {
+        if (source.claimPendingGuidanceForWait(ownership)) {
+          this.emit(context, { type: "project_changed" });
+          return { outcome: "guidance" };
+        }
+        const taskIds = source.peekBashTaskNotificationForWait(ownership);
+        if (taskIds !== undefined) {
+          return { outcome: "bash_task", taskIds: [...taskIds] };
+        }
       }
       if (includeEnvelopeReplies) {
         const accepted = await this.findClaimedPendingWaitReply(
@@ -3100,8 +3124,19 @@ export class ProjectSessionCoordinator {
       }
       return undefined;
     };
-    const first = await this.runLifecycle(context, immediate);
-    assertOwnership();
+    const commitImmediate = (
+      result: SessionWaitResult | InboxEnvelope | undefined,
+    ): SessionWaitResult | InboxEnvelope | undefined => {
+      assertOwnership();
+      if (!result || isEnvelope(result) || result.outcome !== "bash_task") return result;
+      // Claim is the synchronous terminal decision: cancellation/ownership is
+      // checked after the lifecycle await and before consuming this exact group.
+      const taskIds = source.claimBashTaskNotificationForWait(ownership, result.taskIds);
+      if (!taskIds) return undefined;
+      this.emit(context, { type: "project_changed" });
+      return { outcome: "bash_task", taskIds: [...taskIds] };
+    };
+    const first = commitImmediate(await this.runLifecycle(context, immediate));
     if (first && !isEnvelope(first)) return first;
     if (
       first
@@ -3123,8 +3158,7 @@ export class ProjectSessionCoordinator {
       let racedResult: SessionWaitResult | undefined;
       await this.runLifecycle(context, async () => {
         assertOwnership();
-        const raced = await immediate();
-        assertOwnership();
+        const raced = commitImmediate(await immediate());
         if (raced && !isEnvelope(raced)) {
           racedResult = raced;
           return;
@@ -3218,6 +3252,8 @@ export class ProjectSessionCoordinator {
           throw terminalCause.error;
         case "guidance":
           return { outcome: "guidance" };
+        case "bash_task":
+          return { outcome: "bash_task", taskIds: [...terminalCause.taskIds] };
         case "poll":
           return { outcome: "checkpoint" };
         case "message": {
@@ -5923,7 +5959,11 @@ export class ProjectSessionCoordinator {
         completion.settlement,
       );
       if (context.actors.get(actor.conversationId) === actor) {
-        await this.pumpTarget(context, actor.conversationId);
+        // Actor readiness routes Bash wakes through the coalesced request lane.
+        // This completion pump still admits durable inbox work, but must not
+        // independently consume a pending notification and retry a queued wake
+        // if its first SDK admission fails.
+        await this.pumpTarget(context, actor.conversationId, undefined, false);
       }
       await this.retryBlockedDeletions(context);
       await this.maybeCompleteReloadAdoption(
@@ -6610,7 +6650,7 @@ export class ProjectSessionCoordinator {
   }
 
   /**
-   * Schedules a fire-and-forget inbox pump for one conversation, coalescing
+   * Schedules a fire-and-forget work pump for one conversation, coalescing
    * requests that arrive while an earlier pump task is still queued: a task
    * that starts after this request observes the same durable state, so the
    * queued task simply reuses the pending request instead of piling up one
@@ -6625,7 +6665,8 @@ export class ProjectSessionCoordinator {
    * startup recovery flushes the pending set — never through an automatic
    * retry loop. The sidecar itself stays durable across restarts, so a
    * conversation that never gets another request is still recovered by the
-   * next process.
+   * next process. Bash completion requests use the same lane, after durable
+   * inbox work; their pending notifications exist only for this actor lifetime.
    */
   private requestPumpTarget(
     context: ProjectContext,
@@ -6659,6 +6700,7 @@ export class ProjectSessionCoordinator {
     context: ProjectContext,
     conversationId: string,
     list?: InboxList,
+    allowBashNotifications = true,
   ): Promise<"blocked_by_deletion" | "no_work" | "settled" | "started"> {
     if (context.closing || !context.foundationReady) return "no_work";
     if (context.deleting.has(conversationId)) return "blocked_by_deletion";
@@ -6683,7 +6725,11 @@ export class ProjectSessionCoordinator {
         `Multiple unsettled inbox receipt runs found for ${conversationId}`,
       );
     }
-    if (actor.getActivity().kind !== "idle") return "no_work";
+    if (context.closing) return "no_work";
+    if (context.deleting.has(conversationId)) return "blocked_by_deletion";
+    if (context.actors.get(conversationId) !== actor || actor.getState().disposed
+      || actor.getBashActivity()?.cleanupUnknown
+      || actor.getActivity().kind !== "idle") return "no_work";
     if (receiptRunIds.length === 1) {
       const runId = receiptRunIds[0]!;
       const completion = actor.resumeMessages({ runId });
@@ -6703,7 +6749,24 @@ export class ProjectSessionCoordinator {
       : list({ toConversationId: conversationId }));
     if (context.closing) return "no_work";
     if (context.deleting.has(conversationId)) return "blocked_by_deletion";
-    if (pending.length === 0) return "no_work";
+    if (pending.length === 0) {
+      if (!allowBashNotifications
+        || context.actors.get(conversationId) !== actor
+        || actor.getState().disposed
+        || actor.getState().fatalError !== undefined
+        || context.quarantinedOpenFences.has(conversationId)
+        || actor.isSessionPersistenceQuarantined()
+        || actor.getBashActivity()?.cleanupUnknown
+        || actor.getActivity().kind !== "idle"
+        || !actor.hasPendingBashNotifications()) return "no_work";
+      this.assertRunStartAllowed(context, conversationId);
+      const admitted = await actor.startBashNotifications({ runId: randomUUID() });
+      if ("outcome" in admitted) return "no_work";
+      // Only the admission wrapper is awaited under the project lifecycle
+      // lane. Waiting for the Agent turn here would deadlock its own tools.
+      this.trackBackground(context, admitted.completion.then(() => undefined));
+      return "started";
+    }
 
     const aggregate = aggregateReservedConversationEntries(
       actor.sessionManager.getEntries(),

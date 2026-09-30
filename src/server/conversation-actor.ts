@@ -34,10 +34,12 @@ import {
 } from "../shared/protocol.js";
 import type { AgentTurnBoundaryCheck } from "./agent-turn-boundary.js";
 import {
+  BashBackgroundTaskRegistry,
   BashCleanupUnconfirmedError,
   type BashExecutionLifecycle,
   type BashExecutionOwner,
   type BashExecutionStopReason,
+  type BashTaskCompletion,
 } from "./bash-execution.js";
 import { ConversationProjection } from "./conversation-projection.js";
 import {
@@ -54,8 +56,12 @@ import {
   createConversationRoleChangeEntry,
   createRunSettlementEntry,
   createServiceTierSelectionEntry,
+  createBashTaskNotificationEntry,
+  parseBashTaskNotificationEntry,
   parseReservedConversationEntry,
+  BASH_TASK_NOTIFICATION_CUSTOM_TYPE,
   RUN_SETTLEMENT_CUSTOM_TYPE,
+  type BashTaskNotificationEntry,
   type ConversationMeta,
   type ConversationMessageEntry,
   type LoopListTiming,
@@ -153,7 +159,7 @@ function promptImagesForModel(
   }));
 }
 
-export type ConversationRunOrigin = "browser" | "inbox";
+export type ConversationRunOrigin = "browser" | "inbox" | "bash_task";
 
 export interface ConversationActorState {
   conversationId: string;
@@ -203,6 +209,15 @@ export type ConversationActorEvent =
       type: "bash_activity";
       conversationId: string;
       activity: ConversationBashActivity | null;
+    }
+  | {
+      type: "bash_tasks_ready";
+      conversationId: string;
+    }
+  | {
+      /** Emitted only after a background-task notice is proven in JSONL. */
+      type: "history_changed";
+      conversationId: string;
     }
   | {
       type: "loop_list";
@@ -330,6 +345,7 @@ export type ConversationWaitAttemptStatus = "open" | "delivering" | "terminal";
 /** Immutable winner reported once when a local wait attempt terminalizes. */
 export type ConversationWaitAttemptTerminalCause =
   | { readonly kind: "message"; readonly messageId: string }
+  | { readonly kind: "bash_task"; readonly taskIds: readonly string[] }
   | { readonly kind: "guidance" }
   | { readonly kind: "poll" }
   | { readonly kind: "abort" }
@@ -403,6 +419,24 @@ interface PendingCustomSteer {
   readonly delivery: Deferred<void>;
   /** Present only for ordinary peer messages eligible to wake a later wait. */
   readonly acceptedMessageId?: string;
+  readonly bashTaskNotification?: BashTaskNotificationDelivery;
+}
+
+interface BashTaskNotificationDelivery {
+  readonly tasks: readonly BashTaskCompletion[];
+  readonly taskIds: readonly string[];
+  readonly entry: BashTaskNotificationEntry;
+  readonly observedTaskIds: Set<string>;
+  handedToSdk: boolean;
+  accepted: boolean;
+  restored: boolean;
+  rawObserved: boolean;
+}
+
+interface AcceptedBashTaskNotificationObservation {
+  readonly delivery: BashTaskNotificationDelivery;
+  taskIds: readonly string[];
+  waited: boolean;
 }
 
 interface AcceptedCustomMessageObservation {
@@ -472,6 +506,8 @@ interface RunTicket {
   readonly customSteerDeliveries: PendingCustomSteer[];
   /** SDK-accepted ordinary peer steers not yet proven durably observed. */
   readonly acceptedCustomMessageObservations: AcceptedCustomMessageObservation[];
+  /** Accepted background notifications not yet seen at message_end or waited. */
+  readonly acceptedBashTaskNotifications: AcceptedBashTaskNotificationObservation[];
   readonly reloadContinuationDeliveries: Map<
     string,
     {
@@ -567,6 +603,11 @@ function immutableWaitAttemptTerminalCause(
   switch (cause.kind) {
     case "message":
       return Object.freeze({ kind: "message", messageId: cause.messageId });
+    case "bash_task":
+      return Object.freeze({
+        kind: "bash_task",
+        taskIds: Object.freeze([...cause.taskIds]),
+      });
     case "error":
       return Object.freeze({ kind: "error", error: cause.error });
     case "guidance":
@@ -848,6 +889,10 @@ export class ConversationActor {
   private readonly listeners = new Set<ConversationActorListener>();
   private readonly usedRunIds = new Set<string>();
   private readonly pendingAdmissions: PendingPromptAdmission[] = [];
+  private readonly pendingBashTaskNotifications: BashTaskCompletion[] = [];
+  private readonly bashTaskNotificationDeliveries = new Set<BashTaskNotificationDelivery>();
+  private readonly backgroundTasks: BashBackgroundTaskRegistry;
+  private backgroundTasksClosed = false;
   private profileSnapshot: ConversationMeta;
   private compactionThresholdPercent: number;
   private serviceTierSelection: ServiceTier | null;
@@ -892,6 +937,11 @@ export class ConversationActor {
     this.onExtensionError = options.onExtensionError;
     this.cancelRunScope = options.cancelRunScope;
     this.now = options.now ?? (() => new Date());
+    this.backgroundTasks = new BashBackgroundTaskRegistry({
+      onChange: () => this.emitBashActivity(),
+      onCompleted: (task) => this.onBashTaskCompleted(task),
+      onObserved: (taskId) => this.onBashTaskObserved(taskId),
+    });
     this.profileSnapshot = createConversationMetaEntry(options.profile).data;
     this.createSessionOptions = {
       ...options.createSessionOptions,
@@ -1624,19 +1674,388 @@ export class ConversationActor {
     );
   }
 
+  hasPendingBashNotifications(): boolean {
+    return this.pendingBashTaskNotifications.length > 0;
+  }
+
+  /** Schedules a standalone wake only after the coordinator has admitted it. */
+  startBashNotifications(input: { runId: string }): Promise<
+    { outcome: "not_started" }
+    | { completion: Promise<RunSettlement> }
+  > {
+    return this.operations.run(() => {
+      this.assertUsable();
+      if (
+        this.activeRun
+        || this.session.isStreaming
+        || this.backgroundTasksClosed
+        || this.pendingBashTaskNotifications.length === 0
+        || this.getBashActivity()?.cleanupUnknown
+      ) {
+        return { outcome: "not_started" } as const;
+      }
+      const completion = this.startRun({
+        runId: input.runId,
+        origin: "bash_task",
+        recovered: false,
+        expectsInitialPromptRawUserMessage: false,
+      }, (ticket) => this.sendPendingBashNotifications(ticket, true));
+      return { completion } as const;
+    });
+  }
+
+  /** Peeks at one accepted, unobserved notification group without claiming it. */
+  peekBashTaskNotificationForWait(
+    ownership: ConversationRunOwnership,
+  ): readonly string[] | undefined {
+    const ticket = this.currentAcceptedCustomMessageTicket(ownership);
+    if (!ticket) return;
+    const record = ticket.acceptedBashTaskNotifications.find(
+      (candidate) => !candidate.waited,
+    );
+    if (!record) return;
+    return Object.freeze([...record.taskIds]);
+  }
+
+  /** Claims a previously peeked notification group for a session wait. */
+  claimBashTaskNotificationForWait(
+    ownership: ConversationRunOwnership,
+    expectedTaskIds?: readonly string[],
+  ): readonly string[] | undefined {
+    const ticket = this.currentAcceptedCustomMessageTicket(ownership);
+    if (!ticket) return;
+    const record = ticket.acceptedBashTaskNotifications.find(
+      (candidate) => !candidate.waited,
+    );
+    if (
+      !record
+      || (expectedTaskIds !== undefined && (
+        expectedTaskIds.length !== record.taskIds.length
+        || expectedTaskIds.some((taskId, index) => taskId !== record.taskIds[index])
+      ))
+    ) return;
+    record.waited = true;
+    return Object.freeze([...record.taskIds]);
+  }
+
   getBashActivity(): ConversationBashActivity | null {
     const owner = this.bashActivityOwner ?? this.activeRun?.ownership;
-    if (owner === undefined) return null;
-    const activity = this.created?.bashExecutions?.activity(owner);
-    if (activity === undefined || activity.running + activity.stopping === 0) return null;
-    return { runId: owner.runId, ...activity };
+    const foreground = owner === undefined
+      ? undefined
+      : this.created?.bashExecutions?.activity(owner);
+    const background = this.backgroundTasks.activity();
+    const activity: ConversationBashActivity = {
+      running: background.running + (foreground?.running ?? 0),
+      stopping: background.stopping + (foreground?.stopping ?? 0),
+      cleanupUnknown: background.cleanupUnknown
+        || (foreground?.cleanupUnknown ?? false),
+    };
+    return activity.running + activity.stopping === 0 && !activity.cleanupUnknown
+      ? null
+      : activity;
+  }
+
+  private emitBashActivity(): void {
+    if (this.disposed) return;
+    this.emit({
+      type: "bash_activity",
+      conversationId: this.conversationId,
+      activity: this.getBashActivity(),
+    });
+  }
+
+  private onBashTaskCompleted(task: BashTaskCompletion): void {
+    this.pendingBashTaskNotifications.push(structuredClone(task));
+    const ticket = this.activeRun;
+    if (
+      ticket
+      && (ticket.state.phase === "running" || ticket.state.phase === "waiting")
+      && this.session.isStreaming
+    ) {
+      this.queuePendingBashNotifications(ticket);
+      return;
+    }
+    if (!ticket) this.emitBashTasksReadyIfIdle();
+  }
+
+  private emitBashTasksReadyIfIdle(): void {
+    if (
+      this.disposed
+      || this.disposing
+      || this.fatalError
+      || this.activeRun
+      || this.backgroundTasksClosed
+      || this.pendingBashTaskNotifications.length === 0
+      || this.getBashActivity()?.cleanupUnknown
+    ) return;
+    this.emit({
+      type: "bash_tasks_ready",
+      conversationId: this.conversationId,
+    });
+  }
+
+  private onBashTaskObserved(taskId: string): void {
+    const ticket = this.activeRun;
+    if (ticket) this.retireAcceptedBashTaskForWait(ticket, taskId);
+    const pendingIndex = this.pendingBashTaskNotifications.findIndex(
+      (task) => task.taskId === taskId,
+    );
+    if (pendingIndex >= 0) {
+      this.pendingBashTaskNotifications.splice(pendingIndex, 1);
+    }
+    for (const delivery of this.bashTaskNotificationDeliveries) {
+      if (!delivery.taskIds.includes(taskId)) continue;
+      delivery.observedTaskIds.add(taskId);
+      if (delivery.handedToSdk) continue;
+      const queued = ticket?.customSteerDeliveries.find((candidate) =>
+        candidate.bashTaskNotification === delivery
+      );
+      if (queued) {
+        const index = ticket!.customSteerDeliveries.indexOf(queued);
+        if (index >= 0) ticket!.customSteerDeliveries.splice(index, 1);
+        queued.delivery.resolve();
+      }
+      delivery.restored = true;
+      this.bashTaskNotificationDeliveries.delete(delivery);
+      this.pendingBashTaskNotifications.unshift(
+        ...delivery.tasks.filter((task) =>
+          !delivery.observedTaskIds.has(task.taskId)
+        ),
+      );
+      if (ticket && this.session.isStreaming) {
+        this.queuePendingBashNotifications(ticket);
+      } else if (!ticket) {
+        this.emitBashTasksReadyIfIdle();
+      }
+    }
+  }
+
+  private createBashTaskNotificationDelivery(
+    tasks: readonly BashTaskCompletion[],
+  ): BashTaskNotificationDelivery {
+    const delivery: BashTaskNotificationDelivery = {
+      tasks: tasks.map((task) => structuredClone(task)),
+      taskIds: tasks.map((task) => task.taskId),
+      entry: createBashTaskNotificationEntry(tasks),
+      observedTaskIds: new Set(),
+      handedToSdk: false,
+      accepted: false,
+      restored: false,
+      rawObserved: false,
+    };
+    this.bashTaskNotificationDeliveries.add(delivery);
+    return delivery;
+  }
+
+  private queuePendingBashNotifications(ticket: RunTicket): void {
+    while (this.pendingBashTaskNotifications.length > 0) {
+      const tasks = this.pendingBashTaskNotifications.splice(0, 4);
+      const notification = this.createBashTaskNotificationDelivery(tasks);
+      const delivery = deferred<void>();
+      void delivery.promise.catch(() => undefined);
+      ticket.customSteerDeliveries.push({
+        message: notification.entry,
+        delivery,
+        bashTaskNotification: notification,
+      });
+    }
+    this.flushCustomSteers(ticket);
+  }
+
+  private retireAcceptedBashTaskForWait(
+    ticket: RunTicket,
+    taskId: string,
+  ): void {
+    for (let index = ticket.acceptedBashTaskNotifications.length - 1; index >= 0; index -= 1) {
+      const record = ticket.acceptedBashTaskNotifications[index]!;
+      if (!record.taskIds.includes(taskId)) continue;
+      const remaining = record.taskIds.filter((candidate) => candidate !== taskId);
+      if (remaining.length === 0) {
+        ticket.acceptedBashTaskNotifications.splice(index, 1);
+      } else {
+        record.taskIds = Object.freeze(remaining);
+      }
+    }
+  }
+
+  private acceptBashTaskNotification(
+    ticket: RunTicket | undefined,
+    delivery: BashTaskNotificationDelivery,
+  ): void {
+    if (delivery.accepted) return;
+    delivery.accepted = true;
+    delivery.restored = false;
+    for (let index = this.pendingBashTaskNotifications.length - 1; index >= 0; index -= 1) {
+      if (delivery.taskIds.includes(this.pendingBashTaskNotifications[index]!.taskId)) {
+        this.pendingBashTaskNotifications.splice(index, 1);
+      }
+    }
+    this.backgroundTasks.markNotified(delivery.taskIds);
+    if (!delivery.rawObserved && ticket && this.activeRun === ticket) {
+      const taskIds = delivery.taskIds.filter((taskId) =>
+        !delivery.observedTaskIds.has(taskId)
+      );
+      if (taskIds.length > 0) {
+        ticket.acceptedBashTaskNotifications.push({
+          delivery,
+          taskIds: Object.freeze(taskIds),
+          waited: false,
+        });
+        this.fireWaitingSteerInterrupt(ticket);
+      }
+    }
+  }
+
+  private failBashTaskNotification(
+    ticket: RunTicket | undefined,
+    delivery: BashTaskNotificationDelivery,
+  ): void {
+    if (this.persistedBashTaskNotification(delivery.entry)) {
+      this.acceptBashTaskNotification(ticket, delivery);
+    } else {
+      this.restoreBashTaskNotification(delivery);
+    }
+  }
+
+  private restoreBashTaskNotification(
+    delivery: BashTaskNotificationDelivery,
+  ): void {
+    if (delivery.accepted || delivery.restored) return;
+    delivery.restored = true;
+    this.bashTaskNotificationDeliveries.delete(delivery);
+    this.pendingBashTaskNotifications.unshift(
+      ...delivery.tasks.filter((task) =>
+        !delivery.observedTaskIds.has(task.taskId)
+      ),
+    );
+  }
+
+  private retireAcceptedBashTaskNotifications(ticket: RunTicket): void {
+    const accepted = ticket.acceptedBashTaskNotifications.splice(0);
+    for (const { delivery } of accepted) {
+      this.bashTaskNotificationDeliveries.delete(delivery);
+    }
+  }
+
+  private observeBashTaskNotificationMessage(message: unknown): void {
+    if (!isPlainDetails(message) || message.role !== "custom") return;
+    if (message.customType !== BASH_TASK_NOTIFICATION_CUSTOM_TYPE) return;
+    let entry: BashTaskNotificationEntry;
+    try {
+      entry = parseBashTaskNotificationEntry({
+        customType: message.customType,
+        content: message.content,
+        display: message.display,
+        details: message.details,
+      });
+    } catch {
+      return;
+    }
+    const encoded = JSON.stringify(entry);
+    for (const delivery of this.bashTaskNotificationDeliveries) {
+      if (JSON.stringify(delivery.entry) !== encoded) continue;
+      delivery.rawObserved = true;
+      const ticket = this.activeRun;
+      if (ticket) {
+        const accepted = ticket.acceptedBashTaskNotifications.findIndex(
+          (record) => record.delivery === delivery,
+        );
+        if (accepted >= 0) {
+          ticket.acceptedBashTaskNotifications.splice(accepted, 1);
+        }
+      }
+      queueMicrotask(() => {
+        if (!this.persistedBashTaskNotification(delivery.entry)) {
+          this.emitError(
+            new Error("Pi did not durably append the background Bash notification before history refresh"),
+            this.activeRun?.id,
+          );
+        } else {
+          this.emit({
+            type: "history_changed",
+            conversationId: this.conversationId,
+          });
+        }
+        this.bashTaskNotificationDeliveries.delete(delivery);
+      });
+    }
+  }
+
+  private persistedBashTaskNotification(
+    expected: BashTaskNotificationEntry,
+  ): boolean {
+    return this.sessionManager.getEntries().some((candidate) => {
+      if (
+        !isPlainDetails(candidate)
+        || candidate.type !== "custom_message"
+        || candidate.customType !== BASH_TASK_NOTIFICATION_CUSTOM_TYPE
+      ) return false;
+      try {
+        const entry = parseBashTaskNotificationEntry({
+          customType: candidate.customType,
+          content: candidate.content,
+          display: candidate.display,
+          details: candidate.details,
+        });
+        return JSON.stringify(entry) === JSON.stringify(expected);
+      } catch {
+        return false;
+      }
+    });
+  }
+
+  private async appendPendingBashNotifications(
+    ticket?: RunTicket,
+  ): Promise<void> {
+    while (this.pendingBashTaskNotifications.length > 0) {
+      const tasks = this.pendingBashTaskNotifications.splice(0, 4);
+      const notification = this.createBashTaskNotificationDelivery(tasks);
+      try {
+        notification.handedToSdk = true;
+        await this.session.sendCustomMessage(notification.entry, {
+          triggerTurn: false,
+        });
+        this.acceptBashTaskNotification(ticket, notification);
+      } catch (error) {
+        this.failBashTaskNotification(ticket, notification);
+        throw error;
+      }
+    }
+  }
+
+  private async sendPendingBashNotifications(
+    ticket: RunTicket,
+    triggerTurn: boolean,
+  ): Promise<void> {
+    const batches: BashTaskNotificationDelivery[] = [];
+    while (this.pendingBashTaskNotifications.length > 0) {
+      batches.push(this.createBashTaskNotificationDelivery(
+        this.pendingBashTaskNotifications.splice(0, 4),
+      ));
+    }
+    for (let index = 0; index < batches.length; index += 1) {
+      const notification = batches[index]!;
+      try {
+        notification.handedToSdk = true;
+        await this.session.sendCustomMessage(notification.entry, {
+          triggerTurn: triggerTurn && index === batches.length - 1,
+        });
+        this.acceptBashTaskNotification(ticket, notification);
+      } catch (error) {
+        for (let pendingIndex = batches.length - 1; pendingIndex > index; pendingIndex -= 1) {
+          this.restoreBashTaskNotification(batches[pendingIndex]!);
+        }
+        this.failBashTaskNotification(ticket, notification);
+        throw error;
+      }
+    }
   }
 
   private observeBashActivity(runtimeGeneration: number, owner: BashExecutionOwner): void {
     if (runtimeGeneration !== this.runtimeGeneration || this.disposed
       || (owner !== this.activeRun?.ownership && owner !== this.bashActivityOwner)) return;
     this.bashActivityOwner = owner;
-    this.emit({ type: "bash_activity", conversationId: this.conversationId, activity: this.getBashActivity() });
+    this.emitBashActivity();
   }
 
   getCompletedOutputRate(): AverageOutputRate | undefined {
@@ -1699,14 +2118,17 @@ export class ConversationActor {
         expectsInitialPromptRawUserMessage: true,
         ...(autoTitlePrompt === undefined ? {} : { autoTitlePrompt }),
       },
-      (ticket) => this.session.prompt(text, {
-        ...(images === undefined ? {} : { images }),
-        preflightResult: (accepted) => {
-          if (accepted && isCancelling(ticket)) {
-            throw new Error("Run cancelled before agent start");
-          }
-        },
-      }),
+      async (ticket) => {
+        await this.appendPendingBashNotifications(ticket);
+        await this.session.prompt(text, {
+          ...(images === undefined ? {} : { images }),
+          preflightResult: (accepted) => {
+            if (accepted && isCancelling(ticket)) {
+              throw new Error("Run cancelled before agent start");
+            }
+          },
+        });
+      },
     );
   }
 
@@ -1933,7 +2355,8 @@ export class ConversationActor {
         recovered: input.recovered,
         expectsInitialPromptRawUserMessage: false,
       },
-      async () => {
+      async (ticket) => {
+        await this.appendPendingBashNotifications(ticket);
         for (let index = 0; index < messages.length; index += 1) {
           const message = messages[index]!;
           await this.session.sendCustomMessage({
@@ -2224,21 +2647,25 @@ export class ConversationActor {
         recovered: true,
         expectsInitialPromptRawUserMessage: false,
       },
-      () => this.session.sendCustomMessage({
-        customType: "workbench.inbox_resume.v1",
-        content:
-          "恢复此前未结算的跨会话任务。请处理上下文中最后一批来自其他会话的消息；继续前先核对工作区与任何外部副作用的实际状态，不要盲目重复可能已经生效的操作。",
-        display: false,
-        details: { runId: input.runId },
-      }, {
-        triggerTurn: true,
-      }),
+      async (ticket) => {
+        await this.appendPendingBashNotifications(ticket);
+        await this.session.sendCustomMessage({
+          customType: "workbench.inbox_resume.v1",
+          content:
+            "恢复此前未结算的跨会话任务。请处理上下文中最后一批来自其他会话的消息；继续前先核对工作区与任何外部副作用的实际状态，不要盲目重复可能已经生效的操作。",
+          display: false,
+          details: { runId: input.runId },
+        }, {
+          triggerTurn: true,
+        });
+      },
     );
   }
 
   private flushCustomSteers(ticket: RunTicket): void {
     if (ticket.customSteerFlush) return;
     const flush = (async () => {
+      let sending: PendingCustomSteer | undefined;
       try {
         // AgentSession only queues custom steering while its Pi run is live.
         // A ticket may be installed before SDK preflight reaches agent_start;
@@ -2253,6 +2680,10 @@ export class ConversationActor {
           // through to starting a new run if the owned run has already ended.
           if (!this.session.isStreaming) return;
           const next = ticket.customSteerDeliveries[0]!;
+          sending = next;
+          if (next.bashTaskNotification) {
+            next.bashTaskNotification.handedToSdk = true;
+          }
           await this.session.sendCustomMessage({
             customType: next.message.customType,
             content: next.message.content,
@@ -2266,6 +2697,10 @@ export class ConversationActor {
           // successful acceptance is independent of that lifecycle change:
           // settle the exact FIFO head unless run teardown already rejected
           // and removed it, otherwise a later flush would deliver it twice.
+          if (next.bashTaskNotification) {
+            this.acceptBashTaskNotification(ticket, next.bashTaskNotification);
+          }
+          sending = undefined;
           if (ticket.customSteerDeliveries[0] !== next) return;
           if (next.acceptedMessageId !== undefined) {
             this.recordAcceptedCustomMessage(ticket, next.acceptedMessageId);
@@ -2274,6 +2709,9 @@ export class ConversationActor {
           next.delivery.resolve();
         }
       } catch (error) {
+        if (sending?.bashTaskNotification) {
+          this.failBashTaskNotification(ticket, sending.bashTaskNotification);
+        }
         this.rejectCustomSteers(ticket, error);
       }
     })();
@@ -2294,8 +2732,13 @@ export class ConversationActor {
 
   private rejectCustomSteers(ticket: RunTicket, error: unknown): void {
     ticket.customSteerFlush = undefined;
-    for (const pending of ticket.customSteerDeliveries.splice(0)) {
-      pending.delivery.reject(error);
+    const pending = ticket.customSteerDeliveries.splice(0);
+    for (let index = pending.length - 1; index >= 0; index -= 1) {
+      const delivery = pending[index]!;
+      if (delivery.bashTaskNotification && !delivery.bashTaskNotification.handedToSdk) {
+        this.restoreBashTaskNotification(delivery.bashTaskNotification);
+      }
+      delivery.delivery.reject(error);
     }
   }
 
@@ -2379,6 +2822,7 @@ export class ConversationActor {
       pendingGuidanceObservations: [],
       customSteerDeliveries: [],
       acceptedCustomMessageObservations: [],
+      acceptedBashTaskNotifications: [],
       reloadContinuationDeliveries: new Map(),
       ...(input.reloadContinuation === undefined
         ? {}
@@ -2633,9 +3077,8 @@ export class ConversationActor {
   }
 
   /**
-   * Fires the registered waiting interrupt once for the first accepted-but-
-   * unobserved guidance record. A stale callback leaves the record available
-   * for the next wait; a true callback burns it only when terminal CAS wins.
+   * Fires the single waiting interrupt for the first accepted run input. A
+   * stale callback leaves its record available; only terminal CAS consumes it.
    */
   private fireWaitingSteerInterrupt(ticket: RunTicket): void {
     const waiting = ticket.state;
@@ -2644,10 +3087,13 @@ export class ConversationActor {
     if (attempt.status !== "open" || attempt.waitSteerInterrupt === undefined) {
       return;
     }
-    const record = ticket.pendingGuidanceObservations.find(
+    const guidance = ticket.pendingGuidanceObservations.find(
       (candidate) => !candidate.waited,
     );
-    if (!record) return;
+    const bashTask = guidance === undefined
+      ? ticket.acceptedBashTaskNotifications.find((candidate) => !candidate.waited)
+      : undefined;
+    if (guidance === undefined && bashTask === undefined) return;
     const interrupt = attempt.waitSteerInterrupt;
     attempt.waitSteerInterrupt = undefined;
     let claimed = false;
@@ -2664,10 +3110,13 @@ export class ConversationActor {
         attempt,
         "open",
         true,
-        { kind: "guidance" },
+        guidance === undefined
+          ? { kind: "bash_task", taskIds: Object.freeze([...bashTask!.taskIds]) }
+          : { kind: "guidance" },
       )
     ) {
-      record.waited = true;
+      if (guidance) guidance.waited = true;
+      else bashTask!.waited = true;
     }
   }
 
@@ -2849,12 +3298,21 @@ export class ConversationActor {
           const cleanup = await this.created?.bashExecutions?.close(owner, "reload");
           if (cleanup?.cleanupUnknown) throw new BashCleanupUnconfirmedError();
         }
+        const cleanup = await this.closeBackgroundTasks("reload");
+        if (cleanup.cleanupUnknown) throw new BashCleanupUnconfirmedError();
+        if (cleanup.notificationFailure !== undefined) {
+          throw cleanup.notificationFailure;
+        }
       });
     }
     if (ticket.state.phase === "cancelling" || ticket.finishPromise) {
-      return ticket.completion.promise.then(() => {
-        if (this.getBashActivity()?.cleanupUnknown) {
+      return ticket.completion.promise.then(async () => {
+        const cleanup = await this.closeBackgroundTasks("reload");
+        if (cleanup.cleanupUnknown || this.getBashActivity()?.cleanupUnknown) {
           throw new BashCleanupUnconfirmedError();
+        }
+        if (cleanup.notificationFailure !== undefined) {
+          throw cleanup.notificationFailure;
         }
       });
     }
@@ -2912,6 +3370,16 @@ export class ConversationActor {
           failures.push(error);
         }
         await manualCompaction.catch(() => undefined);
+      }
+
+      try {
+        const cleanup = await this.closeBackgroundTasks("dispose");
+        if (cleanup.cleanupUnknown) throw new BashCleanupUnconfirmedError();
+        if (cleanup.notificationFailure !== undefined) {
+          throw cleanup.notificationFailure;
+        }
+      } catch (error) {
+        failures.push(error);
       }
 
       try {
@@ -3002,6 +3470,11 @@ export class ConversationActor {
       await execute(ticket);
       if (await this.finishReloadStop(ticket)) return;
       while (this.activeRun === ticket && !isCancelling(ticket)) {
+        if (this.pendingBashTaskNotifications.length > 0) {
+          await this.sendPendingBashNotifications(ticket, true);
+          if (await this.finishReloadStop(ticket)) return;
+          continue;
+        }
         this.releaseTurnBoundaryPause();
         while (
           ticket.turnBoundaryCompactionRequested
@@ -3089,11 +3562,15 @@ export class ConversationActor {
     const request = ticket.reloadStop;
     if (!request || this.activeRun !== ticket) return false;
     const cleanup = await this.closeBashForRun(ticket, "reload");
-    if (!request.preserveSettlement || cleanup.cleanupUnknown) {
-      await this.settleRun(ticket, cleanup.cleanupUnknown ? "failed" : "aborted");
+    const background = await this.closeBackgroundTasks("reload");
+    const cleanupUnknown = cleanup.cleanupUnknown || background.cleanupUnknown;
+    if (!request.preserveSettlement || cleanupUnknown) {
+      await this.settleRun(ticket, cleanupUnknown ? "failed" : "aborted");
     }
-    if (cleanup.cleanupUnknown) {
+    if (cleanupUnknown) {
       request.ready.reject(new BashCleanupUnconfirmedError());
+    } else if (background.notificationFailure !== undefined) {
+      request.ready.reject(background.notificationFailure);
     } else {
       request.ready.resolve();
     }
@@ -3363,6 +3840,27 @@ export class ConversationActor {
     return ticket.bashCleanupPromise;
   }
 
+  private async closeBackgroundTasks(
+    reason: "reload" | "dispose",
+  ): Promise<{
+    cleanupUnknown: boolean;
+    notificationFailure?: unknown;
+  }> {
+    this.backgroundTasksClosed = true;
+    const cleanup = await this.backgroundTasks.close(reason);
+    let notificationFailure: unknown;
+    try {
+      await this.appendPendingBashNotifications();
+    } catch (error) {
+      notificationFailure = error;
+      this.emitError(error, this.activeRun?.id);
+    }
+    return {
+      cleanupUnknown: cleanup.cleanupUnknown,
+      ...(notificationFailure === undefined ? {} : { notificationFailure }),
+    };
+  }
+
   private async finishRun(
     ticket: RunTicket,
     outcome: RunSettlement["outcome"],
@@ -3413,6 +3911,7 @@ export class ConversationActor {
     );
     this.cancelScope(ticket.id);
     this.cancelInstalledWaitAttempt(ticket, { kind: "settlement" });
+    this.retireAcceptedBashTaskNotifications(ticket);
     this.activeRun = undefined;
     // Planned process replacement keeps its durable settlement internal. The
     // reconnecting client observes the fresh continuation instead of a
@@ -3423,6 +3922,9 @@ export class ConversationActor {
         outcome,
       });
       if (!this.activeRun) this.emitActivity();
+    }
+    if (ticket.origin !== "bash_task" || outcome === "completed") {
+      this.emitBashTasksReadyIfIdle();
     }
     const completion = {
       settlement,
@@ -3473,6 +3975,7 @@ export class ConversationActor {
     ticket.reloadStop?.ready.reject(error);
     if (this.activeRun === ticket) {
       this.cancelInstalledWaitAttempt(ticket, { kind: "error", error });
+      this.retireAcceptedBashTaskNotifications(ticket);
       this.activeRun = undefined;
     }
     this.projection.clear(ticket.id);
@@ -3481,6 +3984,7 @@ export class ConversationActor {
     }
     ticket.pendingGuidanceObservations.splice(0);
     ticket.acceptedCustomMessageObservations.splice(0);
+    ticket.acceptedBashTaskNotifications.splice(0);
     this.clearPendingAdmissions();
     this.rejectCustomSteers(ticket, error);
     this.fatalError = error instanceof Error
@@ -3601,6 +4105,10 @@ export class ConversationActor {
         this.emitError(event.errorMessage, ticket.id);
       }
     }
+    if (event.type === "message_end" && event.message.role === "custom") {
+      this.observeBashTaskNotificationMessage(event.message);
+    }
+
     if (
       !ticket
       || ticket.state.phase === "queued"
@@ -4057,6 +4565,7 @@ export class ConversationActor {
             getOwner: () => this.currentRunOwnership(),
             onChange: (owner) => this.observeBashActivity(runtimeGeneration, owner),
           },
+          backgroundTasks: this.backgroundTasks,
           ...(this.profileSnapshot.role.toolMode === "full_access"
             ? {
                 computerUse: {

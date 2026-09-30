@@ -7,10 +7,12 @@ import {
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  BashBackgroundTaskRegistry,
   BashCleanupUnconfirmedError,
   BashExecutionBudget,
   createBashExecutionBinding,
   type BashExecutionOwner,
+  type BashTaskCompletion,
 } from "./bash-execution.js";
 
 const cwd = process.cwd();
@@ -78,6 +80,7 @@ function makeFixture(
     budget?: BashExecutionBudget;
     base?: (operations: BashOperations) => ToolDefinition<any, any, any>;
     onChange?: (owner: BashExecutionOwner) => void;
+    backgroundTasks?: BashBackgroundTaskRegistry;
   } = {},
 ) {
   const owner = options.owner ?? Object.freeze({ conversationId: "conversation-a", runId: "run-a" });
@@ -91,6 +94,7 @@ function makeFixture(
     operations,
     createBaseTool: options.base ?? nativeBase,
     onChange: options.onChange,
+    backgroundTasks: options.backgroundTasks,
   });
   const tool = (name: string) => {
     const found = binding.tools.find((candidate) => candidate.name === name);
@@ -396,6 +400,73 @@ describe("run-scoped Bash execution", () => {
     expect(bashDetails(handle).piwebBash).toBeDefined();
   });
 
+  it.each(["run_end", "abort"] as const)("keeps registry-owned tasks after %s and across binding replacement", async (closeReason) => {
+    const completion = deferred<{ exitCode: number | null }>();
+    const completions: BashTaskCompletion[] = [];
+    const observed: string[] = [];
+    const registry = new BashBackgroundTaskRegistry({
+      onCompleted: (task) => completions.push(task),
+      onObserved: (taskId) => observed.push(taskId),
+    });
+    const budget = new BashExecutionBudget();
+    const owner = Object.freeze({ conversationId: "conversation-a", runId: `old-${closeReason}` });
+    let executionSignal: AbortSignal | undefined;
+    let replacementCalls = 0;
+    const old = makeFixture(async (command, _cwd, options) => {
+      executionSignal = options.signal;
+      options.onData(Buffer.from(`${"你".repeat(400)}:${command}:old`));
+      return completion.promise;
+    }, { owner, budget, backgroundTasks: registry, base: simpleBase });
+    const command = "你".repeat(100);
+    const started = await invoke(old.tool("bash"), {
+      command,
+      run_in_background: true,
+    });
+    const taskId = (bashDetails(started).piwebBash as { taskId: string }).taskId;
+
+    await old.binding.lifecycle.close(owner, closeReason);
+    await old.binding.lifecycle.dispose();
+    expect(executionSignal?.aborted).toBe(false);
+
+    const nextOwner = Object.freeze({ conversationId: owner.conversationId, runId: "new-run" });
+    const next = makeFixture(async () => {
+      replacementCalls++;
+      return { exitCode: 0 };
+    }, {
+      owner: nextOwner,
+      budget,
+      conversationKey: `cwd\0${owner.conversationId}`,
+      backgroundTasks: registry,
+      base: simpleBase,
+    });
+    const snapshot = await invoke(next.tool("bash_output"), { task_id: taskId, block: false });
+    expect((bashDetails(snapshot).piwebBash as { state: string }).state).toBe("in_progress");
+
+    completion.resolve({ exitCode: 0 });
+    const firstResult = await invoke(next.tool("bash_output"), { task_id: taskId, timeout: 1000 });
+    const nativeText = resultText(firstResult);
+    expect(nativeText).toContain(`${"你".repeat(400)}:${command}:old`);
+    expect(replacementCalls).toBe(0);
+    expect(completions).toHaveLength(1);
+    expect(completions[0]).toMatchObject({
+      taskId,
+      command: "你".repeat(85),
+      status: "completed",
+      exitCode: 0,
+    });
+    expect(Buffer.byteLength(completions[0]!.outputTail, "utf8")).toBeLessThanOrEqual(1024);
+    expect(completions[0]!.outputTail.endsWith(":old")).toBe(true);
+    expect(Number.isInteger(completions[0]!.durationMs)).toBe(true);
+    expect(completions[0]!.durationMs).toBeGreaterThanOrEqual(0);
+    expect(observed).toEqual([taskId]);
+
+    (firstResult.content[0] as { text?: string }).text = "extension mutation";
+    const secondResult = await invoke(next.tool("bash_output"), { task_id: taskId, block: false });
+    expect(resultText(secondResult)).toBe(nativeText);
+    expect(observed).toEqual([taskId]);
+    expect(registry.activity()).toEqual({ running: 0, stopping: 0, cleanupUnknown: false });
+  });
+
   it("cancels a foreground tool wait promptly while bounded close retains an unresponsive native execution", async () => {
     vi.useFakeTimers();
     const pending = deferred<{ exitCode: number | null }>();
@@ -465,18 +536,220 @@ describe("run-scoped Bash execution", () => {
     expect(calls).toBe(0);
   });
 
+  it("keeps four conversation background slots separate from four foreground slots per run", async () => {
+    const pending: Array<ReturnType<typeof deferred<{ exitCode: number | null }>>> = [];
+    let markEightStarted!: () => void;
+    const eightStarted = new Promise<void>((resolve) => { markEightStarted = resolve; });
+    const registry = new BashBackgroundTaskRegistry({ onCompleted: () => {}, onObserved: () => {} });
+    const fixture = makeFixture(async () => {
+      const next = deferred<{ exitCode: number | null }>();
+      pending.push(next);
+      if (pending.length === 8) markEightStarted();
+      return next.promise;
+    }, { backgroundTasks: registry, base: simpleBase });
+
+    const foreground = Array.from({ length: 4 }, (_, index) =>
+      invoke(fixture.tool("bash"), { command: `foreground-${index}` }));
+    for (let index = 0; index < 20 && pending.length < 4; index++) await Promise.resolve();
+    expect(pending).toHaveLength(4);
+    for (let index = 0; index < 4; index++) {
+      await invoke(fixture.tool("bash"), { command: `background-${index}`, run_in_background: true });
+    }
+    await eightStarted;
+    expect(registry.activity()).toEqual({ running: 4, stopping: 0, cleanupUnknown: false });
+    await expect(invoke(fixture.tool("bash"), { command: "fifth-background", run_in_background: true }))
+      .rejects.toThrow(/4 unsettled background Bash tasks/);
+    await expect(invoke(fixture.tool("bash"), { command: "fifth-foreground" }))
+      .rejects.toThrow(/4 unsettled Bash executions/);
+
+    pending.forEach((execution) => execution.resolve({ exitCode: 0 }));
+    await Promise.all(foreground);
+    for (let index = 0; index < 12; index++) await Promise.resolve();
+    expect(registry.activity()).toEqual({ running: 0, stopping: 0, cleanupUnknown: false });
+  });
+
+  it("evicts only observed or SDK-notified conversation task records in FIFO order", async () => {
+    const registry = new BashBackgroundTaskRegistry({ onCompleted: () => {}, onObserved: () => {} });
+    const fixture = makeFixture(async () => ({ exitCode: 0 }), {
+      backgroundTasks: registry,
+      base: simpleBase,
+    });
+    const taskIds: string[] = [];
+    for (let index = 0; index < 64; index++) {
+      const started = await invoke(fixture.tool("bash"), {
+        command: `task-${index}`,
+        run_in_background: true,
+      });
+      taskIds.push((bashDetails(started).piwebBash as { taskId: string }).taskId);
+      for (let turn = 0; turn < 6; turn++) await Promise.resolve();
+    }
+    expect(registry.summaries()).toHaveLength(64);
+    await expect(invoke(fixture.tool("bash"), { command: "overflow", run_in_background: true }))
+      .rejects.toThrow(/64 Bash task record limit/);
+
+    await invoke(fixture.tool("bash_output"), { task_id: taskIds[0] });
+    registry.markNotified([taskIds[1]!]);
+    const observedReplacement = await invoke(fixture.tool("bash"), { command: "observed-eviction", run_in_background: true });
+    const observedReplacementId = (bashDetails(observedReplacement).piwebBash as { taskId: string }).taskId;
+    for (let turn = 0; turn < 6; turn++) await Promise.resolve();
+    expect(registry.summaries()).toHaveLength(64);
+    expect(registry.summaries().some((summary) => summary.taskId === observedReplacementId)).toBe(true);
+    await expect(invoke(fixture.tool("bash_output"), { task_id: taskIds[0], block: false }))
+      .rejects.toThrow(/not available in this conversation/);
+
+    const notifiedReplacement = await invoke(fixture.tool("bash"), { command: "notified-eviction", run_in_background: true });
+    const notifiedReplacementId = (bashDetails(notifiedReplacement).piwebBash as { taskId: string }).taskId;
+    for (let turn = 0; turn < 6; turn++) await Promise.resolve();
+    expect(registry.summaries().some((summary) => summary.taskId === notifiedReplacementId)).toBe(true);
+    await expect(invoke(fixture.tool("bash_output"), { task_id: taskIds[1], block: false }))
+      .rejects.toThrow(/not available in this conversation/);
+  });
+
+  it("retains registry cleanup_unknown and runtime quota until an unresponsive native task settles", async () => {
+    vi.useFakeTimers();
+    const completion = deferred<{ exitCode: number | null }>();
+    const completed: BashTaskCompletion[] = [];
+    const budget = new BashExecutionBudget();
+    const owner = Object.freeze({ conversationId: "conversation-a", runId: "closing-run" });
+    const registry = new BashBackgroundTaskRegistry({
+      onCompleted: (task) => {
+        completed.push(task);
+        throw new Error("notification callback failed");
+      },
+      onObserved: () => {},
+    });
+    let executionSignal: AbortSignal | undefined;
+    const original = makeFixture(async (_command, _cwd, options) => {
+      executionSignal = options.signal;
+      return completion.promise;
+    }, { owner, budget, backgroundTasks: registry, base: simpleBase });
+    const handle = await invoke(original.tool("bash"), { command: "ignore-abort", run_in_background: true });
+    expect(bashDetails(handle).piwebBash).toBeDefined();
+
+    const closing = registry.close("reload");
+    expect(executionSignal?.aborted).toBe(true);
+    await vi.advanceTimersByTimeAsync(2000);
+    const report = await closing;
+    expect(report.cleanupUnknown).toBe(true);
+    expect(registry.activity()).toEqual({ running: 0, stopping: 1, cleanupUnknown: true });
+    expect(report.executions[0]).toMatchObject({ state: "stopping", stopReason: "reload" });
+
+    const replacementOwner = Object.freeze({ conversationId: owner.conversationId, runId: "after-reload" });
+    const replacement = makeFixture(async () => ({ exitCode: 0 }), {
+      owner: replacementOwner,
+      budget,
+      conversationKey: `cwd\0${owner.conversationId}`,
+      base: simpleBase,
+    });
+    await expect(invoke(replacement.tool("bash"), { command: "must-wait" }))
+      .rejects.toThrow(/previous Bash execution/);
+
+    completion.resolve({ exitCode: 0 });
+    const afterLateSettlement = await registry.close("reload");
+    expect(afterLateSettlement.cleanupUnknown).toBe(false);
+    expect(registry.activity()).toEqual({ running: 0, stopping: 0, cleanupUnknown: false });
+    expect(completed).toHaveLength(1);
+    expect(completed[0]).toMatchObject({ status: "killed", stopReason: "reload", exitCode: 0 });
+    const result = await invoke(replacement.tool("bash"), { command: "budget-released" });
+    expect(resultText(result)).toContain("(no output)");
+  });
+
+  it("omits oversized native outputFile metadata without fabricating a truncated path", async () => {
+    const longPath = `C:\\${"p".repeat(300)}`;
+    const completions: BashTaskCompletion[] = [];
+    const registry = new BashBackgroundTaskRegistry({
+      onCompleted: (task) => completions.push(task),
+      onObserved: () => {},
+    });
+    const fixture = makeFixture(async () => ({ exitCode: 0 }), {
+      backgroundTasks: registry,
+      base: (operations) => ({
+        ...simpleBase(operations),
+        async execute(_toolCallId, input: FakeBaseInput, signal) {
+          await operations.exec(input.command, cwd, {
+            onData: () => {},
+            signal,
+            timeout: input.timeout,
+            env: process.env,
+          });
+          return { content: [{ type: "text", text: "native result" }], details: { fullOutputPath: longPath } };
+        },
+      }),
+    });
+    const started = await invoke(fixture.tool("bash"), { command: "large-output-file", run_in_background: true });
+    const taskId = (bashDetails(started).piwebBash as { taskId: string }).taskId;
+    const final = await invoke(fixture.tool("bash_output"), { task_id: taskId });
+    const summary = bashDetails(final).piwebBash as { outputFile?: string };
+    expect(completions).toMatchObject([{ taskId, status: "completed" }]);
+    expect(completions[0]?.outputFile).toBeUndefined();
+    expect(summary.outputFile).toBeUndefined();
+    expect(bashDetails(final).fullOutputPath).toBe(longPath);
+  });
+
+  it("classifies post-exit formatter failures as failed and only bash_output observes them", async () => {
+    const completions: BashTaskCompletion[] = [];
+    const observed: string[] = [];
+    let markCompleted!: () => void;
+    const completed = new Promise<void>((resolve) => { markCompleted = resolve; });
+    const registry = new BashBackgroundTaskRegistry({
+      onCompleted: (task) => {
+        completions.push(task);
+        markCompleted();
+      },
+      onObserved: (taskId) => {
+        observed.push(taskId);
+        throw new Error("observation callback failed");
+      },
+    });
+    const fixture = makeFixture(async () => ({ exitCode: 0 }), {
+      backgroundTasks: registry,
+      base: (operations) => ({
+        ...simpleBase(operations),
+        async execute(_toolCallId, input: FakeBaseInput, signal) {
+          await operations.exec(input.command, cwd, {
+            onData: () => {},
+            signal,
+            timeout: input.timeout,
+            env: process.env,
+          });
+          throw new Error("native formatter failed after exit");
+        },
+      }),
+    });
+    const started = await invoke(fixture.tool("bash"), { command: "formatted-failure", run_in_background: true });
+    const taskId = (bashDetails(started).piwebBash as { taskId: string }).taskId;
+    await completed;
+    expect(completions).toMatchObject([{
+      taskId,
+      status: "failed",
+      exitCode: 0,
+    }]);
+
+    await expect(invoke(fixture.tool("bash_stop"), { task_id: taskId })).rejects.toThrow(/native formatter failed/);
+    expect(observed).toEqual([]);
+    await expect(invoke(fixture.tool("bash_output"), { task_id: taskId })).rejects.toThrow(/native formatter failed/);
+    expect(observed).toEqual([taskId]);
+  });
+
   it("enforces the runtime-shared limit of 32 unsettled executions", async () => {
     const budget = new BashExecutionBudget();
-    const fixtures = [] as ReturnType<typeof makeFixture>[];
+    const registries: BashBackgroundTaskRegistry[] = [];
     const pending: Array<ReturnType<typeof deferred<{ exitCode: number | null }>>> = [];
     for (let conversation = 0; conversation < 8; conversation++) {
       const owner = Object.freeze({ conversationId: `conversation-${conversation}`, runId: `run-${conversation}` });
+      const registry = new BashBackgroundTaskRegistry({ onCompleted: () => {}, onObserved: () => {} });
       const fixture = makeFixture(async () => {
         const next = deferred<{ exitCode: number | null }>();
         pending.push(next);
         return next.promise;
-      }, { owner, conversationKey: `cwd\\0${owner.conversationId}`, budget, base: simpleBase });
-      fixtures.push(fixture);
+      }, {
+        owner,
+        conversationKey: `cwd\\0${owner.conversationId}`,
+        budget,
+        backgroundTasks: registry,
+        base: simpleBase,
+      });
+      registries.push(registry);
       for (let index = 0; index < 4; index++) {
         await invoke(fixture.tool("bash"), { command: `hold-${index}`, run_in_background: true });
       }
@@ -486,14 +759,39 @@ describe("run-scoped Bash execution", () => {
       owner: overflowOwner,
       conversationKey: `cwd\\0${overflowOwner.conversationId}`,
       budget,
+      backgroundTasks: new BashBackgroundTaskRegistry({ onCompleted: () => {}, onObserved: () => {} }),
     });
     await expect(invoke(overflow.tool("bash"), { command: "overflow", run_in_background: true }))
       .rejects.toThrow(/runtime Bash execution limit/);
     expect(pending).toHaveLength(32);
 
-    const closing = fixtures.map((fixture) => fixture.binding.lifecycle.close(fixture.owner, "run_end"));
     pending.forEach((execution) => execution.resolve({ exitCode: 0 }));
-    await Promise.all(closing);
+    await Promise.all(pending.map((execution) => execution.promise));
+    for (let turn = 0; turn < 12; turn++) await Promise.resolve();
+    await Promise.all(registries.map((registry) => registry.close("dispose")));
+  });
+
+  it("kills a foreground command exactly at the 120000ms default timeout", async () => {
+    vi.useFakeTimers();
+    let executionSignal: AbortSignal | undefined;
+    let nativeTimeout: number | undefined;
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    const fixture = makeFixture((_command, _cwd, options) => new Promise((resolve) => {
+      executionSignal = options.signal;
+      nativeTimeout = options.timeout;
+      markStarted();
+      options.signal?.addEventListener("abort", () => resolve({ exitCode: null }), { once: true });
+    }), { base: simpleBase });
+    const pending = invoke(fixture.tool("bash"), { command: "default-timeout" });
+    const rejected = expect(pending).rejects.toThrow(/timeout:120/);
+    await started;
+    expect(nativeTimeout).toBe(120);
+    await vi.advanceTimersByTimeAsync(119_999);
+    expect(executionSignal?.aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(executionSignal?.aborted).toBe(true);
+    await rejected;
   });
 
   it("waits in the foreground and passes the default millisecond timeout as Pi seconds", async () => {

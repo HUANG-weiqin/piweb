@@ -75,6 +75,7 @@ import {
 import { clearCredentialCommandCache, FileCredentialStore } from "./credential-store.js";
 import { createReadOnlyBashTool } from "./read-only-bash.js";
 import {
+  type BashBackgroundTaskRegistry,
   BashExecutionBudget,
   BashCleanupUnconfirmedError,
   createBashExecutionBinding,
@@ -413,8 +414,10 @@ export interface CreatePiSessionOptions {
   getServiceTier?: () => ServiceTier | null;
   /** Present only for a full-access actor that owns an exact active run. */
   computerUse?: ComputerUseSessionOptions;
-  /** Actor-owned execution scope; standalone SDK sessions retain native Bash. */
+  /** Actor-owned run execution owner; standalone SDK sessions retain native Bash. */
   bashExecutions?: BashExecutionSessionOptions;
+  /** Conversation-owned background executions shared across runtime replacements. */
+  backgroundTasks?: BashBackgroundTaskRegistry;
 }
 
 export interface CreatedPiSession {
@@ -1306,6 +1309,7 @@ export class PiRuntime implements PiRuntimeLike {
           conversationKey: `${cwd}\0${options.bashExecutions.conversationId}`,
           budget: this.bashExecutionBudget,
           operations: createLocalBashOperations({ shellPath }),
+          backgroundTasks: options.backgroundTasks,
           createBaseTool: (operations) => readOnlyToolProjection
             ? createReadOnlyBashTool(cwd, shellPath, operations)
             : createBashToolDefinition(cwd, { shellPath, commandPrefix, operations }),

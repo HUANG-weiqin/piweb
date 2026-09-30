@@ -39,6 +39,7 @@ import type { ConversationTitleLookup } from "../lib/conversation-display";
 import { THINKING_LEVEL_LABELS } from "../lib/thinking-level";
 import { useModalFocus } from "../lib/use-modal-focus";
 import { ActivitySpinner } from "./ActivitySpinner";
+import { BashTaskNotificationCard } from "./BashTaskNotificationCard";
 import { editBudgetRemainingFiles } from "./CommitmentCard";
 import { ConversationRoleDialog } from "./ConversationRoleDialog";
 import { Message } from "./Message";
@@ -907,6 +908,10 @@ function ChatView({
             <span className="compaction-state">DONE</span>
           </div>;
         }
+        if (block.kind === "bash_task_notification") return <BashTaskNotificationCard
+          key={`${transcriptRenderScopeKey}:bash-task:${block.id}`}
+          notification={block}
+        />;
         if (block.kind === "session_message") return <SessionMessageCard
           key={`${transcriptRenderScopeKey}:card:${block.cardId}`}
           card={block}

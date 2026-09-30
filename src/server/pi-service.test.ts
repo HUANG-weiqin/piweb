@@ -37,6 +37,7 @@ import {
   aggregateReservedConversationEntries,
   appendReservedCustomEntry,
   createConversationCardEntry,
+  createBashTaskNotificationEntry,
   createLoopListEntry,
 } from "./conversation-meta.js";
 import { SessionDirectoryChangedError } from "./project-store.js";
@@ -2476,6 +2477,50 @@ describe("PiConnection coordinated controls", () => {
 });
 
 describe("PiConnection coordinated project view", () => {
+  it("refreshes notification history only for the currently focused conversation", async () => {
+    const harness = await coordinatedConnectionHarness();
+    const handle = await harness.coordinator.acquireProject(harness.cwd);
+    try {
+      await initializeNewConversation(harness);
+      const state = latestState(harness.events);
+      const actor = await harness.coordinator.openConversation(handle, state.conversationId!, {
+        updateRecent: false,
+      });
+      const notification = createBashTaskNotificationEntry([{
+        taskId: randomUUID(), command: "npm test", status: "completed",
+        exitCode: 0, durationMs: 10, outputTail: "tests passed",
+      }]);
+      actor.sessionManager.appendCustomMessageEntry(
+        notification.customType, notification.content, notification.display, notification.details,
+      );
+      // Service consumes the trusted post-persistence Actor event. Actual SDK
+      // persistence/notification acceptance is covered by Actor tests.
+      const publish = () => (actor as unknown as {
+        emit(event: { type: "history_changed"; conversationId: string }): void;
+      }).emit({ type: "history_changed", conversationId: actor.conversationId });
+      const before = harness.events.filter((event) => event.type === "conversation_snapshot").length;
+      publish();
+      expect(harness.events.filter((event) => event.type === "conversation_snapshot"))
+        .toHaveLength(before + 1);
+      const snapshot = harness.events.findLast((event) => event.type === "conversation_snapshot");
+      expect(snapshot).toMatchObject({
+        conversationId: actor.conversationId, focusId: state.focusId,
+        items: expect.arrayContaining([expect.objectContaining({
+          kind: "bash_task_notification", tasks: notification.details.tasks,
+        })]),
+      });
+      expect(parseServerEvent(snapshot)).toEqual(snapshot);
+      await initializeNewConversation(harness, SESSION_C);
+      const changed = harness.events.filter((event) => event.type === "conversation_snapshot").length;
+      publish();
+      expect(harness.events.filter((event) => event.type === "conversation_snapshot"))
+        .toHaveLength(changed);
+    } finally {
+      handle.release();
+      await harness.cleanup();
+    }
+  });
+
   it("projects focused Bash activity live and on reconnect without crossing owner/focus", async () => {
     const runtime = new FakeRuntime();
     let activity = { running: 0, stopping: 0, cleanupUnknown: false };
@@ -2512,7 +2557,7 @@ describe("PiConnection coordinated project view", () => {
       expect(live).toMatchObject({
         type: "bash_activity", sessionId: SESSION_A,
         conversationId: focused.conversationId, focusId: focused.focusId,
-        activity: { runId: RUN_A, running: 2, stopping: 0, cleanupUnknown: false },
+        activity: { running: 2, stopping: 0, cleanupUnknown: false },
       });
       expect(parseServerEvent(live)).toEqual(live);
       const before = harness.events.length;
@@ -2527,7 +2572,7 @@ describe("PiConnection coordinated project view", () => {
         conversation: { kind: "open", conversationId: focused.conversationId! },
       });
       expect(reconnectEvents.findLast((event) => event.type === "conversation_snapshot"))
-        .toMatchObject({ sessionId: SESSION_B, bashActivity: { runId: RUN_A, running: 2 } });
+        .toMatchObject({ sessionId: SESSION_B, bashActivity: { running: 2 } });
 
       await initializeNewConversation(harness, SESSION_C);
       const changedFocus = latestState(harness.events);
@@ -2537,7 +2582,7 @@ describe("PiConnection coordinated project view", () => {
       binding.onChange?.(owner);
       expect(harness.events.filter((event) => event.type === "bash_activity")).toHaveLength(beforeStop);
       expect(reconnectEvents.findLast((event) => event.type === "bash_activity"))
-        .toMatchObject({ sessionId: SESSION_B, activity: { runId: RUN_A, stopping: 2 } });
+        .toMatchObject({ sessionId: SESSION_B, activity: { stopping: 2 } });
       release.resolve();
       await running;
       expect(reconnectEvents.findLast((event) => event.type === "conversation_snapshot"))

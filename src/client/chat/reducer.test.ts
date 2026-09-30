@@ -106,7 +106,6 @@ function sessionMessageCard(
 describe("chatReducer", () => {
   it("hydrates, updates, and clears aggregate Bash activity only for its exact focus", () => {
     const activity: ConversationBashActivity = {
-      runId: "33333333-3333-4333-8333-333333333333",
       running: 1,
       stopping: 1,
       cleanupUnknown: false,
@@ -148,7 +147,7 @@ describe("chatReducer", () => {
     expect(newFocus.bashActivity).toBeNull();
   });
 
-  it("hydrates message and session-message items only for the attached focus", () => {
+  it("hydrates message, session-message, and Bash notification items only for the attached focus", () => {
     let state = chatReducer(initialChatState, {
       type: "focus_changed",
       ...FOCUS_A_1,
@@ -159,6 +158,19 @@ describe("chatReducer", () => {
       items: [
         historyMessage("user-1", "user", "inspect"),
         sessionMessageCard(),
+        {
+          kind: "bash_task_notification",
+          id: "00000004",
+          timestamp: "2026-07-19T10:00:00.000Z",
+          text: "Background task completed.",
+          tasks: [{
+            taskId: "f7decc27-b4ed-4338-85ec-4efc6c3c2c50",
+            command: "npm test",
+            status: "completed",
+            exitCode: 0,
+            durationMs: 100,
+          }],
+        },
         historyMessage("assistant-1", "assistant", "done", 9),
       ],
     });
@@ -167,8 +179,10 @@ describe("chatReducer", () => {
     expect(state.items.map((item) => item.kind)).toEqual([
       "message",
       "session_message",
+      "bash_task_notification",
       "message",
     ]);
+    expect(state.items[2]).toMatchObject({ kind: "bash_task_notification" });
     expect(messageItems(state).map(({ id }) => id)).toEqual(["user-1", "assistant-1"]);
     expect(messageItems(state).at(-1)?.usage?.total).toBe(9);
   });

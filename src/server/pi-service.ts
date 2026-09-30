@@ -1590,7 +1590,7 @@ case "set_thinking":
       return;
     }
 
-    if (event.type === "image_message_persisted") {
+    if (event.type === "image_message_persisted" || event.type === "history_changed") {
       if (event.conversationId === view.conversationId && view.focusId !== undefined) {
         this.publishFocusedConversationSnapshot();
       }

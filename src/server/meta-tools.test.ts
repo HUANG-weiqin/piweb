@@ -72,7 +72,7 @@ describe("createMetaTools", () => {
       "the body has already been injected as a separate custom message into the same model request that receives this tool result",
     );
     expect(waitForSession.promptGuidelines).toContain(
-      "A message outcome's body is already in the model context that receives the wait result; use it there, and do not wait or peek merely to fetch the body.",
+      "A message or bash_task outcome's body is already in the model context that receives the wait result; use it there, and do not wait or peek merely to fetch the body.",
     );
   });
 

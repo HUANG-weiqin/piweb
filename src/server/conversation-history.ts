@@ -1,6 +1,7 @@
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import { PROMPT_IMAGE_PLACEHOLDER } from "../shared/protocol.js";
 import type {
+  ConversationBashTaskNotification,
   ConversationHistoryImageReference,
   ConversationHistoryItem,
   ConversationHistoryMessage,
@@ -414,6 +415,11 @@ function projectConversationHistorySlots(
       assistant = undefined;
       continue;
     }
+    if (reserved?.kind === "bash_task_notification") {
+      // A durable host notification is its own ordered transcript item.
+      assistant = undefined;
+      continue;
+    }
     if (reserved?.kind === "conversation_message") {
       assistant = undefined;
       seenCardIds.add(reserved.entry.details.cardId);
@@ -658,6 +664,9 @@ export function projectConversationItemSlots(
   sessionManager: ReadonlySessionEntriesSource,
 ): ConversationHistoryItemSlot[] {
   const physicalEntries = sessionManager.getEntries();
+  const activeBranchEntryIds = new Set(
+    sessionManager.getBranch().map((entry) => entry.id),
+  );
   const physicalIndexById = new Map(
     physicalEntries.map((entry, index) => [entry.id, index]),
   );
@@ -727,6 +736,22 @@ export function projectConversationItemSlots(
       || reserved.kind === "context_hint"
       || reserved.kind === "legacy_bash_execution_notice"
     ) {
+      continue;
+    }
+    if (reserved.kind === "bash_task_notification") {
+      if (!activeBranchEntryIds.has(physicalEntry.id)) continue;
+      positionedItems.push({
+        slot: {
+          item: {
+            kind: "bash_task_notification",
+            id: physicalEntry.id,
+            timestamp: physicalEntry.timestamp,
+            text: reserved.entry.content,
+            tasks: reserved.entry.details.tasks,
+          },
+        },
+        physicalIndex,
+      });
       continue;
     }
 
@@ -799,6 +824,13 @@ function compactConversationItem(
       truncated: id.truncated,
     };
   }
+  if (item.kind === "bash_task_notification") {
+    const text = clipUtf8(item.text, MAX_HISTORY_TEXT_BYTES);
+    return {
+      item: { ...item, text: text.value },
+      truncated: text.truncated,
+    };
+  }
   const body = clipUtf8(item.body, MAX_HISTORY_TEXT_BYTES);
   const result = item.result === undefined
     ? undefined
@@ -819,7 +851,8 @@ export type AgentConversationPeekItem =
       role: "user" | "assistant";
       text: string;
     }
-  | ConversationMessageCard;
+  | ConversationMessageCard
+  | ConversationBashTaskNotification;
 
 function agentPeekItem(
   item: ConversationHistoryItem,
@@ -846,7 +879,7 @@ function fitAgentPeekItem(
     if (item.kind === "message") {
       if (!item.text) break;
       item = { ...item, text: shortenPrefix(item.text) };
-    } else {
+    } else if (item.kind === "session_message") {
       const field = jsonBytes(item.body) >= jsonBytes(item.result ?? "")
         ? "body"
         : "result";
@@ -855,6 +888,9 @@ function fitAgentPeekItem(
       item = field === "body"
         ? { ...item, body: shortenPrefix(value) }
         : { ...item, result: shortenPrefix(value) };
+    } else {
+      if (!item.text) break;
+      item = { ...item, text: shortenPrefix(item.text) };
     }
     bytes = jsonBytes({ items: [item], truncated: false });
   }
@@ -938,6 +974,9 @@ function minimalConversationItem(
     };
   }
   if (item.kind === "compaction") return { ...item };
+  if (item.kind === "bash_task_notification") {
+    return { ...item, text: "Background Bash task update." };
+  }
   return {
     ...item,
     body: "",

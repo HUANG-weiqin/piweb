@@ -24,6 +24,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { LoopList } from "../shared/protocol.js";
+import { BashBackgroundTaskRegistry, type BashTaskCompletion } from "./bash-execution.js";
 import { PiRuntime } from "./pi-runtime.js";
 import { projectConversationHistory } from "./conversation-history.js";
 import type { ComputerToolResult, WindowsDesktopAdapter } from "./computer-use.js";
@@ -942,31 +943,58 @@ describe("PiRuntime session ownership", () => {
     }
   }, 15_000);
 
-  it("routes background Bash task IDs through bash_output", async () => {
+  it("keeps registry-owned Bash tasks across Pi runtime sessions and preserves the launch prefix", async () => {
     const cwd = await temporaryDirectory("piweb-runtime-owned-bash-output-");
     let tools: ToolDefinition[] = [];
-    const runtime = await testRuntime(() => [], async (_created, options) => {
-      tools = options.customTools ?? [];
+    let settingsCreationCount = 0;
+    const completions: BashTaskCompletion[] = [];
+    const observed: string[] = [];
+    const registry = new BashBackgroundTaskRegistry({
+      onCompleted: (task) => completions.push(task),
+      onObserved: (taskId) => observed.push(taskId),
     });
-    const owner = Object.freeze({ conversationId: "output-conversation", runId: "output-run" });
-    const created = await runtime.createSession(cwd, {
+    const runtime = await testRuntime(
+      () => [],
+      async (_created, options) => {
+        tools = options.customTools ?? [];
+      },
+      undefined,
+      () => SettingsManager.inMemory({
+        shellCommandPrefix: settingsCreationCount++ === 0
+          ? "printf old-prefix;"
+          : "printf new-prefix;",
+      }),
+    );
+    const firstOwner = Object.freeze({ conversationId: "output-conversation", runId: "output-run" });
+    const first = await runtime.createSession(cwd, {
       toolMode: "full_access",
-      bashExecutions: { conversationId: owner.conversationId, getOwner: () => owner },
+      bashExecutions: { conversationId: firstOwner.conversationId, getOwner: () => firstOwner },
+      backgroundTasks: registry,
     });
+    let firstDisposed = false;
+    let second: Awaited<ReturnType<typeof runtime.createSession>> | undefined;
     try {
       const bash = tools.find((tool) => tool.name === "bash")!;
-      const output = tools.find((tool) => tool.name === "bash_output")!;
       const started = await bash.execute(
         "background-start",
-        { command: "printf runtime-background-marker", run_in_background: true } as never,
+        { command: "sleep 0.1; printf runtime-background-marker", run_in_background: true } as never,
         undefined,
         undefined,
         undefined as never,
       ) as { content: Array<{ text?: string }>; details?: { piwebBash?: { taskId?: string } } };
       const taskId = started.details?.piwebBash?.taskId;
       expect(taskId).toBeTruthy();
-      expect(started.content[0]?.text).toContain("task_id:");
+      expect(started.content[0]?.text).toContain("do not poll");
 
+      await first.dispose();
+      firstDisposed = true;
+      const secondOwner = Object.freeze({ conversationId: firstOwner.conversationId, runId: "replacement-run" });
+      second = await runtime.createSession(cwd, {
+        toolMode: "full_access",
+        bashExecutions: { conversationId: secondOwner.conversationId, getOwner: () => secondOwner },
+        backgroundTasks: registry,
+      });
+      const output = tools.find((tool) => tool.name === "bash_output")!;
       const result = await output.execute(
         "background-output",
         { task_id: taskId, timeout: 30_000 } as never,
@@ -974,10 +1002,16 @@ describe("PiRuntime session ownership", () => {
         undefined,
         undefined as never,
       ) as { content: Array<{ text?: string }> };
-      expect(result.content.map(({ text }) => text ?? "").join("\n"))
-        .toContain("runtime-background-marker");
+      const resultText = result.content.map(({ text }) => text ?? "").join("\n");
+      expect(resultText).toContain("old-prefix");
+      expect(resultText).toContain("runtime-background-marker");
+      expect(resultText).not.toContain("new-prefix");
+      expect(completions).toMatchObject([{ taskId, status: "completed" }]);
+      expect(observed).toEqual([taskId]);
     } finally {
-      await created.dispose();
+      if (second) await second.dispose();
+      if (!firstDisposed) await first.dispose();
+      await registry.close("dispose");
     }
   }, 15_000);
 

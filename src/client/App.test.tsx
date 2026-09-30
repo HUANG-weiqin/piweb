@@ -1917,7 +1917,6 @@ describe("App", () => {
           armed: false,
         },
         bashActivity: {
-          runId: "33333333-3333-4333-8333-333333333333",
           running: 1,
           stopping: 0,
           cleanupUnknown: false,
@@ -1937,7 +1936,6 @@ describe("App", () => {
         conversationId: CONVERSATION_ID,
         focusId: FOCUS_A_SECOND,
         activity: {
-          runId: "33333333-3333-4333-8333-333333333333",
           running: 0,
           stopping: 1,
           cleanupUnknown: true,
@@ -1965,7 +1963,6 @@ describe("App", () => {
         conversationId: CONVERSATION_ID,
         focusId: FOCUS_A,
         activity: {
-          runId: "33333333-3333-4333-8333-333333333333",
           running: 0,
           stopping: 1,
           cleanupUnknown: true,
@@ -2004,7 +2001,6 @@ describe("App", () => {
   it("hides cached Bash activity while a restored focus awaits its history snapshot", () => {
     const sessionId = startFocusReplacementProject();
     const cachedActivity = {
-      runId: "33333333-3333-4333-8333-333333333333",
       running: 1,
       stopping: 0,
       cleanupUnknown: false,

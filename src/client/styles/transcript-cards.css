@@ -1478,3 +1478,129 @@
   outline: 2px solid var(--rebel-paper);
   outline-offset: 2px;
 }
+
+.bash-task-notification-card {
+  max-width: 760px;
+  margin: 0 auto 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--focus);
+  border-radius: 12px;
+  background: var(--panel);
+}
+
+.bash-task-notification-header,
+.bash-task-notification-task-heading,
+.bash-task-notification-task-facts {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.bash-task-notification-header {
+  justify-content: space-between;
+  color: var(--muted);
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+}
+
+.bash-task-notification-list {
+  display: grid;
+  gap: 8px;
+  margin: 10px 0;
+  padding: 0;
+  list-style: none;
+}
+
+.bash-task-notification-task {
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid var(--line);
+  background: var(--soft);
+}
+
+.bash-task-notification-task-heading {
+  min-width: 0;
+  color: var(--text);
+  font-size: 11px;
+}
+
+.bash-task-notification-task-heading strong {
+  flex: none;
+  color: var(--success);
+}
+
+.bash-task-notification-task.is-failed .bash-task-notification-task-heading strong,
+.bash-task-notification-task.is-killed .bash-task-notification-task-heading strong {
+  color: var(--danger);
+}
+
+.bash-task-notification-task-heading code,
+.bash-task-notification-output-file code {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-family: "Cascadia Code", Consolas, monospace;
+}
+
+.bash-task-notification-task-facts {
+  flex-wrap: wrap;
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.bash-task-notification-output-file {
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+
+.bash-task-notification-text {
+  max-height: 320px;
+  overflow: auto;
+  margin: 0;
+  padding: 8px;
+  border: 1px solid var(--line);
+  color: var(--text);
+  background: var(--soft);
+  font: 11px/1.5 "Cascadia Code", Consolas, monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.transcript > .bash-task-notification-card {
+  max-width: none;
+  margin: 0 0 26px 112px;
+  border: 0;
+  border-top: 1px solid var(--rebel-line);
+  border-bottom: 1px solid var(--rebel-line);
+  border-left: 4px solid var(--rebel-red);
+  border-radius: 0;
+  color: var(--rebel-paper);
+  background: var(--rebel-black);
+}
+
+.transcript .bash-task-notification-task,
+.transcript .bash-task-notification-text {
+  border-color: var(--rebel-line);
+  color: var(--rebel-paper);
+  background: var(--rebel-raised);
+}
+
+.transcript .bash-task-notification-header,
+.transcript .bash-task-notification-task-facts,
+.transcript .bash-task-notification-output-file {
+  color: var(--rebel-paper-muted);
+}
+
+.transcript .bash-task-notification-task-heading strong {
+  color: var(--rebel-paper);
+}
+
+@media (max-width: 760px) {
+  .transcript > .bash-task-notification-card {
+    margin-left: 0;
+  }
+}

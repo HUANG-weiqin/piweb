@@ -559,7 +559,6 @@ describe("ProjectSessionCoordinator", () => {
     vi.spyOn(actor, "stopForReload").mockRejectedValue(error);
     if (cleanupUnknown) {
       vi.spyOn(actor, "getBashActivity").mockReturnValue({
-        runId: RUN_A,
         running: 0,
         stopping: 1,
         cleanupUnknown: true,

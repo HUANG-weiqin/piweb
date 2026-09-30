@@ -9,10 +9,12 @@ import type {
   ModelRuntime,
   ModelRegistry,
   SessionManager as SessionManagerType,
+  BashOperations,
 } from "@earendil-works/pi-coding-agent";
 import {
   SessionManager,
   SettingsManager,
+  createBashToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -49,7 +51,12 @@ import {
   type ConversationActorOpenOptions,
 } from "./conversation-actor.js";
 import { MAX_HISTORY_SNAPSHOT_BYTES } from "./conversation-history.js";
-import type { BashExecutionLifecycle } from "./bash-execution.js";
+import {
+  BashExecutionBudget,
+  createBashExecutionBinding,
+  type BashExecutionBinding,
+  type BashExecutionLifecycle,
+} from "./bash-execution.js";
 import type {
   CreatedPiSession,
   CreatePiSessionOptions,
@@ -62,6 +69,8 @@ import type {
   ConversationDeletionLease,
   ConversationLease,
 } from "./project-store-registry.js";
+
+const BASH_TASK_NOTIFICATION_CUSTOM_TYPE = "piweb.bash_task_notification.v1";
 
 const SESSION_ID = "f74fedb8-ea07-49a6-bd47-3036f7b06a27";
 const FOCUS_ID = "cab0af06-a001-45f7-9084-2a4ac5a1ed56";
@@ -118,6 +127,10 @@ interface FakeSession extends AgentSession {
   promptImplementation(text: string, options?: Parameters<AgentSession["prompt"]>[1]): Promise<void>;
   setSessionNameImplementation(name: string): void;
   resumeCalls: number;
+  customMessages: Array<{
+    message: Parameters<AgentSession["sendCustomMessage"]>[0];
+    options: Parameters<AgentSession["sendCustomMessage"]>[1];
+  }>;
   turnBoundaryPaused: boolean;
   turnBoundaryPauseReleases: number;
   resumeImplementation(
@@ -164,6 +177,7 @@ function fakeSession(): FakeSession {
     promptImplementation: async () => undefined,
     setSessionNameImplementation: () => undefined,
     resumeCalls: 0,
+    customMessages: [],
     turnBoundaryPaused: false,
     turnBoundaryPauseReleases: 0,
     resumeImplementation: async () => undefined,
@@ -188,6 +202,7 @@ function fakeSession(): FakeSession {
     },
     sendCustomMessage: function (message, options) {
       this.resumeCalls++;
+      this.customMessages.push({ message, options });
       return this.resumeImplementation(message, options);
     },
     steer: async function (text: string) {
@@ -267,6 +282,10 @@ class FakeRuntime implements PiRuntimeLike {
     }) as unknown as AgentSession["agent"]["streamFunction"];
   }
   readonly settings = fakeSettings();
+  readonly bashExecutionBudget = new BashExecutionBudget();
+  bashExecutionImplementation: BashOperations["exec"] = async () => ({ exitCode: 0 });
+  enableBackgroundBashBinding = false;
+  bashBinding?: BashExecutionBinding;
   createOptions?: CreatePiSessionOptions;
   disposeCalls = 0;
   activationError?: Error;
@@ -328,6 +347,20 @@ class FakeRuntime implements PiRuntimeLike {
       Object.assign(this.session, { thinkingLevel: level });
       options.sessionManager?.appendThinkingLevelChange(level);
     };
+    const binding = this.enableBackgroundBashBinding
+      && this.bashExecutions === undefined
+      && options.bashExecutions !== undefined
+      ? createBashExecutionBinding({
+          getOwner: options.bashExecutions.getOwner,
+          conversationKey: `${_cwd}\\0${options.bashExecutions.conversationId}`,
+          budget: this.bashExecutionBudget,
+          operations: { exec: (...args) => this.bashExecutionImplementation(...args) },
+          createBaseTool: (operations) => createBashToolDefinition(_cwd, { operations }),
+          onChange: options.bashExecutions.onChange,
+          backgroundTasks: options.backgroundTasks,
+        })
+      : undefined;
+    this.bashBinding = binding;
     return {
       session: this.session,
       settings: this.settings,
@@ -372,9 +405,12 @@ class FakeRuntime implements PiRuntimeLike {
       },
       dynamicProviderNames: () => new Set(),
       ...(this.computerUse === undefined ? {} : { computerUse: this.computerUse }),
-      ...(this.bashExecutions === undefined ? {} : { bashExecutions: this.bashExecutions }),
+      ...((this.bashExecutions ?? binding?.lifecycle) === undefined
+        ? {}
+        : { bashExecutions: this.bashExecutions ?? binding!.lifecycle }),
       dispose: async () => {
         this.disposeCalls++;
+        await binding?.lifecycle.dispose();
         this.session.dispose();
       },
     };
@@ -529,6 +565,59 @@ async function openActor(
   };
 }
 
+async function invokeActorBashTool(
+  fixture: ActorFixture,
+  name: string,
+  input: unknown,
+): Promise<{ details?: unknown }> {
+  const tool = fixture.runtime.bashBinding?.tools.find((candidate) =>
+    candidate.name === name
+  );
+  if (!tool) throw new Error(`Missing fake Bash tool: ${name}`);
+  return await tool.execute(
+    "actor-test-tool-call",
+    input as never,
+    new AbortController().signal,
+    undefined,
+    {
+      cwd: fixture.project.cwd,
+      model: undefined,
+      thinkingLevel: "off",
+      sessionManager: fixture.manager,
+    } as never,
+  ) as { details?: unknown };
+}
+
+function actorBashTaskId(result: { details?: unknown }): string {
+  const details = result.details as {
+    piwebBash?: { taskId?: unknown };
+  } | undefined;
+  if (typeof details?.piwebBash?.taskId !== "string") {
+    throw new Error("Fake Bash result did not contain a task_id");
+  }
+  return details.piwebBash.taskId;
+}
+
+function persistBashNotification(
+  fixture: ActorFixture,
+  message: Parameters<AgentSession["sendCustomMessage"]>[0],
+): void {
+  fixture.manager.appendCustomMessageEntry(
+    message.customType,
+    message.content,
+    message.display,
+    message.details,
+  );
+  fixture.runtime.session.eventListener?.(nativeEvent({
+    type: "message_end",
+    message: {
+      role: "custom",
+      ...message,
+      timestamp: Date.now(),
+    },
+  }));
+}
+
 function automaticTitleMessage(text: string): AssistantMessage {
   return {
     role: "assistant",
@@ -654,6 +743,222 @@ describe("ConversationActor Bash lifecycle", () => {
     await fixture.actor.dispose();
   });
 
+  it("delivers accepted background completion through the running run and wakes a registered wait", async () => {
+    const runtime = new FakeRuntime();
+    runtime.enableBackgroundBashBinding = true;
+    const fixture = await openActor({ runtime });
+    const promptStarted = deferred<void>();
+    const promptFinished = deferred<void>();
+    fixture.runtime.session.promptImplementation = async () => {
+      fixture.runtime.session.isStreaming = true;
+      promptStarted.resolve();
+      await promptFinished.promise;
+      fixture.runtime.session.isStreaming = false;
+    };
+    const running = fixture.actor.startPrompt({
+      runId: RUN_A,
+      text: "wait for the background task",
+      origin: "browser",
+    });
+    await promptStarted.promise;
+
+    const taskStarted = deferred<void>();
+    const taskFinished = deferred<{ exitCode: number | null }>();
+    fixture.runtime.bashExecutionImplementation = async (_command, _cwd, options) => {
+      options.onData(Buffer.from("background output"));
+      taskStarted.resolve();
+      return taskFinished.promise;
+    };
+    const taskId = actorBashTaskId(await invokeActorBashTool(
+      fixture,
+      "bash",
+      { command: "background", run_in_background: true },
+    ));
+    await taskStarted.promise;
+
+    const ownership = fixture.actor.currentRunOwnership(RUN_A)!;
+    const terminalCauses: unknown[] = [];
+    const handle = fixture.actor.installWaitAttempt(ownership, {
+      targets: [{ conversationId: TARGET_CONVERSATION_ID, runId: RUN_B }],
+      onTerminal: (cause) => terminalCauses.push(cause),
+    });
+    fixture.actor.onWaitingSteerAdmitted(ownership, handle, () => true);
+
+    taskFinished.resolve({ exitCode: 0 });
+    await vi.waitFor(() => expect(fixture.runtime.session.customMessages.some(
+      ({ message }) => message.customType === BASH_TASK_NOTIFICATION_CUSTOM_TYPE,
+    )).toBe(true));
+    const notification = fixture.runtime.session.customMessages.find(
+      ({ message }) => message.customType === BASH_TASK_NOTIFICATION_CUSTOM_TYPE,
+    )!.message;
+    expect(notification.display).toBe(true);
+    expect(notification.details).toMatchObject({ tasks: [{ taskId, status: "completed" }] });
+    expect(notification.content).toContain("background output");
+    expect(terminalCauses).toEqual([{
+      kind: "bash_task",
+      taskIds: [taskId],
+    }]);
+    expect(fixture.actor.claimBashTaskNotificationForWait(ownership)).toBeUndefined();
+    expect(fixture.events).not.toContainEqual({
+      type: "history_changed",
+      conversationId: CONVERSATION_ID,
+    });
+
+    persistBashNotification(fixture, notification);
+    await vi.waitFor(() => expect(fixture.events).toContainEqual({
+      type: "history_changed",
+      conversationId: CONVERSATION_ID,
+    }));
+    expect(fixture.actor.claimBashTaskNotificationForWait(ownership)).toBeUndefined();
+
+    promptFinished.resolve();
+    await running;
+    await fixture.actor.dispose();
+  });
+
+  it("does not resubmit an accepted streaming notification lost before raw observation", async () => {
+    const runtime = new FakeRuntime();
+    runtime.enableBackgroundBashBinding = true;
+    const fixture = await openActor({ runtime });
+    const promptStarted = deferred<void>();
+    const promptFinished = deferred<void>();
+    runtime.session.promptImplementation = async () => {
+      runtime.session.isStreaming = true;
+      promptStarted.resolve();
+      await promptFinished.promise;
+      runtime.session.isStreaming = false;
+    };
+    const running = fixture.actor.startPrompt({
+      runId: RUN_A,
+      text: "start a task then abort the turn",
+      origin: "browser",
+    });
+    await promptStarted.promise;
+
+    const taskStarted = deferred<void>();
+    const taskFinished = deferred<{ exitCode: number | null }>();
+    runtime.bashExecutionImplementation = async () => {
+      taskStarted.resolve();
+      return taskFinished.promise;
+    };
+    const taskId = actorBashTaskId(await invokeActorBashTool(
+      fixture,
+      "bash",
+      { command: "accepted but not observed", run_in_background: true },
+    ));
+    await taskStarted.promise;
+    const ownership = fixture.actor.currentRunOwnership(RUN_A)!;
+    taskFinished.resolve({ exitCode: 0 });
+    await vi.waitFor(() => {
+      expect(fixture.actor.peekBashTaskNotificationForWait(ownership)).toEqual([taskId]);
+    });
+    expect(fixture.actor.peekBashTaskNotificationForWait(ownership)).toEqual([taskId]);
+    expect(fixture.actor.claimBashTaskNotificationForWait(ownership, ["other-task"]))
+      .toBeUndefined();
+    expect(fixture.actor.peekBashTaskNotificationForWait(ownership)).toEqual([taskId]);
+    expect(fixture.actor.claimBashTaskNotificationForWait(ownership, [taskId]))
+      .toEqual([taskId]);
+    expect(fixture.actor.peekBashTaskNotificationForWait(ownership)).toBeUndefined();
+    expect(fixture.actor.claimBashTaskNotificationForWait(ownership, [taskId]))
+      .toBeUndefined();
+    const notifications = () => runtime.session.customMessages.filter(
+      ({ message }) => message.customType === BASH_TASK_NOTIFICATION_CUSTOM_TYPE,
+    );
+    expect(notifications()).toHaveLength(1);
+    expect(notifications()[0]!.options).toMatchObject({
+      triggerTurn: true,
+      deliverAs: "steer",
+    });
+    expect(fixture.manager.getEntries()).not.toContainEqual(expect.objectContaining({
+      type: "custom_message",
+      customType: BASH_TASK_NOTIFICATION_CUSTOM_TYPE,
+    }));
+
+    await fixture.actor.abort(RUN_A);
+    promptFinished.resolve();
+    await expect(running).resolves.toMatchObject({ outcome: "aborted" });
+    expect(fixture.actor.hasPendingBashNotifications()).toBe(false);
+
+    runtime.session.promptImplementation = async () => undefined;
+    await fixture.actor.startPrompt({ runId: RUN_B, text: "continue", origin: "browser" });
+    expect(notifications()).toHaveLength(1);
+    expect(fixture.actor.hasPendingBashNotifications()).toBe(false);
+    await fixture.actor.dispose();
+  });
+
+  it("prepends completed-task notifications before a receipt-only inbox resume", async () => {
+    const runtime = new FakeRuntime();
+    runtime.enableBackgroundBashBinding = true;
+    const manager = SessionManager.inMemory(process.cwd(), { id: CONVERSATION_ID });
+    appendReservedCustomEntry(manager, createConversationMetaEntry(profile()));
+    const fixture = await openActor({ runtime, sessionManager: manager });
+    const promptStarted = deferred<void>();
+    const promptFinished = deferred<void>();
+    fixture.runtime.session.promptImplementation = async () => {
+      fixture.runtime.session.isStreaming = true;
+      promptStarted.resolve();
+      await promptFinished.promise;
+      fixture.runtime.session.isStreaming = false;
+    };
+    const firstRun = fixture.actor.startPrompt({
+      runId: RUN_A,
+      text: "start a background task",
+      origin: "browser",
+    });
+    await promptStarted.promise;
+
+    const taskStarted = deferred<void>();
+    const taskFinished = deferred<{ exitCode: number | null }>();
+    fixture.runtime.bashExecutionImplementation = async (_command, _cwd, options) => {
+      options.onData(Buffer.from("receipt-only task output"));
+      taskStarted.resolve();
+      return taskFinished.promise;
+    };
+    const taskId = actorBashTaskId(await invokeActorBashTool(
+      fixture,
+      "bash",
+      { command: "receipt-only", run_in_background: true },
+    ));
+    await taskStarted.promise;
+    promptFinished.resolve();
+    await firstRun;
+
+    const registry = fixture.runtime.createOptions?.backgroundTasks;
+    const previousBinding = fixture.runtime.bashBinding;
+    await fixture.actor.switchRole({
+      ...fixture.actor.profile.role,
+      revision: fixture.actor.profile.role.revision + 1,
+    }, {});
+    expect(fixture.runtime.createOptions?.backgroundTasks).toBe(registry);
+    expect(fixture.runtime.bashBinding).not.toBe(previousBinding);
+    expect(fixture.actor.getBashActivity()).toMatchObject({ running: 1 });
+
+    taskFinished.resolve({ exitCode: 0 });
+    await vi.waitFor(() => expect(fixture.actor.hasPendingBashNotifications()).toBe(true));
+    fixture.runtime.session.resumeImplementation = async (message) => {
+      if (message.customType === BASH_TASK_NOTIFICATION_CUSTOM_TYPE) {
+        persistBashNotification(fixture, message);
+      }
+    };
+    await fixture.actor.resumeMessages({ runId: RUN_B });
+
+    const sent = fixture.runtime.session.customMessages.map(({ message, options }) => ({
+      type: message.customType,
+      triggerTurn: options?.triggerTurn,
+      details: message.details,
+    }));
+    const taskIndex = sent.findIndex(({ type }) => type === BASH_TASK_NOTIFICATION_CUSTOM_TYPE);
+    const resumeIndex = sent.findIndex(({ type }) => type === "workbench.inbox_resume.v1");
+    expect(taskIndex).toBeGreaterThanOrEqual(0);
+    expect(resumeIndex).toBeGreaterThan(taskIndex);
+    expect(sent[taskIndex]).toMatchObject({
+      triggerTurn: false,
+      details: { tasks: [{ taskId }] },
+    });
+    expect(fixture.actor.hasPendingBashNotifications()).toBe(false);
+    await fixture.actor.dispose();
+  });
+
   it("requests stop synchronously on abort, not physical agent_end/compaction", async () => {
     const runtime = new FakeRuntime();
     const bash = fakeBashLifecycle();
@@ -696,7 +1001,7 @@ describe("ConversationActor Bash lifecycle", () => {
     await expect(running).resolves.toMatchObject({ outcome: "failed" });
     expect(bash.close).toHaveBeenCalledWith(expect.objectContaining({ runId: RUN_A }), "reload");
     expect(fixture.actor.getState().fatalError).toMatch(/Bash.*unconfirmed/i);
-    expect(fixture.actor.getBashActivity()).toMatchObject({ runId: RUN_A, stopping: 1, cleanupUnknown: true });
+    expect(fixture.actor.getBashActivity()).toEqual({ running: 0, stopping: 1, cleanupUnknown: true });
     expect(fixture.actor.getLoopList().armed).toBe(false);
     expect(() => fixture.actor.startPrompt({ runId: RUN_B, text: "retry", origin: "browser" })).toThrow(/faulted/i);
     await fixture.actor.dispose();

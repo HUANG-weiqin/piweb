@@ -12,6 +12,7 @@ import {
 import type { ComponentProps } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
+  ConversationBashTaskNotification,
   ConversationMessageCard,
   ConversationRoleSnapshot,
   PendingPromptAdmissionSnapshot as PendingAdmission,
@@ -141,7 +142,6 @@ describe("Chat", () => {
       focus,
       items: [],
       bashActivity: {
-        runId: "33333333-3333-4333-8333-333333333333",
         running: 2,
         stopping: 1,
         cleanupUnknown: true,
@@ -2336,6 +2336,59 @@ describe("Chat", () => {
     expect(markers[2]).toHaveTextContent("模型未记录");
     expect(markers[2]).toHaveAccessibleName("上下文已压缩：模型未记录");
     expect(markers[1]).not.toHaveTextContent("未使用模型");
+  });
+
+  it("renders ordered Bash task notifications as standalone transcript cards", () => {
+    const notification: ConversationBashTaskNotification = {
+      kind: "bash_task_notification",
+      id: "00000007",
+      timestamp: "2026-07-19T10:00:00.000Z",
+      text: "Task update.\nOutput tail:\npassed 42 tests",
+      tasks: [{
+        taskId: "f7decc27-b4ed-4338-85ec-4efc6c3c2c50",
+        command: "npm test",
+        status: "completed",
+        exitCode: 0,
+        durationMs: 125,
+        outputFile: "C:\\temp\\bash-output.txt",
+      }],
+    };
+    const { container } = render(view({
+      items: [messageItem({
+        id: "assistant-before-bash-notice",
+        runId: "run-1",
+        role: "assistant",
+        text: "Starting the check.",
+        thinking: "",
+        tools: [],
+      }), notification, messageItem({
+        id: "assistant-after-bash-notice",
+        runId: "run-1",
+        role: "assistant",
+        text: "The check passed.",
+        thinking: "",
+        tools: [],
+      })],
+    }));
+
+    const card = screen.getByRole("article", {
+      name: "后台 Bash 任务通知，共 1 项",
+    });
+    expect(card).toHaveTextContent("npm test");
+    expect(card).toHaveTextContent("完成");
+    expect(card).toHaveTextContent("退出码 0");
+    expect(card).toHaveTextContent("passed 42 tests");
+    expect(card.querySelector("time")).toHaveAttribute(
+      "datetime",
+      notification.timestamp,
+    );
+    expect(card.querySelector("button")).toBeNull();
+    expect(Array.from(container.querySelector(".transcript")?.children ?? [])
+      .map((element) => element.className)).toEqual([
+      "message assistant",
+      "bash-task-notification-card",
+      "message assistant",
+    ]);
   });
 
   it("keeps outgoing session messages at their transcript timepoint", () => {

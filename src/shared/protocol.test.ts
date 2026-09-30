@@ -42,7 +42,7 @@ const transitionDiagnostics = {
 
 describe("parseClientCommand", () => {
   it("uses the run-correlated protocol version", () => {
-    expect(PROTOCOL_VERSION).toBe(64);
+    expect(PROTOCOL_VERSION).toBe(65);
   });
 
   it("accepts supported commands", () => {
@@ -1909,7 +1909,6 @@ describe("parseServerEvent", () => {
 
   it("validates focused aggregate Bash activity without job rows", () => {
     const bashActivity = {
-      runId,
       running: 2,
       stopping: 1,
       cleanupUnknown: true,
@@ -1953,11 +1952,21 @@ describe("parseServerEvent", () => {
       focusId,
       activity: bashActivity,
     });
+    expect(parseServerEvent({
+      type: "bash_activity",
+      sessionId,
+      conversationId,
+      focusId,
+      activity: { running: 4, stopping: 4, cleanupUnknown: false },
+    })).toMatchObject({
+      activity: { running: 4, stopping: 4 },
+    });
     for (const activity of [
       { ...bashActivity, running: -1 },
       { ...bashActivity, running: 5, stopping: 0 },
-      { ...bashActivity, running: 3, stopping: 2 },
+      { ...bashActivity, running: 0, stopping: 5 },
       { ...bashActivity, running: 1.5 },
+      { ...bashActivity, runId },
       { ...bashActivity, extra: [{ executionId: "must-not-cross-wire" }] },
     ]) {
       expect(() => parseServerEvent({
@@ -1966,6 +1975,127 @@ describe("parseServerEvent", () => {
         conversationId,
         focusId,
         activity,
+      })).toThrow();
+    }
+    expect(parseServerEvent({
+      type: "conversation_snapshot",
+      sessionId,
+      conversationId,
+      focusId,
+      projectionSeq: 0,
+      items: [{
+        kind: "bash_task_notification",
+        id: "00000002",
+        timestamp: "2026-09-30T10:00:00.000Z",
+        text: "Task completed; inspect status and output.",
+        tasks: [{
+          taskId: "f7decc27-b4ed-4338-85ec-4efc6c3c2c50",
+          command: "npm test",
+          status: "completed",
+          exitCode: 0,
+          durationMs: 125,
+        }],
+      }],
+      pendingPrompts: [],
+      window: { omittedBefore: false, startsMidTurn: false, contentTruncated: false },
+    })).toMatchObject({
+      type: "conversation_snapshot",
+      items: [{ kind: "bash_task_notification", tasks: [{ status: "completed" }] }],
+    });
+    const validTask = {
+      taskId: "f7decc27-b4ed-4338-85ec-4efc6c3c2c50",
+      command: "npm test",
+      status: "completed",
+      exitCode: 0,
+      durationMs: 125,
+    };
+    const parseNotificationItem = (item: unknown) => parseServerEvent({
+      type: "conversation_snapshot",
+      sessionId,
+      conversationId,
+      focusId,
+      projectionSeq: 0,
+      items: [item],
+      pendingPrompts: [],
+      window: { omittedBefore: false, startsMidTurn: false, contentTruncated: false },
+    });
+    expect(parseNotificationItem({
+      kind: "bash_task_notification",
+      id: "00000002",
+      timestamp: "2026-09-30T10:00:00.000Z",
+      text: "Task update.",
+      tasks: [
+        { ...validTask, status: "failed", exitCode: 0 },
+        {
+          ...validTask,
+          taskId: "a48d6c03-b9c9-4a5b-a6e6-0c5a4405f42e",
+          status: "killed",
+          exitCode: null,
+          stopReason: "timeout",
+        },
+      ],
+    })).toMatchObject({
+      items: [{ tasks: [{ status: "failed", exitCode: 0 }, { status: "killed" }] }],
+    });
+    for (const item of [
+      {
+        kind: "bash_task_notification",
+        id: "00000002",
+        timestamp: "2026-09-30T10:00:00.000Z",
+        text: "Task update.",
+        tasks: Array.from({ length: 5 }, (_, index) => ({
+          ...validTask,
+          taskId: `f7decc27-b4ed-4338-85ec-4efc6c3c2c5${index}`,
+        })),
+      },
+      {
+        kind: "bash_task_notification",
+        id: "00000002",
+        timestamp: "2026-09-30T10:00:00.000Z",
+        text: "界".repeat(2_731),
+        tasks: [validTask],
+      },
+      {
+        kind: "bash_task_notification",
+        id: "00000002",
+        timestamp: "2026-09-30T10:00:00.000Z",
+        text: "Task update.",
+        tasks: [{ ...validTask, command: "界".repeat(86) }],
+      },
+      {
+        kind: "bash_task_notification",
+        id: "00000002",
+        timestamp: "2026-09-30T10:00:00.000Z",
+        text: "Task update.",
+        tasks: [{ ...validTask, outputFile: "x".repeat(4_097) }],
+      },
+    ]) {
+      expect(() => parseNotificationItem(item)).toThrow();
+    }
+    for (const task of [
+      { ...validTask, status: "completed", exitCode: 1 },
+      { ...validTask, status: "completed", partial: true },
+      { ...validTask, status: "completed", stopReason: "manual" },
+      { ...validTask, status: "failed", stopReason: "timeout" },
+      { ...validTask, status: "killed", stopReason: "other" },
+      { ...validTask, status: "killed" },
+      { ...validTask, extra: true },
+    ]) {
+      expect(() => parseServerEvent({
+        type: "conversation_snapshot",
+        sessionId,
+        conversationId,
+        focusId,
+        projectionSeq: 0,
+        items: [{
+          kind: "bash_task_notification",
+          id: "00000002",
+          timestamp: "2026-09-30T10:00:00.000Z",
+          text: "Task update.",
+          tasks: [task],
+        }],
+        pendingPrompts: [],
+        window: { omittedBefore: false, startsMidTurn: false, contentTruncated: false },
       })).toThrow();
     }
     expect(() => parseServerEvent({
