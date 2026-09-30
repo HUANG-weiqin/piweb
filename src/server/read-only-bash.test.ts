@@ -12,7 +12,7 @@ import {
   createBashToolDefinition,
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createReadOnlyBashTool, isReviewedCommand } from "./read-only-bash.js";
 
 /**
@@ -296,6 +296,26 @@ describe("createReadOnlyBashTool", { timeout: TEST_TIMEOUT_MS }, () => {
       await expect(executeTool(tool, { command, timeout: COMMAND_TIMEOUT_SECONDS })).resolves.toBeDefined();
     },
   );
+
+  it("reviews before calling injected operations and keeps spawn sanitation", async () => {
+    const exec = vi.fn(async (
+      _command: string,
+      _cwd: string,
+      options: { onData(data: Buffer): void; env?: NodeJS.ProcessEnv },
+    ) => {
+      options.onData(Buffer.from("reviewed query\n"));
+      return { exitCode: 0 };
+    });
+    const tool = createReadOnlyBashTool(cwd, TEST_BASH_PATH, { exec });
+    await expect(executeTool(tool, { command: "rm victim" }))
+      .rejects.toThrow(/read-only/i);
+    expect(exec).not.toHaveBeenCalled();
+    expect(outputText(await executeTool(tool, { command: "pwd" })))
+      .toContain("reviewed query");
+    expect(exec).toHaveBeenCalledWith("pwd", cwd, expect.objectContaining({
+      env: expect.objectContaining({ GIT_OPTIONAL_LOCKS: "0", GIT_PAGER: "cat" }),
+    }));
+  });
 
   it("executes a real rg search with alternation", async () => {
     const result = await executeTool(tool, {

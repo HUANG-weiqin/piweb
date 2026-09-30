@@ -1,5 +1,6 @@
 import {
   createBashToolDefinition,
+  type BashOperations,
   defineTool,
   type BashSpawnContext,
   type ToolDefinition,
@@ -321,9 +322,11 @@ function sanitizeSpawnContext(context: BashSpawnContext): BashSpawnContext {
 export function createReadOnlyBashTool(
   cwd: string,
   shellPath?: string,
+  operations?: BashOperations,
 ): ToolDefinition {
   const bash = createBashToolDefinition(cwd, {
     shellPath,
+    operations,
     spawnHook: sanitizeSpawnContext,
   });
   return defineTool({

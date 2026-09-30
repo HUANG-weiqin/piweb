@@ -17,6 +17,7 @@ import {
   MAX_PROMPT_IMAGE_COUNT,
   MIN_COMPACTION_THRESHOLD_PERCENT,
   promptImageMimeType,
+  type ConversationBashNotice,
   type ConversationCompactionMarker,
   type ConversationImageLocator,
   type ConversationRoleSnapshot,
@@ -204,6 +205,12 @@ function formatTimelineTime(timestamp: string): string {
   return Number.isNaN(date.valueOf())
     ? timestamp
     : TIMELINE_TIME_FORMAT.format(date);
+}
+
+function bashNoticeSeverityLabel(severity: ConversationBashNotice["severity"]): string {
+  if (severity === "warning") return "警告";
+  if (severity === "error") return "错误";
+  return "提示";
 }
 
 function editBudgetRemainingFilesByRun(
@@ -470,6 +477,17 @@ function ChatView({
     ? `${observationSessionId}:${chat.focus.conversationId}`
     : "unfocused";
   const loopListItems = loopList.items;
+  const bashActivity = chat.bashActivity;
+  const showBashActivity = Boolean(
+    conversationReady
+    && chat.focus
+    && bashActivity
+    && (
+      bashActivity.running > 0
+      || bashActivity.stopping > 0
+      || bashActivity.cleanupUnknown
+    ),
+  );
   const loopListEmpty = loopListItems.length === 0;
   const completedLoopListItems = loopListItems.filter(
     (item) => item.status === "completed",
@@ -875,6 +893,21 @@ function ChatView({
       </div>}
       {conversationReady && !blocks.length && <div className="empty"><div>π</div><h1>想做点什么？</h1><p>Pi 可以读取、修改文件并执行命令。</p></div>}
       {blocks.map((block) => {
+        if (block.kind === "bash_notice") {
+          const severityLabel = bashNoticeSeverityLabel(block.severity);
+          return <aside
+            key={`${transcriptRenderScopeKey}:bash-notice:${block.id}`}
+            className={`bash-notice bash-notice-${block.severity}`}
+            role="note"
+            aria-label={`后台 Bash ${severityLabel}`}
+          >
+            <time dateTime={block.timestamp}>
+              {formatTimelineTime(block.timestamp)}
+            </time>
+            <strong>BASH · {severityLabel}</strong>
+            <span>{block.text}</span>
+          </aside>;
+        }
         if (block.kind === "compaction") {
           const provenanceLabel = compactionMarkerLabel(block.provenance);
           return <div
@@ -995,6 +1028,18 @@ function ChatView({
           closeMobileSheet();
         }}
       />}
+      {showBashActivity && bashActivity && <div
+        className={`bash-activity-strip${bashActivity.cleanupUnknown ? " cleanup-unknown" : ""}`}
+        role="status"
+        aria-label="后台命令状态"
+        aria-live="polite"
+        aria-atomic="true"
+      >
+        <strong>后台 Bash</strong>
+        <span>执行中 {bashActivity.running}</span>
+        <span>停止中 {bashActivity.stopping}</span>
+        {bashActivity.cleanupUnknown && <strong>停止状态未确认</strong>}
+      </div>}
       {pendingAdmissions.length > 0 && <section
         className={`pending-admissions${mobile ? " mobile-sheet-surface" : ""}`}
         aria-label={mobile ? "等待中" : "等待处理的消息"}

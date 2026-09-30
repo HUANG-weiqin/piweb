@@ -1577,6 +1577,19 @@ case "set_thinking":
       return;
     }
 
+    if (event.type === "bash_activity") {
+      if (event.conversationId === view.conversationId && view.focusId !== undefined) {
+        this.emit({
+          type: "bash_activity",
+          sessionId: view.sessionId,
+          conversationId: event.conversationId,
+          focusId: view.focusId,
+          activity: event.activity,
+        });
+      }
+      return;
+    }
+
     if (event.type === "image_message_persisted") {
       if (event.conversationId === view.conversationId && view.focusId !== undefined) {
         this.publishFocusedConversationSnapshot();
@@ -1937,6 +1950,7 @@ case "set_thinking":
             text: admission.text,
           })),
           loopList: actor.getLoopList(),
+          bashActivity: actor.getBashActivity(),
           window: projection.window,
         };
       };

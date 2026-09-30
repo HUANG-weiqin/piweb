@@ -227,6 +227,7 @@ class FakeRuntime implements PiRuntimeLike {
   refresh: () => Promise<void> = async () => undefined;
   extensionErrorHandler?: (error: ExtensionError) => void;
   readonly startupExtensionErrors: ExtensionError[] = [];
+  bashExecutions?: CreatedPiSession["bashExecutions"];
 
   private readonly listeners = new Set<() => void>();
   private readonly credentialRevisions = new Map<string, number>();
@@ -273,6 +274,7 @@ class FakeRuntime implements PiRuntimeLike {
         return this.startupExtensionErrors.splice(0);
       },
       dynamicProviderNames: () => new Set(),
+      ...(this.bashExecutions === undefined ? {} : { bashExecutions: this.bashExecutions }),
       dispose: () => {
         disposePromise ??= (async () => {
           if (created.session.isStreaming) await created.session.abort();
@@ -2474,6 +2476,80 @@ describe("PiConnection coordinated controls", () => {
 });
 
 describe("PiConnection coordinated project view", () => {
+  it("projects focused Bash activity live and on reconnect without crossing owner/focus", async () => {
+    const runtime = new FakeRuntime();
+    let activity = { running: 0, stopping: 0, cleanupUnknown: false };
+    runtime.bashExecutions = {
+      activity: () => ({ ...activity }),
+      requestStop: () => undefined,
+      close: async () => {
+        activity = { running: 0, stopping: 0, cleanupUnknown: false };
+        return { executions: [], cleanupUnknown: false };
+      },
+      dispose: async () => ({ executions: [], cleanupUnknown: false }),
+    };
+    const harness = await coordinatedConnectionHarness(runtime);
+    const release = deferred();
+    let running: Promise<void> | undefined;
+    let reconnect: PiConnection | undefined;
+    try {
+      await initializeNewConversation(harness);
+      const focused = latestState(harness.events);
+      expect(harness.events.findLast((event) => event.type === "conversation_snapshot"))
+        .toMatchObject({ bashActivity: null });
+      const binding = runtime.lastCreateOptions!.bashExecutions!;
+      runtime.created.at(-1)!.prompt = () => release.promise;
+      running = harness.connection.handle({
+        type: "prompt", sessionId: SESSION_A,
+        conversationId: focused.conversationId!, focusId: focused.focusId!,
+        runId: RUN_A, text: "background commands",
+      });
+      await vi.waitFor(() => expect(binding.getOwner()).toBeDefined());
+      const owner = binding.getOwner()!;
+      activity = { running: 2, stopping: 0, cleanupUnknown: false };
+      binding.onChange?.(owner);
+      const live = harness.events.findLast((event) => event.type === "bash_activity");
+      expect(live).toMatchObject({
+        type: "bash_activity", sessionId: SESSION_A,
+        conversationId: focused.conversationId, focusId: focused.focusId,
+        activity: { runId: RUN_A, running: 2, stopping: 0, cleanupUnknown: false },
+      });
+      expect(parseServerEvent(live)).toEqual(live);
+      const before = harness.events.length;
+      binding.onChange?.({ ...owner });
+      expect(harness.events).toHaveLength(before);
+
+      const reconnectEvents: ServerEvent[] = [];
+      reconnect = new PiConnection((event) => reconnectEvents.push(event), runtime,
+        async () => ({ coordinator: harness.coordinator, roles: harness.roles }));
+      await reconnect.handle({
+        type: "initialize", commandId: randomUUID(), sessionId: SESSION_B, cwd: harness.cwd,
+        conversation: { kind: "open", conversationId: focused.conversationId! },
+      });
+      expect(reconnectEvents.findLast((event) => event.type === "conversation_snapshot"))
+        .toMatchObject({ sessionId: SESSION_B, bashActivity: { runId: RUN_A, running: 2 } });
+
+      await initializeNewConversation(harness, SESSION_C);
+      const changedFocus = latestState(harness.events);
+      expect(changedFocus.conversationId).not.toBe(focused.conversationId);
+      const beforeStop = harness.events.filter((event) => event.type === "bash_activity").length;
+      activity = { running: 0, stopping: 2, cleanupUnknown: false };
+      binding.onChange?.(owner);
+      expect(harness.events.filter((event) => event.type === "bash_activity")).toHaveLength(beforeStop);
+      expect(reconnectEvents.findLast((event) => event.type === "bash_activity"))
+        .toMatchObject({ sessionId: SESSION_B, activity: { runId: RUN_A, stopping: 2 } });
+      release.resolve();
+      await running;
+      expect(reconnectEvents.findLast((event) => event.type === "conversation_snapshot"))
+        .toMatchObject({ sessionId: SESSION_B, bashActivity: null });
+    } finally {
+      release.resolve();
+      await running?.catch(() => undefined);
+      await reconnect?.dispose();
+      await harness.cleanup();
+    }
+  });
+
   it("projects LoopList snapshots and focus-correlated low-frequency updates", async () => {
     const harness = await coordinatedConnectionHarness();
     try {

@@ -7,6 +7,7 @@ import {
 } from "../shared/protocol.js";
 import { EDIT_BUDGET_CUSTOM_TYPE } from "./edit-budget.js";
 import {
+  BASH_EXECUTION_NOTICE_CUSTOM_TYPE,
   COMPACTION_THRESHOLD_CUSTOM_TYPE,
   CONTEXT_HINT_CUSTOM_TYPE,
   CONVERSATION_CARD_CUSTOM_TYPE,
@@ -26,6 +27,7 @@ import {
   SERVICE_TIER_CUSTOM_TYPE,
   aggregateReservedConversationEntries,
   appendReservedCustomEntry,
+  createBashExecutionNoticeEntry,
   createCompactionThresholdEntry,
   createConversationCardEntry,
   createConversationMessageEntry,
@@ -40,6 +42,7 @@ import {
   createMessageDeliveryReceiptEntry,
   normalizeConversationMessageSummary,
   parseConversationCardEntry,
+  parseBashExecutionNoticeEntry,
   parseCompactionThresholdEntry,
   parseEditGateEntry,
   parseConversationMessageEntry,
@@ -943,6 +946,11 @@ describe("conversation reserved entries", () => {
     const messageEntry = createConversationMessageEntry(message());
     const run = createRunSettlementEntry(settlement());
     const operation = createMetaOperationEntry(startedOperation());
+    const notice = createBashExecutionNoticeEntry({
+      runId: randomUUID(),
+      severity: "warning",
+      text: "测试或构建已返回，但后台命令仍在运行。",
+    });
 
     expect(parseReservedConversationEntry(meta)).toEqual({
       kind: "conversation_meta",
@@ -964,6 +972,48 @@ describe("conversation reserved entries", () => {
       kind: "meta_operation",
       entry: operation,
     });
+    expect(notice).toEqual({
+      customType: BASH_EXECUTION_NOTICE_CUSTOM_TYPE,
+      content: "测试或构建已返回，但后台命令仍在运行。",
+      display: true,
+      details: { runId: notice.details.runId, severity: "warning" },
+    });
+    expect(parseReservedConversationEntry(notice)).toEqual({
+      kind: "bash_execution_notice",
+      entry: notice,
+    });
+    expect(aggregateReservedConversationEntries([notice])).toMatchObject({
+      deliveredMessageIds: [],
+      runSettlements: [],
+    });
+    expect(() => parseBashExecutionNoticeEntry({
+      ...notice,
+      display: false,
+    })).toThrow();
+    expect(() => parseBashExecutionNoticeEntry({
+      ...notice,
+      details: { ...notice.details, extra: true },
+    })).toThrow();
+    expect(() => parseBashExecutionNoticeEntry({
+      ...notice,
+      extra: true,
+    })).toThrow();
+    expect(() => parseBashExecutionNoticeEntry({
+      ...notice,
+      content: "界".repeat(2_731),
+    })).toThrow(/UTF-8 bytes/);
+    expect(() => parseReservedConversationEntry({
+      type: "custom",
+      id: "00000002",
+      parentId: null,
+      timestamp,
+      customType: BASH_EXECUTION_NOTICE_CUSTOM_TYPE,
+      data: notice,
+    })).toThrow();
+    expect(() => appendReservedCustomEntry(
+      { appendCustomEntry: () => "entry" },
+      notice as never,
+    )).toThrow(/non-context/i);
     const resume = {
       customType: "piweb.compaction_resume.v1",
       content:
@@ -1059,12 +1109,43 @@ describe("conversation reserved entries", () => {
       kind: "conversation_message",
       entry: incoming,
     });
+    const notice = createBashExecutionNoticeEntry({
+      runId: randomUUID(),
+      severity: "info",
+      text: "后台命令仍在运行。",
+    });
+    const noticeId = manager.appendCustomMessageEntry(
+      notice.customType,
+      notice.content,
+      notice.display,
+      notice.details,
+    );
+    expect(parseReservedConversationEntry(manager.getEntry(noticeId))).toEqual({
+      kind: "bash_execution_notice",
+      entry: notice,
+    });
+    expect(manager.buildSessionContext().messages).toContainEqual(
+      expect.objectContaining({
+        role: "custom",
+        customType: BASH_EXECUTION_NOTICE_CUSTOM_TYPE,
+        content: notice.content,
+        display: true,
+        details: notice.details,
+      }),
+    );
     expect(manager.buildSessionContext().messages).toEqual([
       expect.objectContaining({
         role: "custom",
         customType: CONVERSATION_MESSAGE_CUSTOM_TYPE,
         content: incoming.content,
         details: incoming.details,
+      }),
+      expect.objectContaining({
+        role: "custom",
+        customType: BASH_EXECUTION_NOTICE_CUSTOM_TYPE,
+        content: notice.content,
+        display: true,
+        details: notice.details,
       }),
     ]);
 

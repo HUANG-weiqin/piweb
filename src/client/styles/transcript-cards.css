@@ -204,6 +204,44 @@
   text-decoration: underline;
 }
 
+.bash-notice {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 10px;
+  max-width: var(--conversation-content-width);
+  margin: 0 auto 14px;
+  padding: 8px 11px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--focus);
+  border-radius: 8px;
+  color: var(--text);
+  background: var(--panel);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.bash-notice time,
+.bash-notice strong {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.bash-notice span {
+  flex: 1 1 100%;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.bash-notice-warning {
+  border-left-color: var(--warning, #bd8a35);
+}
+
+.bash-notice-error {
+  border-left-color: var(--danger);
+}
+
 /* Rebel conversation identity and command-event timeline */
 
 .app-shell {
@@ -1090,6 +1128,45 @@
 
 .transcript .tool-error .tool-status::after {
   content: "FAILED";
+}
+
+.transcript .tool-bash-status-label {
+  display: block;
+  margin-top: 3px;
+  color: var(--rebel-paper-muted);
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 8px;
+  line-height: 1.4;
+}
+
+.transcript .tool-bash-in-progress .tool-status,
+.transcript .tool-bash-stopping .tool-status {
+  color: var(--rebel-red);
+}
+
+.transcript .tool-bash-in-progress .tool-status::after {
+  content: "BACKGROUND";
+}
+
+.transcript .tool-bash-stopping .tool-status::after {
+  content: "STOPPING";
+}
+
+.transcript .tool-bash-ended .tool-status {
+  color: #e18475;
+}
+
+.transcript .tool-bash-ended .tool-status::after {
+  content: "EXIT";
+}
+
+.transcript .tool-bash-status-label.tool-bash-in-progress,
+.transcript .tool-bash-status-label.tool-bash-stopping {
+  color: #d66a5a;
+}
+
+.transcript .tool-bash-status-label.tool-bash-ended {
+  color: #e18475;
 }
 
 .transcript .tool-chevron {

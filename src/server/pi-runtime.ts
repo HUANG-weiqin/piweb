@@ -2,6 +2,8 @@ import { types as nodeTypes } from "node:util";
 import {
   createAgentSessionFromServices,
   createAgentSessionServices,
+  createBashToolDefinition,
+  createLocalBashOperations,
   defineTool,
   getAgentDir,
   hasTrustRequiringProjectResources,
@@ -72,6 +74,13 @@ import {
 } from "./service-tier.js";
 import { clearCredentialCommandCache, FileCredentialStore } from "./credential-store.js";
 import { createReadOnlyBashTool } from "./read-only-bash.js";
+import {
+  BashExecutionBudget,
+  BashCleanupUnconfirmedError,
+  createBashExecutionBinding,
+  type BashExecutionLifecycle,
+  type BashExecutionOwner,
+} from "./bash-execution.js";
 import {
   isReadOnlyToolIdentity,
   READ_ONLY_TOOL_NAME_CEILING,
@@ -372,6 +381,12 @@ export interface ComputerUseSessionLifecycle {
   release(): Promise<void>;
 }
 
+export interface BashExecutionSessionOptions {
+  readonly conversationId: string;
+  getOwner(): BashExecutionOwner | undefined;
+  onChange?(owner: BashExecutionOwner): void;
+}
+
 export interface CreatePiSessionOptions {
   toolCallGate?: ToolCallGate;
   sessionManager?: SessionManager;
@@ -398,6 +413,8 @@ export interface CreatePiSessionOptions {
   getServiceTier?: () => ServiceTier | null;
   /** Present only for a full-access actor that owns an exact active run. */
   computerUse?: ComputerUseSessionOptions;
+  /** Actor-owned execution scope; standalone SDK sessions retain native Bash. */
+  bashExecutions?: BashExecutionSessionOptions;
 }
 
 export interface CreatedPiSession {
@@ -414,6 +431,7 @@ export interface CreatedPiSession {
   activateExtensionErrors(handler: (error: ExtensionError) => void): readonly ExtensionError[];
   dynamicProviderNames(): ReadonlySet<string>;
   computerUse?: ComputerUseSessionLifecycle;
+  bashExecutions?: BashExecutionLifecycle;
   dispose(): Promise<void>;
 }
 
@@ -694,6 +712,7 @@ export class PiRuntime implements PiRuntimeLike {
   readonly modelRegistry: ModelRegistry;
 
   private readonly configurationQueue = new SerialTaskQueue();
+  private readonly bashExecutionBudget = new BashExecutionBudget();
   private readonly credentialRevisions = new Map<string, number>();
   private readonly listeners = new Set<() => void>();
   private readonly sessionRegistries = new Set<SessionModelRuntime>();
@@ -1163,6 +1182,13 @@ export class PiRuntime implements PiRuntimeLike {
     let created: CreateAgentSessionResult;
     let createdSession: AgentSession | undefined;
     let computerUseLifecycle: ComputerUseSessionLifecycle | undefined;
+    let bashExecutionLifecycle: BashExecutionLifecycle | undefined;
+    const disposeBashExecutions = async (): Promise<void> => {
+      const cleanup = await bashExecutionLifecycle?.dispose();
+      if (cleanup?.cleanupUnknown) {
+        throw new BashCleanupUnconfirmedError();
+      }
+    };
     let installComputerPresentationBoundary:
       | ((session: AgentSession) => SessionBoundaryAdapter)
       | undefined;
@@ -1272,7 +1298,25 @@ export class PiRuntime implements PiRuntimeLike {
       });
       this.throwServiceDiagnostics(services.diagnostics);
       settings = services.settingsManager;
-      if (readOnlyToolProjection) {
+      if (options.bashExecutions) {
+        const shellPath = settings.getShellPath();
+        const commandPrefix = settings.getShellCommandPrefix();
+        const binding = createBashExecutionBinding({
+          ...options.bashExecutions,
+          conversationKey: `${cwd}\0${options.bashExecutions.conversationId}`,
+          budget: this.bashExecutionBudget,
+          operations: createLocalBashOperations({ shellPath }),
+          createBaseTool: (operations) => readOnlyToolProjection
+            ? createReadOnlyBashTool(cwd, shellPath, operations)
+            : createBashToolDefinition(cwd, { shellPath, commandPrefix, operations }),
+        });
+        bashExecutionLifecycle = binding.lifecycle;
+        const bashNames = new Set(binding.tools.map((tool) => tool.name));
+        workbenchCustomTools = [
+          ...binding.tools,
+          ...(workbenchCustomTools?.filter((tool) => !bashNames.has(tool.name)) ?? []),
+        ];
+      } else if (readOnlyToolProjection) {
         workbenchCustomTools = [
           createReadOnlyBashTool(cwd, settings.getShellPath()),
           ...(workbenchCustomTools?.filter((tool) => tool.name !== "bash") ?? []),
@@ -1436,6 +1480,11 @@ export class PiRuntime implements PiRuntimeLike {
       owner.deactivate();
       const failures: unknown[] = [error];
       try {
+        await disposeBashExecutions();
+      } catch (cleanupError) {
+        failures.push(cleanupError);
+      }
+      try {
         disposePreTeardownAdapters();
       } catch (cleanupError) {
         failures.push(cleanupError);
@@ -1479,7 +1528,20 @@ export class PiRuntime implements PiRuntimeLike {
       disposeSessionBoundaryAdapters,
       () => toolProjectionAdapter?.dispose(),
       async () => {
-        await computerUseLifecycle?.release();
+        const failures: unknown[] = [];
+        try {
+          await disposeBashExecutions();
+        } catch (error) {
+          failures.push(error);
+        }
+        try {
+          await computerUseLifecycle?.release();
+        } catch (error) {
+          failures.push(error);
+        }
+        if (failures.length > 0) {
+          throw new AggregateError(failures, "Failed to release session-owned tools");
+        }
       },
     );
     let activationPromise: Promise<void> | undefined;
@@ -1551,6 +1613,7 @@ export class PiRuntime implements PiRuntimeLike {
       },
       dynamicProviderNames: () => owner.names(),
       ...(computerUseLifecycle === undefined ? {} : { computerUse: computerUseLifecycle }),
+      ...(bashExecutionLifecycle === undefined ? {} : { bashExecutions: bashExecutionLifecycle }),
       dispose,
     };
   }
@@ -1774,7 +1837,7 @@ export class PiRuntime implements PiRuntimeLike {
     beforeTeardown?: () => void,
     afterTeardownAttempt?: () => void,
     afterSuccessfulTeardown?: () => void,
-    releaseComputerUse?: () => Promise<void>,
+    releaseSessionTools?: () => Promise<void>,
   ): () => Promise<void> {
     let disposePromise: Promise<void> | undefined;
     return () => {
@@ -1783,7 +1846,7 @@ export class PiRuntime implements PiRuntimeLike {
         this.sessionRegistries.delete(owner);
         const failures: unknown[] = [];
         try {
-          await releaseComputerUse?.();
+          await releaseSessionTools?.();
         } catch (error) {
           failures.push(error);
         }

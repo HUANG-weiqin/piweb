@@ -7,6 +7,7 @@ import {
   validateEditBudgetEvents,
 } from "./edit-budget.js";
 import {
+  MAX_BASH_NOTICE_TEXT_BYTES,
   MAX_COMPACTION_THRESHOLD_PERCENT,
   MAX_MODEL_REFERENCE_BYTES,
   MAX_SESSION_MESSAGE_SUMMARY_BYTES,
@@ -35,6 +36,8 @@ export const META_OPERATION_CUSTOM_TYPE =
 export const COMPACTION_THRESHOLD_CUSTOM_TYPE =
   "piweb.compaction_threshold.v1";
 export const SERVICE_TIER_CUSTOM_TYPE = "piweb.service_tier.v1";
+export const BASH_EXECUTION_NOTICE_CUSTOM_TYPE =
+  "piweb.bash_execution_notice.v1";
 const COMPACTION_RESUME_CUSTOM_TYPE =
   "piweb.compaction_resume.v1";
 export const LOOP_LIST_CUSTOM_TYPE = "piweb.loop_list.v2";
@@ -658,6 +661,17 @@ const contextHintEntrySchema = z.object({
   details: z.undefined().optional(),
 }).strict();
 
+const bashExecutionNoticeEntrySchema = z.object({
+  customType: z.literal(BASH_EXECUTION_NOTICE_CUSTOM_TYPE),
+  content: limitedString("content", MAX_BASH_NOTICE_TEXT_BYTES)
+    .refine((value) => value.trim().length > 0, "content must not be blank"),
+  display: z.literal(true),
+  details: z.object({
+    runId: uuidSchema("runId"),
+    severity: z.enum(["info", "warning", "error"]),
+  }).strict(),
+}).strict();
+
 const forkContextDetailsSchema = z.object({
   forkedFromConversationId: conversationIdSchema("forkedFromConversationId"),
   forkedAt: canonicalTimestampSchema("forkedAt"),
@@ -819,6 +833,8 @@ export type MessageDeliveryReceiptEntry =
 export type CompactionResumeEntry =
   z.infer<typeof compactionResumeEntrySchema>;
 export type ContextHintEntry = z.infer<typeof contextHintEntrySchema>;
+export type BashExecutionNoticeEntry =
+  z.infer<typeof bashExecutionNoticeEntrySchema>;
 export type LoopListEntry = z.infer<typeof loopListEntrySchema>;
 export type LoopListContinueEntry = z.infer<typeof loopListContinueEntrySchema>;
 export type RunSettlement = z.infer<typeof runSettlementSchema>;
@@ -906,6 +922,10 @@ export type ReservedConversationEntry =
   | {
       kind: "context_hint";
       entry: ContextHintEntry;
+    }
+  | {
+      kind: "bash_execution_notice";
+      entry: BashExecutionNoticeEntry;
     };
 
 export interface ReservedConversationAggregate {
@@ -1036,6 +1056,25 @@ function parseContextHintEntry(
   value: unknown,
 ): ContextHintEntry {
   return contextHintEntrySchema.parse(value);
+}
+
+export function parseBashExecutionNoticeEntry(
+  value: unknown,
+): BashExecutionNoticeEntry {
+  return bashExecutionNoticeEntrySchema.parse(value);
+}
+
+export function createBashExecutionNoticeEntry(input: {
+  runId: string;
+  severity: "info" | "warning" | "error";
+  text: string;
+}): BashExecutionNoticeEntry {
+  return parseBashExecutionNoticeEntry({
+    customType: BASH_EXECUTION_NOTICE_CUSTOM_TYPE,
+    content: input.text,
+    display: true,
+    details: { runId: input.runId, severity: input.severity },
+  });
 }
 
 export function parseForkContextEntry(
@@ -1175,6 +1214,7 @@ export function appendReservedCustomEntry(
     || reserved.kind === "loop_list_continue"
     || reserved.kind === "fork_context"
     || reserved.kind === "context_hint"
+    || reserved.kind === "bash_execution_notice"
   ) {
     throw new Error("Expected a non-context piweb reserved custom entry");
   }
@@ -1338,6 +1378,12 @@ export function parseReservedConversationEntry(
     return {
       kind: "context_hint",
       entry: parseContextHintEntry(payload),
+    };
+  }
+  if (customType === BASH_EXECUTION_NOTICE_CUSTOM_TYPE) {
+    return {
+      kind: "bash_execution_notice",
+      entry: parseBashExecutionNoticeEntry(payload),
     };
   }
   throw new Error(`Unknown piweb reserved custom type: ${customType}`);
@@ -1553,6 +1599,7 @@ export function aggregateReservedConversationEntries(
       || reserved.kind === "loop_list_continue"
       || reserved.kind === "fork_context"
       || reserved.kind === "context_hint"
+      || reserved.kind === "bash_execution_notice"
     ) {
       continue;
     }

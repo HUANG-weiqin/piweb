@@ -5,6 +5,7 @@ import type {
   ConversationHistoryItem,
   ConversationHistoryMessage,
   ConversationHistoryMessagePart,
+  ConversationBashNotice,
   ConversationHistoryTool,
   ConversationHistoryToolImageReference,
   ConversationMessageCard,
@@ -146,6 +147,45 @@ function editBudgetFact(value: unknown): unknown {
   return record(record(value)?.details)?.piwebEditBudget;
 }
 
+function bashExecutionFact(value: unknown): unknown {
+  const bash = record(record(record(value)?.details)?.piwebBash);
+  if (!bash) return;
+  const projectSummary = (value: unknown): Record<string, unknown> | undefined => {
+    const summary = record(value);
+    if (
+      typeof summary?.executionId !== "string"
+      || summary.executionId.length > 256
+      || !["in_progress", "stopping", "finished"].includes(String(summary.state))
+    ) return;
+    const projected: Record<string, unknown> = {
+      executionId: summary.executionId,
+      state: summary.state,
+    };
+    if (
+      summary.exitCode === null
+      || (typeof summary.exitCode === "number" && Number.isFinite(summary.exitCode))
+    ) projected.exitCode = summary.exitCode;
+    if (
+      ["manual", "timeout", "output_limit", "run_end", "abort", "reload", "dispose"]
+        .includes(String(summary.stopReason))
+    ) projected.stopReason = summary.stopReason;
+    if (typeof summary.error === "string") {
+      projected.error = summary.error.slice(0, 512);
+    }
+    return projected;
+  };
+  if (bash.executions !== undefined) {
+    if (!Array.isArray(bash.executions)) return;
+    return {
+      executions: bash.executions.slice(0, 4).flatMap((summary) => {
+        const projected = projectSummary(summary);
+        return projected === undefined ? [] : [projected];
+      }),
+    };
+  }
+  return projectSummary(bash);
+}
+
 function omittedToolResult(value: unknown): unknown {
   const sourceContent = record(value)?.content;
   const markerContent = Array.isArray(sourceContent)
@@ -155,18 +195,22 @@ function omittedToolResult(value: unknown): unknown {
     : undefined;
   const hasImageMarker = markerContent?.some((block) => block !== null) === true;
   const budget = editBudgetFact(value);
+  const bash = bashExecutionFact(value);
+  const details = {
+    ...(budget === undefined ? {} : { piwebEditBudget: budget }),
+    ...(bash === undefined ? {} : { piwebBash: bash }),
+  };
+  const hasDetails = Object.keys(details).length > 0;
   if (hasImageMarker) {
     return {
       content: markerContent,
-      ...(budget === undefined
-        ? {}
-        : { details: { piwebEditBudget: budget } }),
+      ...(hasDetails ? { details } : {}),
     };
   }
-  if (budget === undefined) return OMITTED_TOOL_VALUE;
+  if (!hasDetails) return OMITTED_TOOL_VALUE;
   const retained = {
     content: OMITTED_TOOL_VALUE,
-    details: { piwebEditBudget: budget },
+    details,
   };
   try {
     if (
@@ -356,6 +400,12 @@ function projectConversationHistorySlots(
     if (reserved?.kind === "conversation_meta") {
       // Initial metadata establishes a durable conversation boundary.
       unsettledMessageStart = messages.length;
+      assistant = undefined;
+      continue;
+    }
+    if (reserved?.kind === "bash_execution_notice") {
+      // Keep later assistant output physically after this host notice without
+      // treating it as a run settlement or other execution authority.
       assistant = undefined;
       continue;
     }
@@ -646,16 +696,38 @@ export function projectConversationItemSlots(
     positionedIndex: number;
     direction: ConversationMessageCard["direction"];
   }>();
+  const activeBranchEntryIds = new Set(
+    sessionManager.getBranch().map((entry) => entry.id),
+  );
 
   for (
     let physicalIndex = 0;
     physicalIndex < physicalEntries.length;
     physicalIndex += 1
   ) {
-    const reserved = parseReservedConversationEntry(
-      physicalEntries[physicalIndex],
-    );
+    const physicalEntry = physicalEntries[physicalIndex];
+    const reserved = parseReservedConversationEntry(physicalEntry);
     if (reserved === undefined) continue;
+    if (reserved.kind === "bash_execution_notice") {
+      if (!activeBranchEntryIds.has(physicalEntry.id)) continue;
+      const physical = physicalEntry as Readonly<{
+        id: string;
+        timestamp: string;
+      }>;
+      const notice: ConversationBashNotice = {
+        kind: "bash_notice",
+        id: physical.id,
+        timestamp: physical.timestamp,
+        runId: reserved.entry.details.runId,
+        severity: reserved.entry.details.severity,
+        text: reserved.entry.content,
+      };
+      positionedItems.push({
+        slot: { item: notice },
+        physicalIndex,
+      });
+      continue;
+    }
     if (
       reserved.kind === "conversation_meta"
       || reserved.kind === "conversation_role_change"
@@ -744,6 +816,14 @@ function compactConversationItem(
       truncated: id.truncated,
     };
   }
+  if (item.kind === "bash_notice") {
+    const id = clipUtf8(item.id, MAX_HISTORY_ID_BYTES);
+    const text = clipUtf8(item.text, MAX_HISTORY_TEXT_BYTES);
+    return {
+      item: { ...item, id: id.value, text: text.value },
+      truncated: id.truncated || text.truncated,
+    };
+  }
 
   const body = clipUtf8(item.body, MAX_HISTORY_TEXT_BYTES);
   const result = item.result === undefined
@@ -777,7 +857,7 @@ function agentPeekItem(
       text: item.text,
     };
   }
-  if (item.kind === "compaction") return;
+  if (item.kind === "compaction" || item.kind === "bash_notice") return;
   return { ...item };
 }
 
@@ -884,6 +964,7 @@ function minimalConversationItem(
     };
   }
   if (item.kind === "compaction") return { ...item };
+  if (item.kind === "bash_notice") return { ...item, text: "" };
   return {
     ...item,
     body: "",

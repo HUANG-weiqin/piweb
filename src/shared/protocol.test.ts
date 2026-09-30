@@ -42,7 +42,7 @@ const transitionDiagnostics = {
 
 describe("parseClientCommand", () => {
   it("uses the run-correlated protocol version", () => {
-    expect(PROTOCOL_VERSION).toBe(62);
+    expect(PROTOCOL_VERSION).toBe(63);
   });
 
   it("accepts supported commands", () => {
@@ -1905,6 +1905,87 @@ describe("parseServerEvent", () => {
         armed: true,
       },
     })).toThrow();
+  });
+
+  it("validates focused Bash notices and aggregate activity without job rows", () => {
+    const bashActivity = {
+      runId,
+      running: 2,
+      stopping: 1,
+      cleanupUnknown: true,
+    };
+    const notice = {
+      kind: "bash_notice",
+      id: "00000002",
+      timestamp: "2026-09-30T10:00:00.000Z",
+      runId,
+      severity: "warning",
+      text: "后台命令未能确认停止。",
+    };
+    expect(parseServerEvent({
+      type: "conversation_snapshot",
+      sessionId,
+      conversationId,
+      focusId,
+      projectionSeq: 0,
+      items: [notice],
+      pendingPrompts: [],
+      bashActivity,
+      window: { omittedBefore: false, startsMidTurn: false, contentTruncated: false },
+    })).toMatchObject({
+      type: "conversation_snapshot",
+      items: [notice],
+      bashActivity,
+    });
+    expect(parseServerEvent({
+      type: "conversation_snapshot",
+      sessionId,
+      conversationId,
+      focusId,
+      projectionSeq: 0,
+      items: [],
+      pendingPrompts: [],
+      bashActivity: null,
+      window: { omittedBefore: false, startsMidTurn: false, contentTruncated: false },
+    })).toMatchObject({ type: "conversation_snapshot", bashActivity: null });
+    expect(parseServerEvent({
+      type: "bash_activity",
+      sessionId,
+      conversationId,
+      focusId,
+      activity: bashActivity,
+    })).toEqual({
+      type: "bash_activity",
+      sessionId,
+      conversationId,
+      focusId,
+      activity: bashActivity,
+    });
+    for (const activity of [
+      { ...bashActivity, running: -1 },
+      { ...bashActivity, running: 5, stopping: 0 },
+      { ...bashActivity, running: 3, stopping: 2 },
+      { ...bashActivity, running: 1.5 },
+      { ...bashActivity, extra: [{ executionId: "must-not-cross-wire" }] },
+    ]) {
+      expect(() => parseServerEvent({
+        type: "bash_activity",
+        sessionId,
+        conversationId,
+        focusId,
+        activity,
+      })).toThrow();
+    }
+    expect(() => parseServerEvent({
+      type: "conversation_snapshot",
+      sessionId,
+      conversationId,
+      focusId,
+      projectionSeq: 0,
+      items: [{ ...notice, text: "界".repeat(2_731) }],
+      pendingPrompts: [],
+      window: { omittedBefore: false, startsMidTurn: false, contentTruncated: false },
+    })).toThrow(/UTF-8 bytes/);
   });
 
   it("requires a transcript checkpoint and complete pending prompt FIFO", () => {

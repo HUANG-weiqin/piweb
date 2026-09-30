@@ -18,6 +18,7 @@ import {
 import {
   appendReservedCustomEntry,
   CONTEXT_HINT_CUSTOM_TYPE,
+  createBashExecutionNoticeEntry,
   createCompactionResumeEntry,
   createConversationCardEntry,
   createConversationMessageEntry,
@@ -387,6 +388,48 @@ describe("projectConversationHistory", () => {
     expect(assistant.parts.some(
       (part) => part.kind === "tool" && part.toolCallId === "edit-call",
     )).toBe(false);
+  });
+
+  it("retains bounded Bash execution state when an oversized tool result is omitted", () => {
+    const manager = SessionManager.inMemory("E:\\work");
+    const bash = {
+      executionId: randomUUID(),
+      state: "in_progress",
+      outputFile: "large-output.txt",
+    };
+    manager.appendMessage(message({
+      role: "assistant",
+      content: [{ type: "toolCall", id: "bash-call", name: "bash", arguments: {} }],
+      stopReason: "toolUse",
+      timestamp: 1,
+    }));
+    manager.appendMessage(message({
+      role: "toolResult",
+      toolCallId: "bash-call",
+      toolName: "bash",
+      content: [{ type: "text", text: "x".repeat(9_000) }],
+      details: { piwebBash: bash },
+      isError: false,
+      timestamp: 2,
+    }));
+
+    const assistant = projectConversationItemsSnapshot(manager).items[0];
+    expect(assistant).toMatchObject({
+      kind: "message",
+      tools: [{
+        toolCallId: "bash-call",
+        result: {
+          content: "[历史工具数据过大，已省略]",
+          details: {
+            piwebBash: {
+              executionId: bash.executionId,
+              state: "in_progress",
+            },
+          },
+        },
+      }],
+    });
+    expect(JSON.stringify(assistant)).not.toContain("large-output.txt");
   });
 
   it("projects only the selected branch and preserves failed tool results", () => {
@@ -1385,6 +1428,71 @@ describe("projectConversationHistory", () => {
     expect(() => projectConversationItems(manager)).toThrow(
       /unknown piweb reserved/i,
     );
+  });
+
+  it("projects durable Bash notices as bounded transcript items at their physical position", () => {
+    const manager = SessionManager.inMemory("E:\\work");
+    manager.appendMessage(message({
+      role: "user",
+      content: "Run the test suite",
+      timestamp: 1,
+    }));
+    manager.appendMessage(message({
+      role: "assistant",
+      content: [{ type: "text", text: "Starting tests." }],
+      timestamp: 2,
+    }));
+    const noticeEntry = createBashExecutionNoticeEntry({
+      runId: randomUUID(),
+      severity: "warning",
+      text: "测试工具已返回，但命令仍在后台运行。",
+    });
+    const noticeId = manager.appendCustomMessageEntry(
+      noticeEntry.customType,
+      noticeEntry.content,
+      noticeEntry.display,
+      noticeEntry.details,
+    );
+    const physicalNotice = manager.getEntry(noticeId) as {
+      id: string;
+      timestamp: string;
+    };
+    manager.appendMessage(message({
+      role: "assistant",
+      content: [{ type: "text", text: "The process has now finished." }],
+      timestamp: 3,
+    }));
+
+    const projected = projectConversationItems(manager);
+    expect(projected.map((item) => item.kind)).toEqual([
+      "message",
+      "message",
+      "bash_notice",
+      "message",
+    ]);
+    expect(projected[2]).toEqual({
+      kind: "bash_notice",
+      id: physicalNotice.id,
+      timestamp: physicalNotice.timestamp,
+      runId: noticeEntry.details.runId,
+      severity: "warning",
+      text: noticeEntry.content,
+    });
+    expect(projected[1]).toMatchObject({
+      kind: "message",
+      role: "assistant",
+      text: "Starting tests.",
+    });
+    expect(projected[3]).toMatchObject({
+      kind: "message",
+      role: "assistant",
+      text: "The process has now finished.",
+    });
+    expect(projectConversationItemsSnapshot(manager).items).toContainEqual(
+      expect.objectContaining({ kind: "bash_notice", id: physicalNotice.id }),
+    );
+    expect(projectAgentConversationPeek(manager).items.map((item) => item.kind))
+      .not.toContain("bash_notice");
   });
 
   it("skips the persisted LoopList context hint in the projection", () => {

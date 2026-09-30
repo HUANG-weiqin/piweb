@@ -1,4 +1,5 @@
 import type {
+  ConversationBashNotice,
   ConversationCompactionMarker,
   ConversationMessageCard,
   TokenUsage,
@@ -15,6 +16,7 @@ export type TranscriptBlock =
       message: ChatMessage;
     }
   | ConversationCompactionMarker
+  | ConversationBashNotice
   | ConversationMessageCard;
 
 function appendParagraph(current: string, next: string): string {

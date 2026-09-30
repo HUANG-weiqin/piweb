@@ -49,6 +49,8 @@ const FIELD_LABELS: Record<string, string> = {
   diff: "变更预览",
   edits: "编辑",
   error: "错误",
+  executionId: "执行句柄",
+  exitCode: "退出码",
   file: "文件",
   fileCount: "预计文件数",
   glob: "文件范围",
@@ -73,6 +75,7 @@ const FIELD_LABELS: Record<string, string> = {
   preview: "预览",
   provider: "提供商",
   reason: "原因",
+  stopReason: "停止原因",
   remainingFiles: "剩余额度",
   result: "结果",
   revision: "版本",
@@ -108,6 +111,8 @@ const FIELD_VALUE_LABELS: Record<string, Record<string, string>> = {
   state: {
     aborted: "已终止",
     completed: "已完成",
+    finished: "已结束",
+    in_progress: "后台执行中",
     delivered: "已送达",
     failed: "失败",
     pending: "等待中",
@@ -122,6 +127,7 @@ const FIELD_VALUE_LABELS: Record<string, Record<string, string>> = {
     idle: "空闲",
     pending: "等待中",
     running: "运行中",
+    stopping: "正在停止",
   },
 };
 
@@ -168,6 +174,10 @@ export function toolPresentation(
       return { label: "读取文件", target: stringField(record, "path") };
     case "bash":
       return { label: "运行命令", target: stringField(record, "command") };
+    case "bash_poll":
+      return { label: "查询后台命令", target: stringField(record, "executionId") };
+    case "bash_stop":
+      return { label: "停止后台命令", target: stringField(record, "executionId") };
     case "edit":
       return { label: "编辑文件", target: stringField(record, "path") };
     case "write":
@@ -245,6 +255,55 @@ function statusLabel(status: ToolItem["status"]): string {
   if (status === "running") return "执行中";
   if (status === "done") return "已完成";
   return "执行失败";
+}
+
+type BashCardStatus = "in_progress" | "stopping" | "success" | "ended";
+
+function bashCardStatus(tool: ToolItem): {
+  status: BashCardStatus;
+  label: string;
+} | undefined {
+  if (!new Set(["bash", "bash_poll", "bash_stop"]).has(tool.name)) {
+    return;
+  }
+  const result = asRecord(tool.result);
+  const piwebBash = asRecord(asRecord(result?.details)?.piwebBash);
+  if (!piwebBash) return;
+
+  if (Array.isArray(piwebBash.executions)) {
+    const states = piwebBash.executions.flatMap((item) => {
+      const state = asRecord(item)?.state;
+      return state === "in_progress" || state === "stopping" ? [state] : [];
+    });
+    const running = states.filter((state) => state === "in_progress").length;
+    const stopping = states.length - running;
+    if (running + stopping === 0) return;
+    return {
+      status: stopping > 0 ? "stopping" : "in_progress",
+      label: `本次查询时仍有 ${running} 个执行中，${stopping} 个停止中`,
+    };
+  }
+
+  if (piwebBash.state === "in_progress") {
+    return { status: "in_progress", label: "返回时命令仍在执行" };
+  }
+  if (piwebBash.state === "stopping") {
+    return { status: "stopping", label: "已请求停止，尚未确认退出" };
+  }
+  if (piwebBash.state !== "finished") return;
+
+  if (piwebBash.error !== undefined && piwebBash.error !== null) {
+    return { status: "ended", label: "命令结束时伴随执行错误" };
+  }
+  if (piwebBash.exitCode === 0) {
+    return { status: "success", label: "命令正常结束（退出码 0）" };
+  }
+  return {
+    status: "ended",
+    label: typeof piwebBash.exitCode === "number"
+      ? `命令已结束（退出码 ${piwebBash.exitCode}）`
+      : "命令已结束，退出码未确认",
+  };
 }
 
 function fieldLabel(key: string): string {
@@ -453,16 +512,27 @@ export function ToolCard({
   onOpenImage?: HistoricalImageOpenHandler;
 }) {
   const presentation = toolPresentation(tool, conversationTitleLookup);
-  const status = statusLabel(tool.status);
+  const bashStatus = bashCardStatus(tool);
+  const status = bashStatus?.label ?? statusLabel(tool.status);
   const isActive = tool.status === "pending" || tool.status === "running";
+  const bashStatusClass = bashStatus === undefined
+    ? ""
+    : ` tool-bash-${bashStatus.status.replaceAll("_", "-")}`;
+  const symbol = bashStatus?.status === "in_progress"
+    ? "↗"
+    : bashStatus?.status === "stopping"
+      ? "…"
+      : bashStatus?.status === "ended"
+        ? "!"
+        : "✓";
 
-  return <details className={`tool tool-${tool.status}`}>
+  return <details className={`tool tool-${tool.status}${bashStatusClass}`}>
     <summary>
       <span className="tool-status" aria-label={status}>
         {isActive
           ? <ActivitySpinner className="tool-spinner" />
           : <span className="tool-status-symbol" aria-hidden="true">
-              {tool.status === "done" ? "✓" : "!"}
+              {bashStatus === undefined ? (tool.status === "done" ? "✓" : "!") : symbol}
             </span>}
       </span>
       <span className="tool-summary">
@@ -475,6 +545,9 @@ export function ToolCard({
               {presentation.target}
             </span>
           : null}
+        {bashStatus && <span className={`tool-bash-status-label ${bashStatusClass.trim()}`}>
+          {bashStatus.label}
+        </span>}
       </span>
       <span className="tool-chevron" aria-hidden="true">⌄</span>
     </summary>

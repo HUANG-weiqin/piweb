@@ -889,6 +889,76 @@ describe("PiRuntime session ownership", () => {
     await created.dispose();
   });
 
+  it("projects Actor-owned Bash tools with exact SDK source and effective read-only shell", async () => {
+    const cwd = await temporaryDirectory("piweb-runtime-owned-bash-");
+    const settings = SettingsManager.inMemory();
+    settings.setShellPath(join(cwd, "configured-bash.exe"));
+    let tools: ToolDefinition[] = [];
+    const runtime = await testRuntime(() => [], async (_created, options) => {
+      tools = options.customTools ?? [];
+    }, undefined, () => settings);
+    const owner = Object.freeze({ conversationId: "owned-conversation", runId: "owned-run" });
+    const created = await runtime.createSession(cwd, {
+      toolMode: "read_only",
+      bashExecutions: { conversationId: owner.conversationId, getOwner: () => owner },
+    });
+    try {
+      expect(created.bashExecutions).toBeDefined();
+      for (const name of ["bash", "bash_poll", "bash_stop"]) {
+        expect(created.session.getActiveToolNames()).toContain(name);
+        expect(created.session.getAllTools().find((tool) => tool.name === name)?.sourceInfo.source).toBe("sdk");
+      }
+      const bash = tools.find((tool) => tool.name === "bash")!;
+      await expect(bash.execute("unsafe", { command: "rm victim", yieldMs: 5000 } as never, undefined, undefined, undefined as never))
+        .rejects.toThrow(/read-only/i);
+      await expect(bash.execute("effective-shell", { command: "pwd", yieldMs: 5000 } as never, undefined, undefined, undefined as never))
+        .rejects.toThrow(/Custom shell path not found:.*configured-bash\.exe/i);
+      expect(created.session.systemPrompt).toContain("reviewed");
+    } finally {
+      await created.dispose();
+    }
+  });
+
+  it("uses the effective full-access command prefix while preserving native quick output", async () => {
+    const cwd = await temporaryDirectory("piweb-runtime-owned-bash-prefix-");
+    const settings = SettingsManager.inMemory({ shellCommandPrefix: "printf prefix-marker;" });
+    let bash: ToolDefinition | undefined;
+    const runtime = await testRuntime(() => [], async (_created, options) => {
+      bash = options.customTools?.find((tool) => tool.name === "bash");
+    }, undefined, () => settings);
+    const owner = Object.freeze({ conversationId: "prefix-conversation", runId: "prefix-run" });
+    const created = await runtime.createSession(cwd, {
+      toolMode: "full_access",
+      bashExecutions: { conversationId: owner.conversationId, getOwner: () => owner },
+    });
+    try {
+      const result = await bash!.execute("prefix", { command: "printf command-marker", yieldMs: 5000 } as never, undefined, undefined, undefined as never);
+      expect(result.content).toEqual(expect.arrayContaining([
+        expect.objectContaining({ type: "text", text: expect.stringContaining("prefix-markercommand-marker") }),
+      ]));
+      expect(created.bashExecutions?.activity(owner)).toEqual({ running: 0, stopping: 0, cleanupUnknown: false });
+    } finally {
+      await created.dispose();
+    }
+  }, 15_000);
+
+  it("requires an exact active owner before Actor-owned Bash can start", async () => {
+    const cwd = await temporaryDirectory("piweb-runtime-owned-bash-owner-");
+    let bash: ToolDefinition | undefined;
+    const runtime = await testRuntime(() => [], async (_created, options) => {
+      bash = options.customTools?.find((tool) => tool.name === "bash");
+    });
+    const created = await runtime.createSession(cwd, {
+      bashExecutions: { conversationId: "idle-conversation", getOwner: () => undefined },
+    });
+    try {
+      await expect(bash!.execute("no-owner", { command: "printf never", yieldMs: 0 } as never, undefined, undefined, undefined as never))
+        .rejects.toThrow(/active.*run/i);
+    } finally {
+      await created.dispose();
+    }
+  });
+
   it("builds read-only Bash with the effective SettingsManager shell path", async () => {
     const cwd = await temporaryDirectory("piweb-runtime-read-only-shell-path-");
     const configuredShell = join(cwd, "configured-bash.exe");

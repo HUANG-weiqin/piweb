@@ -1,5 +1,7 @@
 import type {
   AverageOutputRate,
+  ConversationBashActivity,
+  ConversationBashNotice,
   ConversationCompactionMarker,
   ConversationHistoryItem,
   ConversationHistoryMessage,
@@ -46,6 +48,7 @@ export type ChatMessageItem = { kind: "message" } & ChatMessage;
 export type ChatItem =
   | ChatMessageItem
   | ConversationCompactionMarker
+  | ConversationBashNotice
   | ConversationMessageCard;
 
 interface ChatFocus {
@@ -74,6 +77,8 @@ export interface ChatState {
   historyWindow?: ConversationWindowCoverage;
   /** Average output rate from the latest settled run and focused snapshot. */
   completedOutputRate?: CompletedOutputRate;
+  /** Exact-focus aggregate for background Bash owned by the conversation. */
+  bashActivity?: ConversationBashActivity | null;
   /** Ephemeral Pi-base estimate for the active assistant segment only. */
   liveOutputRate?: LiveOutputRate;
   /** Current run's final-usage measurements across assistant segments. */
@@ -98,11 +103,16 @@ export type ChatAction =
       projectionSeq?: number;
       historyWindow?: ConversationWindowCoverage;
       completedOutputRate?: AverageOutputRate;
+      bashActivity?: ConversationBashActivity | null;
     } & ChatFocus)
   | ({
       type: "conversation_item";
       item: ConversationHistoryItem;
       projectionSeq?: number;
+    } & ChatFocus)
+  | ({
+      type: "bash_activity";
+      activity: ConversationBashActivity | null;
     } & ChatFocus)
   | ({ type: "prompt_accepted"; runId: string; text: string } & ChatFocus)
   | ({
@@ -404,6 +414,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       projectionGap: false,
       historyWindow: undefined,
       completedOutputRate: undefined,
+      bashActivity: null,
       liveOutputRate: undefined,
       outputRateMeasurement: undefined,
     };
@@ -447,6 +458,9 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
             contentTruncated: action.historyWindow.contentTruncated,
           },
       completedOutputRate: action.completedOutputRate,
+      // Older fixture/snapshot producers omit the optional field; absence
+      // means no live activity is known for this focus.
+      bashActivity: action.bashActivity ?? null,
       liveOutputRate: preserveActiveOutputRate
         ? state.liveOutputRate
         : undefined,
@@ -471,6 +485,11 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       ...withItems(state, items),
       projectionGap: false,
     };
+  }
+
+  if (action.type === "bash_activity") {
+    if (!sameFocus(state.focus, action)) return state;
+    return { ...state, bashActivity: action.activity };
   }
 
   if (!sameFocus(state.focus, action)) return state;

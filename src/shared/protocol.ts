@@ -15,6 +15,7 @@ export const MAX_PROJECT_CONVERSATION_PREVIEW_CHARACTERS = 500;
 /** 用户可见的跨会话消息摘要：有界载荷，但可写成短段落。 */
 export const MAX_SESSION_MESSAGE_SUMMARY_CHARACTERS = 500;
 export const MAX_SESSION_MESSAGE_SUMMARY_BYTES = 2 * 1024;
+export const MAX_BASH_NOTICE_TEXT_BYTES = 8 * 1024;
 export const MAX_PROMPT_CHARACTERS = 200_000;
 /** 每条浏览器 prompt 最多携带四张小型本地图片，合计解码后不超过 512 KiB。 */
 export const MAX_PROMPT_IMAGE_COUNT = 4;
@@ -33,6 +34,8 @@ export const DEFAULT_COMPACTION_THRESHOLD_PERCENT = 70;
 export const MIN_COMPACTION_THRESHOLD_PERCENT = 20;
 export const MAX_COMPACTION_THRESHOLD_PERCENT = 90;
 export const MAX_TRANSITION_DIAGNOSTIC_PHASE_MS = 60 * 60 * 1_000;
+// v63: focused snapshots and low-frequency exact-focus events project only
+// aggregate run-scoped Bash activity; durable Bash notices are transcript items.
 // v62: output-rate timing is measured at the server's first-token/completion
 // boundary and the latest settled run is recoverable from focused snapshots.
 // v58: rename commands are command-correlated and settle through the existing
@@ -93,7 +96,7 @@ export const MAX_TRANSITION_DIAGNOSTIC_PHASE_MS = 60 * 60 * 1_000;
 // their OpenAI-compatible model list before saving.
 // v59: idle current-leaf fork copies LLM-effective context into a fresh host
 // lifecycle via `fork_conversation`; history anchors stay unsupported.
-export const PROTOCOL_VERSION = 62;
+export const PROTOCOL_VERSION = 63;
 export const OBSERVATION_FATAL_CLOSE_CODE = 4002;
 export const COLOR_SCHEMES = ["quiet-rebel", "classic-rebel"] as const;
 export type ColorScheme = typeof COLOR_SCHEMES[number];
@@ -1091,9 +1094,27 @@ export interface ConversationCompactionMarker {
   provenance?: ConversationCompactionProvenance;
 }
 
+export interface ConversationBashNotice {
+  kind: "bash_notice";
+  id: string;
+  timestamp: string;
+  runId: string;
+  severity: "info" | "warning" | "error";
+  text: string;
+}
+
+/** Focused aggregate only; never identifies individual background commands. */
+export interface ConversationBashActivity {
+  runId: string;
+  running: number;
+  stopping: number;
+  cleanupUnknown: boolean;
+}
+
 export type ConversationHistoryItem =
   | ({ kind: "message" } & ConversationHistoryMessage)
   | ConversationCompactionMarker
+  | ConversationBashNotice
   | ConversationMessageCard;
 
 export interface ConversationWindowCoverage {
@@ -1343,6 +1364,8 @@ export type ServerEvent =
       items: ConversationHistoryItem[];
       /** Latest settled run; omitted while a run is active or timing was unavailable. */
       completedOutputRate?: AverageOutputRate;
+      /** Aggregate activity owned by the focused conversation actor; null means none. */
+      bashActivity?: ConversationBashActivity | null;
       /** busy 时已接受、尚未投递的浏览器 prompt（服务端内存态，重启丢失为接受项）。 */
       pendingPrompts: PendingPromptAdmissionSnapshot[];
       loopList?: LoopList;
@@ -1355,6 +1378,13 @@ export type ServerEvent =
       conversationId: string;
       focusId: string;
       loopList: LoopList;
+    }
+  | {
+      type: "bash_activity";
+      sessionId: string;
+      conversationId: string;
+      focusId: string;
+      activity: ConversationBashActivity | null;
     }
   | {
       type: "session_event";
@@ -1768,6 +1798,15 @@ const conversationHistoryItemSchema: z.ZodType<ConversationHistoryItem> =
       provenance: conversationCompactionProvenanceSchema.optional(),
     }),
     z.object({
+      kind: z.literal("bash_notice"),
+      id: z.string().min(1).max(256),
+      timestamp: z.string().datetime(),
+      runId: runIdSchema,
+      severity: z.enum(["info", "warning", "error"]),
+      text: boundedUtf8String(MAX_BASH_NOTICE_TEXT_BYTES, "bash notice text")
+        .refine((value) => value.trim().length > 0, "bash notice text must not be blank"),
+    }).strict(),
+    z.object({
       kind: z.literal("session_message"),
       id: z.string(),
       cardId: z.string().uuid(),
@@ -1845,6 +1884,22 @@ const conversationWindowCoverageSchema: z.ZodType<ConversationWindowCoverage> = 
   startsMidTurn: z.boolean(),
   contentTruncated: z.boolean(),
 });
+
+const conversationBashActivitySchema: z.ZodType<ConversationBashActivity> =
+  z.object({
+    runId: runIdSchema,
+    running: z.number().int().min(0).max(4),
+    stopping: z.number().int().min(0).max(4),
+    cleanupUnknown: z.boolean(),
+  }).strict().superRefine((activity, context) => {
+    if (activity.running + activity.stopping > 4) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Bash activity total must be at most 4",
+        path: ["stopping"],
+      });
+    }
+  });
 
 const transitionDiagnosticDurationSchema = z.number()
   .finite()
@@ -2027,6 +2082,7 @@ const serverEventUnionSchema = z.discriminatedUnion("type", [
       outputElapsedMs: z.number().finite().positive(),
       tokensPerSecond: z.number().finite().nonnegative(),
     }).strict().optional(),
+    bashActivity: conversationBashActivitySchema.nullable().optional(),
     pendingPrompts: z.array(z.object({
       promptId: z.string().uuid(),
       text: required.max(MAX_PROMPT_CHARACTERS),
@@ -2041,6 +2097,13 @@ const serverEventUnionSchema = z.discriminatedUnion("type", [
     conversationId: conversationIdSchema,
     focusId: focusIdSchema,
     loopList: loopListSchema,
+  }).strict(),
+  z.object({
+    type: z.literal("bash_activity"),
+    sessionId: sessionIdSchema,
+    conversationId: conversationIdSchema,
+    focusId: focusIdSchema,
+    activity: conversationBashActivitySchema.nullable(),
   }).strict(),
   z.object({
     type: z.literal("session_event"),

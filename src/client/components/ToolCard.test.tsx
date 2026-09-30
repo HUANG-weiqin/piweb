@@ -220,6 +220,64 @@ describe("ToolCard", () => {
     expect(container).not.toHaveTextContent("\"content\"");
   });
 
+  it.each([
+    ["bash", "in_progress", "返回时命令仍在执行", "tool-bash-in-progress"],
+    ["bash_stop", "stopping", "已请求停止，尚未确认退出", "tool-bash-stopping"],
+  ])("does not present a yielded or stopping Bash result as command success", (
+    name,
+    state,
+    label,
+    className,
+  ) => {
+    const backgroundTool: ToolItem = {
+      id: `background-${name}`,
+      name,
+      args: { command: "npm test", executionId: "execution-1" },
+      result: {
+        content: [{ type: "text", text: "The tool call returned." }],
+        details: {
+          piwebBash: { executionId: "execution-1", state },
+        },
+      },
+      status: "done",
+    };
+    const { container } = render(<ToolCard tool={backgroundTool} />);
+    const summary = container.querySelector("summary") as HTMLElement;
+
+    expect(summary).toHaveTextContent(label);
+    expect(summary).not.toHaveTextContent("已完成");
+    expect(summary.querySelector(".tool-status")).toHaveAttribute(
+      "aria-label",
+      label,
+    );
+    expect(container.querySelector("details")).toHaveClass(className);
+  });
+
+  it("summarizes the planned bash_poll execution list without hiding live states", () => {
+    const poll: ToolItem = {
+      id: "poll-many",
+      name: "bash_poll",
+      args: {},
+      result: {
+        content: [{ type: "text", text: "Two active commands." }],
+        details: {
+          piwebBash: {
+            executions: [
+              { executionId: "one", state: "in_progress" },
+              { executionId: "two", state: "stopping" },
+            ],
+          },
+        },
+      },
+      status: "done",
+    };
+    const { container } = render(<ToolCard tool={poll} />);
+    const summary = container.querySelector("summary") as HTMLElement;
+
+    expect(summary).toHaveTextContent("本次查询时仍有 1 个执行中，1 个停止中");
+    expect(container.querySelector("details")).toHaveClass("tool-bash-stopping");
+  });
+
   it("renders Agent session tool results as structured information", () => {
     const sessionsTool: ToolItem = {
       id: "sessions-1",

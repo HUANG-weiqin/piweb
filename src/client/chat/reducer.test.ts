@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type {
+  ConversationBashActivity,
   ConversationHistoryItem,
   ConversationMessageCard,
   TokenUsage,
@@ -103,6 +104,50 @@ function sessionMessageCard(
 }
 
 describe("chatReducer", () => {
+  it("hydrates, updates, and clears aggregate Bash activity only for its exact focus", () => {
+    const activity: ConversationBashActivity = {
+      runId: "33333333-3333-4333-8333-333333333333",
+      running: 1,
+      stopping: 1,
+      cleanupUnknown: false,
+    };
+    let state = chatReducer(initialChatState, {
+      type: "focus_changed",
+      ...FOCUS_A_1,
+    });
+    state = chatReducer(state, {
+      type: "hydrate",
+      ...FOCUS_A_1,
+      items: [],
+      bashActivity: activity,
+    });
+    expect(state.bashActivity).toEqual(activity);
+
+    const stale = chatReducer(state, {
+      type: "bash_activity",
+      ...FOCUS_A_2,
+      activity: null,
+    });
+    expect(stale).toBe(state);
+
+    const updated = chatReducer(state, {
+      type: "bash_activity",
+      ...FOCUS_A_1,
+      activity: { ...activity, running: 2, stopping: 0 },
+    });
+    expect(updated.bashActivity).toEqual({
+      ...activity,
+      running: 2,
+      stopping: 0,
+    });
+
+    const newFocus = chatReducer(updated, {
+      type: "focus_changed",
+      ...FOCUS_A_2,
+    });
+    expect(newFocus.bashActivity).toBeNull();
+  });
+
   it("hydrates message and session-message items only for the attached focus", () => {
     let state = chatReducer(initialChatState, {
       type: "focus_changed",

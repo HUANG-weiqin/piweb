@@ -15,6 +15,8 @@ describe("defaultToolPolicy", () => {
 
   it.each([
     "bash",
+    "bash_poll",
+    "bash_stop",
     "notebook_write",
     "notebook_list",
     "notebook_grep",
@@ -46,6 +48,12 @@ describe("defaultToolPolicy", () => {
     ["bash", "project"],
     ["bash", "extension"],
     ["bash", "unknown"],
+    ["bash_poll", "builtin"],
+    ["bash_poll", "project"],
+    ["bash_poll", "extension"],
+    ["bash_stop", "builtin"],
+    ["bash_stop", "project"],
+    ["bash_stop", "extension"],
     ["write", "builtin"],
     ["edit", "builtin"],
     ["read", "project"],

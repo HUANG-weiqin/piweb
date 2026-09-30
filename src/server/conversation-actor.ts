@@ -15,10 +15,12 @@ import {
 import { Type } from "typebox";
 import {
   DEFAULT_COMPACTION_THRESHOLD_PERCENT,
+  MAX_BASH_NOTICE_TEXT_BYTES,
   MAX_PROJECT_CONVERSATION_NAME_CHARACTERS,
   parseConversationImage,
   type AverageOutputRate,
   type ConversationActivity,
+  type ConversationBashActivity,
   type ConversationImage,
   type ConversationHistoryItem,
   type ConversationRoleSnapshot,
@@ -32,11 +34,18 @@ import {
   type ToolMode,
 } from "../shared/protocol.js";
 import type { AgentTurnBoundaryCheck } from "./agent-turn-boundary.js";
+import {
+  BashCleanupUnconfirmedError,
+  type BashExecutionLifecycle,
+  type BashExecutionOwner,
+  type BashExecutionStopReason,
+} from "./bash-execution.js";
 import { ConversationProjection } from "./conversation-projection.js";
 import {
   advanceLoopListTiming,
   aggregateReservedConversationEntries,
   appendReservedCustomEntry,
+  createBashExecutionNoticeEntry,
   createCompactionThresholdEntry,
   createCompactionResumeEntry,
   createEditGateEntry,
@@ -87,6 +96,48 @@ type AgentMessage = Extract<
   Parameters<AgentSession["agent"]["steer"]>[0],
   { role: "user" }
 >;
+
+type BashRunCleanup = Awaited<ReturnType<BashExecutionLifecycle["close"]>>;
+
+function bashCleanupNotice(cleanup: BashRunCleanup): {
+  text: string;
+  severity: "info" | "warning" | "error";
+} {
+  const rows = cleanup.executions;
+  const failed = rows.some((row) => row.error !== undefined || row.partial
+    || (row.state === "finished" && row.exitCode !== 0 && row.stopReason === undefined));
+  let severity: "info" | "warning" | "error" = "info";
+  if (cleanup.cleanupUnknown || failed) severity = "error";
+  else if (rows.some((row) => row.stopReason !== undefined)) severity = "warning";
+  const lines = [
+    "Bash 后台任务收尾。finished 仅表示执行已结束；只有 exitCode=0 且无 error/partial 才证明成功。",
+    cleanup.cleanupUnknown
+      ? "cleanup_unknown：停止状态未确认，资源未释放；会话自动执行已停止，安全重载拒绝继续。"
+      : "受管执行均已结束。重载后旧句柄失效，不自动恢复或重跑命令。",
+    ...rows.map((row) => `${row.executionId} ${row.state} exitCode=${row.exitCode ?? "unknown"}`
+      + (row.stopReason === undefined ? "" : ` stop=${row.stopReason}`)
+      + (row.error === undefined ? "" : " error")
+      + (row.partial ? " partial" : "")),
+  ];
+  const omittedText = "部分详细输出未写入此有界摘要；请结合原工具结果及 Pi 全文路径核对。";
+  let text = lines.join("\n");
+  let omitted = false;
+  // Keep every status row; optional diagnostics may be omitted as whole lines,
+  // never turn a clipped path into a seemingly valid full-output reference.
+  for (const row of [...rows].sort((a, b) => Number(b.error !== undefined) - Number(a.error !== undefined))) {
+    for (const detail of [
+      row.error === undefined ? undefined : `${row.executionId} error: ${row.error}`,
+      row.outputFile === undefined ? undefined : `${row.executionId} fullOutputPath: ${row.outputFile}`,
+    ]) {
+      if (detail === undefined) continue;
+      const next = `${text}\n${detail}`;
+      if (Buffer.byteLength(`${next}\n${omittedText}`, "utf8") <= MAX_BASH_NOTICE_TEXT_BYTES) text = next;
+      else omitted = true;
+    }
+  }
+  if (omitted) text += `\n${omittedText}`;
+  return { text, severity };
+}
 
 function isBuiltinFileMutation(toolName: string, toolSource: string): boolean {
   return toolSource === "builtin"
@@ -189,6 +240,11 @@ export type ConversationActorEvent =
   | {
       type: "context_usage";
       conversationId: string;
+    }
+  | {
+      type: "bash_activity";
+      conversationId: string;
+      activity: ConversationBashActivity | null;
     }
   | {
       type: "loop_list";
@@ -494,6 +550,7 @@ interface RunTicket {
   reloadStop?: ReloadStopRequest;
   abortPromise?: Promise<void>;
   finishPromise?: Promise<RunSettlement>;
+  bashCleanupPromise?: Promise<BashRunCleanup>;
 }
 
 function isPlainDetails(value: unknown): value is Record<string, unknown> {
@@ -842,6 +899,8 @@ export class ConversationActor {
   private readonly projection = new ConversationProjection();
 
   private created?: CreatedPiSession;
+  /** Retains an unconfirmed old scope for honest UI, not permission to launch. */
+  private bashActivityOwner?: BashExecutionOwner;
   private unsubscribeSession?: () => void;
   private activeRun?: RunTicket;
   private initialTitle?: {
@@ -1607,6 +1666,21 @@ export class ConversationActor {
     );
   }
 
+  getBashActivity(): ConversationBashActivity | null {
+    const owner = this.bashActivityOwner ?? this.activeRun?.ownership;
+    if (owner === undefined) return null;
+    const activity = this.created?.bashExecutions?.activity(owner);
+    if (activity === undefined || activity.running + activity.stopping === 0) return null;
+    return { runId: owner.runId, ...activity };
+  }
+
+  private observeBashActivity(runtimeGeneration: number, owner: BashExecutionOwner): void {
+    if (runtimeGeneration !== this.runtimeGeneration || this.disposed
+      || (owner !== this.activeRun?.ownership && owner !== this.bashActivityOwner)) return;
+    this.bashActivityOwner = owner;
+    this.emit({ type: "bash_activity", conversationId: this.conversationId, activity: this.getBashActivity() });
+  }
+
   getCompletedOutputRate(): AverageOutputRate | undefined {
     if (this.activeRun !== undefined) return;
     const settlements = aggregateReservedConversationEntries(
@@ -2366,15 +2440,14 @@ export class ConversationActor {
       turnBoundaryCompactionRequested: false,
     };
     this.activeRun = ticket;
+    this.bashActivityOwner = ownership;
     this.projection.begin(ticket.id, input.promptText);
     this.emitSessionEvent(ticket, { type: "run_queued" });
     this.emitActivity();
 
     void this.operations.run(async () => {
       await this.executeRun(ticket, execute);
-    }).catch((error) => {
-      this.failRunInfrastructure(ticket, error);
-    });
+    }).catch((error) => this.failRunInfrastructure(ticket, error));
     return ticket.completion.promise;
   }
 
@@ -2383,6 +2456,7 @@ export class ConversationActor {
     if (
       !ticket
       || (runId !== undefined && ticket.id !== runId)
+      || ticket.bashCleanupPromise !== undefined
       || ticket.state.phase === "queued"
       || ticket.state.phase === "cancelling"
     ) {
@@ -2811,10 +2885,20 @@ export class ConversationActor {
   stopForReload(preserveSettlement: boolean): Promise<void> {
     const ticket = this.activeRun;
     if (!ticket) {
-      return this.manualCompaction ?? Promise.resolve();
+      return (this.manualCompaction ?? Promise.resolve()).then(async () => {
+        const owner = this.bashActivityOwner;
+        if (owner !== undefined) {
+          const cleanup = await this.created?.bashExecutions?.close(owner, "reload");
+          if (cleanup?.cleanupUnknown) throw new BashCleanupUnconfirmedError();
+        }
+      });
     }
     if (ticket.state.phase === "cancelling" || ticket.finishPromise) {
-      return ticket.completion.promise.then(() => undefined);
+      return ticket.completion.promise.then(() => {
+        if (this.getBashActivity()?.cleanupUnknown) {
+          throw new BashCleanupUnconfirmedError();
+        }
+      });
     }
     const existing = ticket.reloadStop;
     if (existing) {
@@ -3046,10 +3130,15 @@ export class ConversationActor {
   private async finishReloadStop(ticket: RunTicket): Promise<boolean> {
     const request = ticket.reloadStop;
     if (!request || this.activeRun !== ticket) return false;
-    if (!request.preserveSettlement) {
-      await this.settleRun(ticket, "aborted");
+    const cleanup = await this.closeBashForRun(ticket, "reload");
+    if (!request.preserveSettlement || cleanup.cleanupUnknown) {
+      await this.settleRun(ticket, cleanup.cleanupUnknown ? "failed" : "aborted");
     }
-    request.ready.resolve();
+    if (cleanup.cleanupUnknown) {
+      request.ready.reject(new BashCleanupUnconfirmedError());
+    } else {
+      request.ready.resolve();
+    }
     return true;
   }
 
@@ -3310,12 +3399,51 @@ export class ConversationActor {
     return ticket.finishPromise;
   }
 
+  private closeBashForRun(ticket: RunTicket, reason: BashExecutionStopReason): Promise<BashRunCleanup> {
+    ticket.bashCleanupPromise ??= (async () => {
+      const created = this.requireCreated();
+      const cleanup = await created.bashExecutions?.close(ticket.ownership, reason)
+        ?? { executions: [], cleanupUnknown: false };
+      if (cleanup.executions.length === 0 && !cleanup.cleanupUnknown) return cleanup;
+      if (this.activeRun !== ticket || created !== this.created || this.sessionPersistenceQuarantined) {
+        throw new Error("Bash cleanup notice lost its healthy conversation writer");
+      }
+      if (created.session.isStreaming) {
+        throw new Error("Bash cleanup notice cannot append during an active SDK tool turn");
+      }
+      const notice = createBashExecutionNoticeEntry({ runId: ticket.id, ...bashCleanupNotice(cleanup) });
+      const before = this.sessionManager.getEntries().length;
+      await created.session.sendCustomMessage(notice, { triggerTurn: false });
+      const appended = this.sessionManager.getEntries().slice(before);
+      const proof = appended.length === 1 ? parseReservedConversationEntry(appended[0]) : undefined;
+      if (proof?.kind !== "bash_execution_notice"
+        || proof.entry.content !== notice.content
+        || proof.entry.details.runId !== ticket.id
+        || proof.entry.details.severity !== notice.details.severity) {
+        throw new Error("Bash cleanup notice was not durably appended to its exact run");
+      }
+      return cleanup;
+    })();
+    return ticket.bashCleanupPromise;
+  }
+
   private async finishRun(
     ticket: RunTicket,
     outcome: RunSettlement["outcome"],
   ): Promise<RunSettlement> {
     if (this.activeRun !== ticket) {
       return ticket.completion.promise;
+    }
+    const cleanup = await this.closeBashForRun(ticket,
+      ticket.reloadStop ? "reload" : isCancelling(ticket) || outcome === "aborted" ? "abort" : "run_end");
+    const cleanupError = cleanup.cleanupUnknown
+      ? new BashCleanupUnconfirmedError()
+      : undefined;
+    if (cleanupError) {
+      outcome = "failed";
+      this.fatalError = cleanupError;
+      this.tryPauseLoopList(ticket);
+      this.emitError(cleanupError, ticket.id, true);
     }
     try {
       await this.created?.computerUse?.release();
@@ -3379,7 +3507,8 @@ export class ConversationActor {
       this.emitError(error, ticket.id);
     }
     ticket.completion.resolve(settlement);
-    ticket.reloadStop?.ready.resolve();
+    if (cleanupError) ticket.reloadStop?.ready.reject(cleanupError);
+    else ticket.reloadStop?.ready.resolve();
     // Neither the run's durable settlement nor its completion waits for title
     // generation or persistence. A newer run may occupy the writer first.
     queueMicrotask(() => this.commitInitialTitleIfIdle());
@@ -3391,8 +3520,17 @@ export class ConversationActor {
     return settlement;
   }
 
-  private failRunInfrastructure(ticket: RunTicket, error: unknown): void {
+  private async failRunInfrastructure(ticket: RunTicket, error: unknown): Promise<void> {
     this.cancelInitialTitle();
+    this.created?.bashExecutions?.requestStop(ticket.ownership, "abort");
+    this.fatalError = error instanceof Error ? error : new Error(String(error));
+    if (this.activeRun === ticket) ticket.state = { phase: "cancelling" };
+    try {
+      // Writer health is unknown here: quiesce resources, never retry appends.
+      await this.created?.bashExecutions?.close(ticket.ownership, "abort");
+    } catch (cleanupError) {
+      this.emitError(cleanupError, ticket.id);
+    }
     void this.created?.computerUse?.release().catch((releaseError) => {
       this.emitError(releaseError, ticket.id);
     });
@@ -3428,6 +3566,7 @@ export class ConversationActor {
 
   private cancelRun(ticket: RunTicket): Promise<void> {
     if (this.activeRun !== ticket) return Promise.resolve();
+    this.created?.bashExecutions?.requestStop(ticket.ownership, ticket.reloadStop ? "reload" : "abort");
     // Request release now so no later primitive can begin while abort travels
     // through Pi. DesktopController retains the exact lease until in-flight
     // native work quiesces.
@@ -3473,6 +3612,11 @@ export class ConversationActor {
 
   private onSessionEvent(event: AgentSessionEvent): void {
     const ticket = this.activeRun;
+    if (event.type === "agent_start" && ticket?.bashCleanupPromise !== undefined) {
+      void this.session.abort().catch((error) => this.emitError(error));
+      this.emitError("An extension started an Agent turn during run cleanup; it was stopped", ticket.id);
+      return;
+    }
     if (
       ticket
       && event.type === "agent_start"
@@ -3670,7 +3814,7 @@ export class ConversationActor {
     input: ToolCallGateInput,
   ): Promise<{ block?: boolean; reason?: string } | undefined> {
     const ticket = this.activeRun;
-    if (!ticket || ticket.state.phase !== "running") {
+    if (!ticket || ticket.state.phase !== "running" || ticket.bashCleanupPromise !== undefined) {
       return {
         block: true,
         reason: "No active run owns this tool call",
@@ -3711,6 +3855,7 @@ export class ConversationActor {
       input.signal?.aborted
       || this.activeRun !== ticket
       || ticket.state.phase !== "running"
+      || ticket.bashCleanupPromise !== undefined
     ) {
       return {
         block: true,
@@ -3971,6 +4116,11 @@ export class ConversationActor {
           getLoopList: () => this.getLoopList(),
           getLoopListElapsedMinutes: () => this.getLoopListElapsedMinutes(),
           getServiceTier: () => this.serviceTierSelection,
+          bashExecutions: {
+            conversationId: this.conversationId,
+            getOwner: () => this.currentRunOwnership(),
+            onChange: (owner) => this.observeBashActivity(runtimeGeneration, owner),
+          },
           ...(this.profileSnapshot.role.toolMode === "full_access"
             ? {
                 computerUse: {

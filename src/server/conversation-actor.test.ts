@@ -41,6 +41,7 @@ import {
   createRunSettlementEntry,
   createServiceTierSelectionEntry,
   LOOP_LIST_CUSTOM_TYPE,
+  BASH_EXECUTION_NOTICE_CUSTOM_TYPE,
 } from "./conversation-meta.js";
 import { EDIT_BUDGET_CUSTOM_TYPE } from "./edit-budget.js";
 import {
@@ -49,6 +50,7 @@ import {
   type ConversationActorOpenOptions,
 } from "./conversation-actor.js";
 import { MAX_HISTORY_SNAPSHOT_BYTES } from "./conversation-history.js";
+import type { BashExecutionLifecycle } from "./bash-execution.js";
 import type {
   CreatedPiSession,
   CreatePiSessionOptions,
@@ -271,6 +273,7 @@ class FakeRuntime implements PiRuntimeLike {
   activationError?: Error;
   pendingExtensionErrors: ExtensionError[] = [];
   computerUse?: CreatedPiSession["computerUse"];
+  bashExecutions?: BashExecutionLifecycle;
   extensionErrorHandler?: (error: ExtensionError) => void;
   nextSteeringCapture?: AgentMessage;
   readonly steeringCaptures: AgentMessage[] = [];
@@ -370,6 +373,7 @@ class FakeRuntime implements PiRuntimeLike {
       },
       dynamicProviderNames: () => new Set(),
       ...(this.computerUse === undefined ? {} : { computerUse: this.computerUse }),
+      ...(this.bashExecutions === undefined ? {} : { bashExecutions: this.bashExecutions }),
       dispose: async () => {
         this.disposeCalls++;
         this.session.dispose();
@@ -602,6 +606,143 @@ function checkToolTurnBoundary(runtime: FakeRuntime): boolean {
     hasToolResults: true,
   }));
 }
+
+function fakeBashLifecycle() {
+  return {
+    requestStop: vi.fn<BashExecutionLifecycle["requestStop"]>(),
+    close: vi.fn<BashExecutionLifecycle["close"]>(async () => ({ executions: [], cleanupUnknown: false })),
+    dispose: vi.fn<BashExecutionLifecycle["dispose"]>(async () => ({ executions: [], cleanupUnknown: false })),
+    activity: vi.fn<BashExecutionLifecycle["activity"]>(() => ({ running: 0, stopping: 0, cleanupUnknown: false })),
+  } satisfies BashExecutionLifecycle;
+}
+
+function appendBashNoticeLikeSdk(fixture: ActorFixture): void {
+  fixture.runtime.session.resumeImplementation = async (message, options) => {
+    expect(options?.triggerTurn).toBe(false);
+    expect(message.customType).toBe(BASH_EXECUTION_NOTICE_CUSTOM_TYPE);
+    fixture.manager.appendCustomMessageEntry(
+      message.customType, message.content, message.display, message.details,
+    );
+  };
+}
+
+const BASH_EXECUTION_ID = "ac738f02-4c4d-4fb7-9b53-ea3bb9c5d5d";
+
+describe("ConversationActor Bash lifecycle", () => {
+  it("awaits cleanup and durable notice before publishing terminal", async () => {
+    const runtime = new FakeRuntime();
+    const bash = fakeBashLifecycle();
+    const cleanup = deferred<Awaited<ReturnType<BashExecutionLifecycle["close"]>>>();
+    bash.close.mockImplementation(() => cleanup.promise);
+    runtime.bashExecutions = bash;
+    const fixture = await openActor({ runtime });
+    appendBashNoticeLikeSdk(fixture);
+    const promptFinished = deferred();
+    runtime.session.promptImplementation = () => promptFinished.promise;
+    const running = fixture.actor.startPrompt({ runId: RUN_A, text: "background", origin: "inbox" });
+    await vi.waitFor(() => expect(runtime.session.promptCalls).toHaveLength(1));
+    const owner = runtime.createOptions?.bashExecutions?.getOwner();
+    expect(owner).toBe(fixture.actor.currentRunOwnership(RUN_A));
+    promptFinished.resolve();
+    await vi.waitFor(() => expect(bash.close).toHaveBeenCalledWith(owner, "run_end"));
+    expect(fixture.actor.currentRunOwnership(RUN_A)).toBeUndefined();
+    await expect(runtime.session.toolCallGate?.({
+      toolCallId: "late-call", toolName: "read", toolSource: "builtin", args: { path: "file" },
+    })).resolves.toMatchObject({ block: true });
+    runtime.session.eventListener?.(nativeEvent({ type: "agent_start" }));
+    expect(runtime.session.abortCalls).toBe(1);
+    expect(fixture.events.some((event) => event.type === "completion")).toBe(false);
+    expect(aggregateReservedConversationEntries(fixture.manager.getBranch()).runSettlements).toEqual([]);
+    cleanup.resolve({ executions: [{ executionId: BASH_EXECUTION_ID, state: "finished", exitCode: 0 }], cleanupUnknown: false });
+    await expect(running).resolves.toMatchObject({ outcome: "completed" });
+    const branch = fixture.manager.getBranch();
+    const noticeIndex = branch.findIndex((entry) => entry.type === "custom_message" && entry.customType === BASH_EXECUTION_NOTICE_CUSTOM_TYPE);
+    const settlementIndex = branch.findIndex((entry) => entry.type === "custom" && entry.customType === "piweb.run_settlement.v1");
+    expect(noticeIndex).toBeGreaterThanOrEqual(0);
+    expect(settlementIndex).toBeGreaterThan(noticeIndex);
+    expect(fixture.actor.projectConversationItems().items).toContainEqual(expect.objectContaining({ kind: "bash_notice", runId: RUN_A }));
+    await fixture.actor.dispose();
+  });
+
+  it("requests stop synchronously on abort, not physical agent_end/compaction", async () => {
+    const runtime = new FakeRuntime();
+    const bash = fakeBashLifecycle();
+    runtime.bashExecutions = bash;
+    const fixture = await openActor({ runtime });
+    const promptFinished = deferred();
+    runtime.session.promptImplementation = () => promptFinished.promise;
+    const running = fixture.actor.startPrompt({ runId: RUN_A, text: "background", origin: "inbox" });
+    await vi.waitFor(() => expect(runtime.session.promptCalls).toHaveLength(1));
+    const owner = fixture.actor.currentRunOwnership(RUN_A);
+    runtime.session.eventListener?.(nativeEvent({ type: "agent_end" }));
+    runtime.session.eventListener?.(nativeEvent({ type: "compaction_start" }));
+    runtime.session.eventListener?.(nativeEvent({ type: "compaction_end", aborted: false, result: {} }));
+    expect(bash.requestStop).not.toHaveBeenCalled();
+    expect(bash.close).not.toHaveBeenCalled();
+    const aborting = fixture.actor.abort(RUN_A);
+    expect(bash.requestStop).toHaveBeenCalledWith(owner, "abort");
+    await aborting;
+    promptFinished.resolve();
+    await expect(running).resolves.toMatchObject({ outcome: "aborted" });
+    expect(bash.close).toHaveBeenCalledWith(owner, "abort");
+    await fixture.actor.dispose();
+  });
+
+  it.each([false, true])("closes Bash and rejects safe reload if cleanup is unknown (preserve=%s)", async (preserve) => {
+    const runtime = new FakeRuntime();
+    const bash = fakeBashLifecycle();
+    bash.close.mockResolvedValue({ executions: [{ executionId: BASH_EXECUTION_ID, state: "stopping" }], cleanupUnknown: true });
+    bash.activity.mockReturnValue({ running: 0, stopping: 1, cleanupUnknown: true });
+    runtime.bashExecutions = bash;
+    const fixture = await openActor({ runtime });
+    appendBashNoticeLikeSdk(fixture);
+    const promptFinished = deferred();
+    runtime.session.promptImplementation = () => promptFinished.promise;
+    const running = fixture.actor.startPrompt({ runId: RUN_A, text: "reload", origin: "inbox" });
+    await vi.waitFor(() => expect(runtime.session.promptCalls).toHaveLength(1));
+    const stopping = fixture.actor.stopForReload(preserve);
+    const rejected = expect(stopping).rejects.toThrow(/Bash.*unconfirmed/i);
+    promptFinished.resolve();
+    await rejected;
+    await expect(running).resolves.toMatchObject({ outcome: "failed" });
+    expect(bash.close).toHaveBeenCalledWith(expect.objectContaining({ runId: RUN_A }), "reload");
+    expect(fixture.actor.getState().fatalError).toMatch(/Bash.*unconfirmed/i);
+    expect(fixture.actor.getBashActivity()).toMatchObject({ runId: RUN_A, stopping: 1, cleanupUnknown: true });
+    expect(fixture.actor.getLoopList().armed).toBe(false);
+    expect(() => fixture.actor.startPrompt({ runId: RUN_B, text: "retry", origin: "browser" })).toThrow(/faulted/i);
+    await fixture.actor.dispose();
+  });
+
+  it("keeps Bash across LoopList continuation and ignores stale owner notifications", async () => {
+    const runtime = new FakeRuntime();
+    const bash = fakeBashLifecycle();
+    runtime.bashExecutions = bash;
+    const fixture = await openActor({ runtime });
+    let oldOwner: ReturnType<NonNullable<CreatePiSessionOptions["bashExecutions"]>["getOwner"]>;
+    runtime.session.promptImplementation = async () => {
+      oldOwner = fixture.actor.currentRunOwnership(RUN_A);
+      fixture.actor.writeLoopList([{ id: "work", text: "continue", status: "active" }]);
+    };
+    runtime.session.resumeImplementation = async (_message, options) => {
+      expect(options?.triggerTurn).toBe(true);
+      expect(bash.close).not.toHaveBeenCalled();
+      expect(runtime.createOptions?.bashExecutions?.getOwner()).toBe(oldOwner);
+      fixture.actor.writeLoopList([{ id: "work", text: "continue", status: "completed" }]);
+    };
+    await fixture.actor.startPrompt({ runId: RUN_A, text: "continue", origin: "browser" });
+    expect(bash.close).toHaveBeenCalledTimes(1);
+    const promptFinished = deferred();
+    runtime.session.promptImplementation = () => promptFinished.promise;
+    const running = fixture.actor.startPrompt({ runId: RUN_B, text: "new run", origin: "inbox" });
+    await vi.waitFor(() => expect(fixture.actor.currentRunOwnership(RUN_B)).toBeDefined());
+    const before = fixture.events.length;
+    runtime.createOptions?.bashExecutions?.onChange?.(oldOwner!);
+    expect(fixture.events).toHaveLength(before);
+    promptFinished.resolve();
+    await running;
+    await fixture.actor.dispose();
+  });
+});
 
 describe("ConversationActor", () => {
   it("restores the latest settled output rate from the durable branch", async () => {

@@ -38,6 +38,37 @@
   outline-offset: 3px;
 }
 
+.app-shell > .composer-wrap > .bash-activity-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  margin: 0 8px 7px;
+  padding: 6px 9px;
+  border: 1px solid var(--rebel-line);
+  border-left: 3px solid var(--rebel-red-dark);
+  color: var(--rebel-paper-muted);
+  background: var(--rebel-black);
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 9px;
+  line-height: 1.4;
+}
+
+.app-shell .bash-activity-strip strong {
+  color: var(--rebel-paper);
+  font-size: inherit;
+  font-weight: 800;
+}
+
+.app-shell .bash-activity-strip.cleanup-unknown {
+  border-left-color: var(--rebel-red);
+  color: #e5a092;
+}
+
+.app-shell .bash-activity-strip.cleanup-unknown strong:last-child {
+  color: #f0ad9f;
+}
+
 .app-shell > .composer-wrap > .pending-admissions {
   gap: 4px;
   margin: 0 8px 8px;

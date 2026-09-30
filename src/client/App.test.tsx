@@ -1916,13 +1916,33 @@ describe("App", () => {
           items: [{ id: "focused", text: "Focused item", status: "pending" }],
           armed: false,
         },
+        bashActivity: {
+          runId: "33333333-3333-4333-8333-333333333333",
+          running: 1,
+          stopping: 0,
+          cleanupUnknown: false,
+        },
         window: completeConversationWindow,
       });
     });
     expect(screen.getByRole("region", { name: "Tasks" })).toBeInTheDocument();
+    expect(screen.getByRole("status", { name: "后台命令状态" }))
+      .toHaveTextContent("执行中 1");
     expect(screen.getByText("已暂停")).toBeInTheDocument();
 
     act(() => {
+      socketMock.rawEmit?.({
+        type: "bash_activity",
+        sessionId,
+        conversationId: CONVERSATION_ID,
+        focusId: FOCUS_A_SECOND,
+        activity: {
+          runId: "33333333-3333-4333-8333-333333333333",
+          running: 0,
+          stopping: 1,
+          cleanupUnknown: true,
+        },
+      });
       socketMock.rawEmit?.({
         type: "loop_list_update",
         sessionId,
@@ -1935,8 +1955,22 @@ describe("App", () => {
       });
     });
     expect(screen.getByText("已暂停")).toBeInTheDocument();
+    expect(screen.getByRole("status", { name: "后台命令状态" }))
+      .toHaveTextContent("执行中 1");
 
     act(() => {
+      socketMock.rawEmit?.({
+        type: "bash_activity",
+        sessionId,
+        conversationId: CONVERSATION_ID,
+        focusId: FOCUS_A,
+        activity: {
+          runId: "33333333-3333-4333-8333-333333333333",
+          running: 0,
+          stopping: 1,
+          cleanupUnknown: true,
+        },
+      });
       socketMock.rawEmit?.({
         type: "loop_list_update",
         sessionId,
@@ -1958,10 +1992,91 @@ describe("App", () => {
         focusId: FOCUS_A,
         items: [],
         loopList: { items: [], armed: false },
+        bashActivity: null,
         window: completeConversationWindow,
       });
     });
     expect(screen.queryByRole("region", { name: "Tasks" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("status", { name: "后台命令状态" }))
+      .not.toBeInTheDocument();
+  });
+
+  it("hides cached Bash activity while a restored focus awaits its history snapshot", () => {
+    const sessionId = startFocusReplacementProject();
+    const cachedActivity = {
+      runId: "33333333-3333-4333-8333-333333333333",
+      running: 1,
+      stopping: 0,
+      cleanupUnknown: false,
+    };
+    act(() => socketMock.rawEmit?.({
+      type: "conversation_snapshot",
+      sessionId,
+      conversationId: CONVERSATION_ID,
+      focusId: FOCUS_A,
+      items: snapshotItems([{
+        id: "cached-a-message",
+        role: "user",
+        text: "cached A activity",
+        thinking: "",
+        tools: [],
+      }]),
+      bashActivity: cachedActivity,
+      window: completeConversationWindow,
+    }));
+    expect(screen.getByRole("status", { name: "后台命令状态" }))
+      .toHaveTextContent("执行中 1");
+
+    fireEvent.click(screen.getByRole("button", { name: "打开会话 B" }));
+    const focusB = latestCommand("focus_conversation");
+    const focusBId = "ae301850-745d-44dd-a30f-5e4b30fe44b2";
+    act(() => {
+      socketMock.rawEmit?.({
+        type: "focus_attached",
+        operation: "focus_conversation",
+        commandId: focusB.commandId,
+        sessionId,
+        projectId: PROJECT_ID,
+        conversationId: CONVERSATION_B,
+        focusId: focusBId,
+      });
+      socketMock.rawEmit?.({
+        type: "state",
+        state: {
+          sessionId,
+          projectId: PROJECT_ID,
+          conversationId: CONVERSATION_B,
+          focusId: focusBId,
+          cwd: "E:\\work",
+          busy: false,
+          thinkingLevel: "off",
+          toolMode: "read_only",
+          availableThinkingLevels: ["off", "high"],
+          selectedModel: { provider: "provider", id: "model" },
+          providers: [],
+        },
+      });
+      socketMock.rawEmit?.({
+        type: "conversation_snapshot",
+        sessionId,
+        conversationId: CONVERSATION_B,
+        focusId: focusBId,
+        items: [],
+        bashActivity: null,
+        window: completeConversationWindow,
+      });
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "打开会话 A" }));
+    expect(latestCommand("focus_conversation").conversationId)
+      .toBe(CONVERSATION_ID);
+    expect(screen.getByRole("status", { name: "正在同步会话…" }))
+      .toBeInTheDocument();
+    expect(screen.getByText("cached A activity")).toBeInTheDocument();
+    // The cached A projection still contains one running command, but only its
+    // next focus-matched history snapshot may make that count live again.
+    expect(screen.queryByRole("status", { name: "后台命令状态" }))
+      .not.toBeInTheDocument();
   });
 
   it("does not apply App state from stale same-focus snapshots", async () => {

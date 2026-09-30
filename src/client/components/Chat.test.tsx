@@ -12,6 +12,7 @@ import {
 import type { ComponentProps } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
+  ConversationBashNotice,
   ConversationMessageCard,
   ConversationRoleSnapshot,
   PendingPromptAdmissionSnapshot as PendingAdmission,
@@ -130,6 +131,53 @@ afterEach(() => {
 });
 
 describe("Chat", () => {
+  it("hides cached Bash activity until the focused history snapshot is ready", () => {
+    const focus = {
+      sessionId: "11111111-1111-4111-8111-111111111111",
+      conversationId: "conversation-a",
+      focusId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1",
+    };
+    const notice: ConversationBashNotice = {
+      kind: "bash_notice",
+      id: "entry-bash-notice",
+      timestamp: "2026-09-30T10:00:00.000Z",
+      runId: "33333333-3333-4333-8333-333333333333",
+      severity: "warning",
+      text: "已请求停止后台命令，但退出状态尚未确认。",
+    };
+    const chat: ChatState = {
+      ...emptyChat,
+      focus,
+      items: [notice],
+      bashActivity: {
+        runId: notice.runId,
+        running: 2,
+        stopping: 1,
+        cleanupUnknown: true,
+      },
+    };
+
+    const rendered = render(view(chat, "", undefined, {
+      conversationReady: false,
+    }));
+    expect(screen.queryByRole("status", { name: "后台命令状态" }))
+      .not.toBeInTheDocument();
+
+    // App may render the cached ChatState during focus restore, but its
+    // readiness prop stays false until the matching history snapshot arrives.
+    rendered.rerender(view(chat));
+    const strip = screen.getByRole("status", { name: "后台命令状态" });
+    expect(strip).toHaveAttribute("aria-live", "polite");
+    expect(strip).toHaveTextContent("后台 Bash");
+    expect(strip).toHaveTextContent("执行中 2");
+    expect(strip).toHaveTextContent("停止中 1");
+    expect(strip).toHaveTextContent("停止状态未确认");
+    expect(screen.getByRole("note", { name: "后台 Bash 警告" }))
+      .toHaveTextContent(notice.text);
+    expect(screen.queryByText(notice.text, { selector: ".message-text" }))
+      .not.toBeInTheDocument();
+  });
+
   it("uses one phone composer while opening Tasks, pending work, and controls as latest-prop sheets", () => {
     const onAbort = vi.fn();
     const onSettings = vi.fn();

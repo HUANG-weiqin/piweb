@@ -1600,6 +1600,7 @@ export function App() {
       projectionSeq: event.projectionSeq,
       historyWindow: event.window,
       completedOutputRate: event.completedOutputRate,
+      bashActivity: event.bashActivity,
     })) return;
     const scope = draftScopeRef.current;
     if (
@@ -2573,6 +2574,16 @@ export function App() {
           pending.target.close();
           setError("无法打开图片");
         }
+      } else if (event.type === "bash_activity") {
+        if (pendingFocusRef.current) return;
+        if (!matchesFocus(event.sessionId, event.conversationId, event.focusId)) return;
+        const focus = focusRef.current;
+        if (!focus) return;
+        dispatchChat({
+          type: "bash_activity",
+          activity: event.activity,
+          ...focus,
+        });
       } else if (event.type === "loop_list_update") {
         if (pendingFocusRef.current) return;
         if (!matchesFocus(event.sessionId, event.conversationId, event.focusId)) return;
