@@ -167,9 +167,9 @@ class FakeSessionControl {
   abortCalls = 0;
   disposeCalls = 0;
   skipNextCustomMessagePersistence = false;
-  /** Real text mirror of the fake SDK queue; identity capture is separate. */
+  /** Pi's private text mirror updates before the low-level core enqueue. */
   readonly steeringMessages: string[] = [];
-  /** Exact user message objects queued at the simulated SDK steering boundary. */
+  /** Exact user messages that reached the simulated low-level core queue. */
   readonly steeringAgentMessages: AgentMessage[] = [];
   onSteeringEnqueue?: (message: AgentMessage) => void;
   /** Exact Pi prompt disposition for busy browser steer prompts. */
@@ -253,8 +253,8 @@ class FakeSessionControl {
               content: queuedText,
               timestamp: Date.now(),
             });
-            control.onSteeringEnqueue?.(message);
             control.steeringMessages.push(queuedText);
+            control.onSteeringEnqueue?.(message);
             control.steeringAgentMessages.push(message);
           }
           options.preflightResult?.(disposition);
@@ -276,8 +276,8 @@ class FakeSessionControl {
               content: queuedText,
               timestamp: Date.now(),
             });
-            control.onSteeringEnqueue?.(message);
             control.steeringMessages.push(queuedText);
+            control.onSteeringEnqueue?.(message);
             control.steeringAgentMessages.push(message);
           }
           return disposition;

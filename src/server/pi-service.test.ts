@@ -158,8 +158,8 @@ function fakeSession(settings = fakeSettings()): FakeSession {
           content: [{ type: "text", text }],
           timestamp: Date.now(),
         } as AgentMessage;
-        this.onSteeringEnqueue?.(message);
         this.steeringMessages.push(text);
+        this.onSteeringEnqueue?.(message);
         this.steeringAgentMessages.push(message);
         options.preflightResult?.("queued");
         return;
@@ -190,8 +190,8 @@ function fakeSession(settings = fakeSettings()): FakeSession {
         content: [{ type: "text", text }],
         timestamp: Date.now(),
       } as AgentMessage;
-      this.onSteeringEnqueue?.(message);
       this.steeringMessages.push(text);
+      this.onSteeringEnqueue?.(message);
       this.steeringAgentMessages.push(message);
       return "queued" as const;
     },

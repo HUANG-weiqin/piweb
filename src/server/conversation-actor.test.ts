@@ -114,8 +114,9 @@ interface FakeSession extends AgentSession {
   disposeCalls: number;
   eventListener?: (event: AgentSessionEvent) => void;
   steerCalls: string[];
-  /** Real text steering queue mirror; identity capture uses exact AgentMessage. */
+  /** Pi's private text mirror updates before the low-level core enqueue. */
   steeringMessages: string[];
+  /** Exact AgentMessages that reached the simulated low-level core queue. */
   steeringAgentMessages: AgentMessage[];
   onSteeringEnqueue?: (message: AgentMessage) => void;
   nextSteeringMessage?: AgentMessage;
@@ -253,8 +254,8 @@ function fakeSession(): FakeSession {
         timestamp: Date.now(),
       });
       this.nextSteeringMessage = undefined;
-      this.onSteeringEnqueue?.(message);
       this.steeringMessages.push(queuedText);
+      this.onSteeringEnqueue?.(message);
       this.steeringAgentMessages.push(message);
       return message;
     },
@@ -2425,9 +2426,10 @@ describe("ConversationActor", () => {
       await expect(admission).rejects.toThrow(
         "The agent run stopped accepting messages before enqueue",
       );
-      expect(fixture.runtime.session.steeringMessages).not.toContain(
+      expect(fixture.runtime.session.steeringMessages).toContain(
         "after low-level loop",
       );
+      expect(fixture.runtime.session.steeringAgentMessages).toEqual([]);
       expect(fixture.actor.pendingPromptAdmissions()).toEqual([]);
       expect(fixture.events).not.toContainEqual(expect.objectContaining({
         type: "prompt_admitted",
