@@ -476,7 +476,6 @@ describe("ProjectSessionCoordinator", () => {
     expect(turnBoundaryCheck?.({
       contextUsage: fixture.runtime.control(actor.conversationId)
         .session.getContextUsage?.(),
-      hasToolResults: false,
     })).toBe(true);
     release.resolve();
 

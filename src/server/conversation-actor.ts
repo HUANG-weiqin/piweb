@@ -4397,7 +4397,6 @@ export class ConversationActor {
     ) {
       return true;
     }
-    if (!input.hasToolResults) return false;
     const contextCompactionRequested = ticket.contextCompactionRequested;
     ticket.contextCompactionRequested = false;
     if (ticket.sawSdkCompactionAttempt) return false;

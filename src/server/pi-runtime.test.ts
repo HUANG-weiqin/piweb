@@ -580,12 +580,23 @@ describe("PiRuntime session ownership", () => {
       newMessages: [],
     } as Parameters<NonNullable<AgentSession["agent"]["finishTurn"]>>[0];
 
+    await expect(agent.finishTurn?.({
+      ...toolTurn,
+      message: { stopReason: "stop" },
+    } as typeof toolTurn)).resolves.toBeUndefined();
+    await expect(agent.finishTurn?.({
+      ...toolTurn,
+      toolResults: [],
+    })).resolves.toBeUndefined();
+    expect(checks).toEqual([]);
+    expect(getContextUsage).not.toHaveBeenCalled();
+    expect(agent.hasQueuedMessages()).toBe(true);
+
     await expect(agent.finishTurn?.(toolTurn)).resolves.toEqual({ action: "end" });
     expect(created.session.agent.hasQueuedMessages()).toBe(false);
     expect(getContextUsage).toHaveBeenCalledOnce();
     expect(checks).toEqual([{
       contextUsage: { tokens: 700, contextWindow: 1_000, percent: 70 },
-      hasToolResults: true,
     }]);
     expect(upstreamReceiver).toBe(agent);
     created.releaseTurnBoundaryPause?.();

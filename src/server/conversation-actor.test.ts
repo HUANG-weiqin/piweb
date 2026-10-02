@@ -744,7 +744,6 @@ function agentMessage(value: unknown): AgentMessage {
 function checkToolTurnBoundary(runtime: FakeRuntime): boolean {
   return Boolean(runtime.createOptions?.turnBoundaryCheck?.({
     contextUsage: runtime.session.getContextUsage(),
-    hasToolResults: true,
   }));
 }
 
@@ -4149,7 +4148,6 @@ describe("ConversationActor", () => {
       fixture.runtime.session.contextPercent = 75;
       expect(fixture.runtime.createOptions?.turnBoundaryCheck?.({
         contextUsage: fixture.runtime.session.getContextUsage(),
-        hasToolResults: true,
       })).toBe(true);
       emit()?.(nativeEvent({ type: "agent_end" }));
     };
@@ -4171,7 +4169,6 @@ describe("ConversationActor", () => {
       }));
       expect(fixture.runtime.createOptions?.turnBoundaryCheck?.({
         contextUsage: fixture.runtime.session.getContextUsage(),
-        hasToolResults: false,
       })).toBe(false);
       emit()?.(nativeEvent({ type: "agent_end" }));
     };
@@ -4214,7 +4211,6 @@ describe("ConversationActor", () => {
       fixture.runtime.session.contextPercent = 40;
       expect(fixture.runtime.createOptions?.turnBoundaryCheck?.({
         contextUsage: fixture.runtime.session.getContextUsage(),
-        hasToolResults: true,
       })).toBe(true);
       emit()?.(nativeEvent({ type: "agent_end" }));
     };
@@ -4352,7 +4348,6 @@ describe("ConversationActor", () => {
       fixture.runtime.session.contextPercent = 95;
       expect(fixture.runtime.createOptions?.turnBoundaryCheck?.({
         contextUsage: fixture.runtime.session.getContextUsage(),
-        hasToolResults: true,
       })).toBe(true);
       emit()?.(nativeEvent({ type: "agent_end" }));
       emit()?.(nativeEvent({ type: "compaction_start", reason: "threshold" }));
@@ -4376,7 +4371,6 @@ describe("ConversationActor", () => {
       }));
       expect(fixture.runtime.createOptions?.turnBoundaryCheck?.({
         contextUsage: fixture.runtime.session.getContextUsage(),
-        hasToolResults: false,
       })).toBe(false);
       emit()?.(nativeEvent({ type: "agent_end" }));
     };
@@ -4403,7 +4397,6 @@ describe("ConversationActor", () => {
       fixture.runtime.session.contextPercent = 80;
       expect(fixture.runtime.createOptions?.turnBoundaryCheck?.({
         contextUsage: fixture.runtime.session.getContextUsage(),
-        hasToolResults: true,
       })).toBe(true);
     };
     fixture.runtime.session.compactImplementation = async () => {
@@ -4464,7 +4457,6 @@ describe("ConversationActor", () => {
     expect(turnBoundaryCheck).toBeDefined();
     expect(turnBoundaryCheck?.({
       contextUsage: fixture.runtime.session.getContextUsage(),
-      hasToolResults: false,
     })).toBe(true);
 
     releaseRun.resolve();
@@ -4515,7 +4507,6 @@ describe("ConversationActor", () => {
     const turnBoundaryCheck = fixture.runtime.createOptions?.turnBoundaryCheck;
     expect(turnBoundaryCheck?.({
       contextUsage: fixture.runtime.session.getContextUsage(),
-      hasToolResults: false,
     })).toBe(true);
     releaseRun.resolve();
 
@@ -4859,7 +4850,6 @@ describe("ConversationActor", () => {
       fixture.runtime.session.contextPercent = 80;
       fixture.runtime.createOptions?.turnBoundaryCheck?.({
         contextUsage: fixture.runtime.session.getContextUsage(),
-        hasToolResults: true,
       });
       emit()?.(nativeEvent({ type: "agent_end" }));
     };

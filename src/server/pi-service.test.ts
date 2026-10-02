@@ -4096,7 +4096,6 @@ describe("PiConnection coordinated project view", () => {
             contextWindow: 1_000,
             percent: 64,
           },
-          hasToolResults: false,
         })).toBe(false);
       };
 

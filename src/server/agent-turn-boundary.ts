@@ -5,7 +5,6 @@ import type {
 
 export interface AgentTurnBoundaryCheck {
   contextUsage: ContextUsage | undefined;
-  hasToolResults: boolean;
 }
 
 export type AgentTurnBoundaryHandler = (
@@ -53,7 +52,6 @@ export function installAgentTurnBoundaryCheck(
     try {
       hostShouldStop = handler({
         contextUsage: session.getContextUsage(),
-        hasToolResults: turn.toolResults.length > 0,
       });
     } catch {
       // Pi requires host boundary checks to be non-throwing. A later boundary
