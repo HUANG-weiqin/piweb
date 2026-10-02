@@ -1,6 +1,6 @@
 # Agent 协作
 
-`updated: 2026-09-25`
+`updated: 2026-10-02`
 
 ## 这个模块是干什么的
 
@@ -24,6 +24,7 @@ Pi Web 把同一项目中的每个持久 conversation 运行成平级 Agent。�
 - `RoleCatalog` 用当前项目 actor 的 session-local 模型目录动态计算模板是否可用，因此项目静态 provider 也能参与选择；空项目使用 coordinator 持有的 project model catalog，它经过相同 trust/resource/provider 校验，但不会创建隐藏 AgentSession。角色 CRUD、模型列表和 API Key provider 校验都使用这条项目目录；非空默认服务层级还必须由固定模型的请求路由显式声明支持。显式 `compactionModel` 也必须当前可用、contextWindow 为有限正数且不小于 primary；主模型或压缩模型变化时都重验。目录漂移可使模板 unavailable，但不会阻止已有 frozen conversation 打开；每次默认压缩仍 fresh-resolve 并重验，失败不回退。真正创建仍会由 `PiRuntime` 在项目资源加载后再次校验固定模型。
 - 新会话把完整角色修订（包括 primary model、nullable `compactionModel`、默认思考强度、默认服务层级、工具权限与会话管理能力）复制到 `piweb.conversation_meta.v1`；用户和 Agent 创建的队友都从这份冻结快照取得初始服务层级与压缩模型 identity。之后修改或删除模板不会自动改变旧会话；用户可在 idle 边界显式应用一个当前可用模板，宿主追加同时携带新有效服务层级的 `piweb.conversation_role_change.v1` 并用同一 SessionManager 重建 AgentSession，失败补偿也用一条记录恢复旧角色与旧有效层级。角色 prompt 追加到会话 system prompt，实际模型与初始思考强度必须与当前快照完全一致，SDK fallback/clamp 会被拒绝。conversation metadata 与角色变更记录必须携带当前完整字段；缺失字段一律 fail closed，不在打开时迁移或推导默认值。
 - 正式打开前必须已经有当前格式的冻结 conversation profile；缺失 profile 或 role snapshot 的 JSONL 一律拒绝，不追加猜测性的兼容快照。
+- extension startup 后冻结完整 normalized prompt/tool topology，不能只冻结 rendered system prompt：`before_agent_start` 返回的 `systemPromptOptions` 全字段（含原地修改）、运行期 active tool set 和 registry refresh 都受边界检查。selected tools、sections、context files、skills、tool snippets/guidelines 和 prompt guidelines 也属于 provider prefix；角色切换/rewind 只能通过受控 runtime rebuild 建立新 topology。
 
 ## Actor 所有权
 
@@ -34,6 +35,7 @@ Pi Web 把同一项目中的每个持久 conversation 运行成平级 Agent。�
 - 每个项目还 singleflight 建立一个无 AgentSession 的 project model catalog；空项目可据此显示项目扩展模型、管理角色和创建第一条会话，最后一个项目 handle 释放后统一 dispose；
 - actor 原子拥有角色快照（含冻结的 primary/compaction identity）、`SessionManager`、writer lease、隔离的 settings/model registry、`AgentSession`、唯一 `activeRun`、串行队列和观察者；coordinator 将该完整 frozen identity 传入每次 runtime create/reopen/switch/rollback/peer 路径；
 - `activeRun` 的 `queued / running / waiting / cancelling` 是侧栏 activity 与 busy 的唯一来源；
+- Pi 1 prompt disposition 必须精确匹配：initial 为 `started`，busy browser prompt/显式 steer 为 `queued`，`handled` 不能作为宿主启动或入队证明。input handler 可异步等待，故 PiRuntime 用 invocation-scoped `AsyncLocalStorage` 包住整次 SDK 调用，在 native `agent.steer` enqueue 前同步复核 exact active ticket 并捕获恰好一个原始 user message identity，调用返回后再检查 disposition 与 admission/投递结算；不能按正文/队列长度推断，也不能只靠同步调用栈捕获。browser 与 explicit guidance 共用 accepted-but-unobserved FIFO，raw user `message_end` 的同对象持久证明才结算 delivery；
 - 浏览器切换焦点只更换观察者，不 abort、dispose 或暂停后台 actor；
 - coordinator close 会同步封闭新 lifecycle 入队并结算全部 extension UI/waiter，排空关闭前已接收的 lifecycle task 后再释放资源；尚未开始的 task 在任何持久写前失败，不能让 close 返回后继续追加卡片。迟到 actor/catalog 会立即 dispose，随后清理包括无浏览器观察者在内的全部 actor、后台恢复任务与项目 handle。
 
@@ -88,14 +90,14 @@ sender card 的 `running/delivered` 更新可因 active actor 的观察时点出
 
 ## 上下文前缀与缓存
 
-- 已进入模型上下文的 user、assistant、tool 和 incoming custom message 都是 append-only；新的宿主提示只附加到以后收到的新消息，不能回填或重写旧 entry。
-- 静默 `wait_for_session` 在四分钟后由 source actor 的 open local attempt 返回非错误 `{ outcome: "checkpoint" }`；它不证明 target 完成，仍需要结果时必须再次 wait，次数不设额度。poll 只在 accepted input、settlement 和 authoritative reachability 检查均未命中后发生；宿主不自行重试、预热缓存、做经济性判断或自动压缩。
+- user、assistant、tool 和 incoming custom message 的物理记录保持 append-only；新的宿主提示只附加到以后收到的新消息，不能回填或重写旧 entry。provider 的规范视图是 `SessionManager.buildSessionProjection().messages`，不是 physical entry 列表：它应用最新 compaction、system state 与 context edits，物理 JSONL 仍承担完整 audit/tree/账本权威。fork 同样保留该规范投影（含 retain-none self-boundary），不复活旧 physical summary 或已覆盖正文。
+- 静默 `wait_for_session` 在四分钟后由 source actor 的 open local attempt 返回非错误 `{ outcome: "checkpoint" }`；它不证明 target 完成，仍需要结果时必须再次 wait，次数不设额度。poll 只在 accepted input、settlement 和 authoritative reachability 检查均未命中后发生；宿主不自行重试、预热缓存、做经济性判断或自动压缩。Pi 1 的 SDK session cache warming 也强制 `off`，只覆盖有效 SettingsManager getter，用户偏好不变且 teardown 恢复；预热 provider 请求不能成为用户 run。
 - 当前角色完整修订由 base conversation metadata 加后续角色变更记录得出；重新打开会话使用最后一次成功应用的角色。角色模板后续编辑不会自动改变既有会话，只有用户显式切换才会从下一轮改变 system prompt、模型、默认思考强度、默认服务层级、权限与 meta 工具 schema。聊天页的思考强度控制仍只修改当前运行会话，不反写角色模板或角色快照。
-- 卡片状态、run settlement、message delivery receipt、meta operation 和 conversation metadata 使用普通 `custom` entry；SDK 的 `buildSessionContext()` 会忽略它们，因此状态更新既不改旧消息，也不污染模型缓存前缀。
+- 卡片状态、run settlement、message delivery receipt、meta operation 和 conversation metadata 使用普通 `custom` entry；SDK 的 `buildSessionProjection().messages` 会忽略它们，因此状态更新既不改旧消息，也不污染模型缓存前缀。
 - 当前会话可用 `piweb.service_tier.v1` 覆盖角色默认服务层级；没有该记录时使用冻结角色默认，显式 `null` 记录则覆盖为供应商默认。切换角色会重置为新角色默认，但不会把会话覆盖反写角色模板或快照。
-- 会话自动压缩阈值同样使用普通 `piweb.compaction_threshold.v1` custom entry 保存；缺省为 70%，允许 20%–90%，最后一条有效记录生效，不进入模型上下文。默认压缩由 pinned Pi 0.85.1 的私有 `_runDefaultCompaction` 在 custom `session_before_compact` hook 之后执行：custom 结果直接采用并跳过 resolver，否则 `null` 跟随冻结 primary，显式模型每次 fresh-resolve 并重验可用性/有限正 contextWindow/`B >= A`，失败不调用 A fallback。Pi 原生 preparation、previous summary、split-turn、files、usage、abort、persistence 和 continuation 全部保留；普通 turn 永远使用冻结 primary。显式 B 清除 A 的 positional apiKey/headers/env，由 session-local `ModelRuntime` 为 B 重新解析认证且不继承 A service tier；request-local marker 在 provider 前剥离，Codex hint 只含 B model，socket fence 保留。压缩失败可保留 Pi 接点前已有的 transient overflow recovery 内存变化，但不追加 compaction entry 或成功 rebuild。
-- 用户可在会话空闲时发送精确关联的 `compact_context` 命令手动调用 Pi 标准 `compact()`；运行中会话拒绝手动压缩，成功后重新发布 state 与 snapshot。Agent 可调用 conversation-scoped `request_context_compaction` 提交一次易失请求；工具结果只证明请求被接受，不证明压缩成功。Actor 会等当前 assistant/tool turn 完整结束，再复用阈值压缩的安全 checkpoint，在同一 `runId` 内压缩并恢复未完成任务；实际成功仍只由 Pi 原生 compaction entry 证明。
-- 两个明确例外会有意改变模型输入：Pi 在上下文逼近上限时追加 compaction summary 并以摘要替换活动上下文，以及重新启动后项目资源本身发生变化导致基础 system prompt 变化。前者是继续运行所需，后者反映用户真实修改；工作台不为提高命中率伪装旧项目状态。
+- 会话自动压缩阈值同样使用普通 `piweb.compaction_threshold.v1` custom entry 保存；缺省为 70%，允许 20%–90%，最后一条有效记录生效，不进入模型上下文。默认压缩由精确锁定 `1.0.0` 的 Pi 包（`pi-ai`、`pi-coding-agent` 及 SDK 内部 `pi-agent-core`）的私有五参数 `_runDefaultCompaction(preparation, model, customInstructions, signal, reason)` 在 custom `session_before_compact` hook 之后执行：custom 结果直接采用并跳过 resolver，否则 `null` 跟随冻结 primary，显式模型每次 fresh-resolve 并重验可用性/有限正 contextWindow/`B >= A`，失败不调用 A fallback。Pi 原生 preparation、previous summary、split-turn、files、usage、abort、persistence 和 continuation 全部保留；普通 turn 永远使用冻结 primary。接点不再传入 positional apiKey/headers/env；显式 B 只替换 request model，再由 Pi/session-local `ModelRuntime` 为 B 解析摘要认证且不继承 A service tier。Pi await 认证后才捕获 stream，所以 session-local override 必须保持到整个 default call await 结算，并在 finally 中按 identity 恢复，不能同步调用后立即恢复；request-local marker 在 provider 前剥离，Codex hint 只含 B model，socket fence 保留。压缩失败可保留 Pi 接点前已有的 transient overflow recovery 内存变化，但不追加 compaction entry 或成功 rebuild。
+- 用户可在会话空闲时发送精确关联的 `compact_context` 命令手动调用 Pi 标准 `compact()`；运行中会话拒绝手动压缩，成功后重新发布 state 与 snapshot。Agent 可调用 conversation-scoped `request_context_compaction` 提交一次易失请求；工具结果只证明请求被接受，不证明压缩成功。Actor 会等当前 assistant/tool turn 完整结束，再复用阈值压缩的安全 checkpoint，在同一 `runId` 内压缩并恢复未完成任务；该 checkpoint 经 Agent `finishTurn` 保留上游 decision/error/abort，只在 host pause 期间遮蔽 queued-message 观察、不清空实际队列。实际成功仍只由 Pi 原生 compaction entry 证明。
+- 明确例外会有意改变模型输入：Pi 在上下文逼近上限时追加 compaction summary 并以摘要替换活动上下文，原生 `context_edit` 通过新 entry 替换/省略投影中的旧消息，以及重新启动后项目资源本身发生变化导致基础 system prompt 变化。压缩是继续运行所需，资源变化反映用户真实修改；这些都不等于改写物理旧 entry，工作台不为提高命中率伪装旧项目状态。
 
 ## Agent meta 工具
 
@@ -138,7 +140,7 @@ delete_session
 - `peek_session` 不启动 inactive 目标的模型/扩展，不移动 recent；只返回 user/assistant 可见正文和会话卡片，过滤 thinking/tool/auth/internal，默认只看最近 2 项，工具说明提醒 Agent 通常先看最后 1–2 项即可，最多 20 项且完整 JSON 不超过 256 KiB。inactive inspection 与删除共用 lifecycle 边界，因此短暂 writer lease 会先释放，删除不会留下只能靠重启恢复的 tombstone。
 - 列表和正文同样有界；Agent 看到稳定完整 conversationId，而 UI 可另显示短句柄。`list_sessions` 的每项显式返回 durable `createdBy` 与观察者相对的 `createdByMe`，并支持 `scope=created_by_me`，让 Agent 无需依赖对话记忆即可找回自己负责的会话；缺少 conversation profile 的条目不是可展示兼容对象，而是 fail-closed 完整性错误。
 
-所有宿主工具仍经过项目扩展 hook、run ownership 和 source-aware tool gate。`list_roles/read_role/propose_role_revision` 是 `source=sdk` 的显式只读模式例外：前两个只读宿主状态，最后一个只有用户 editor 提交才写角色 prompt。八个会话编排工具仍只在 `canManageSessions=true + full_access` 时可用；扩展或项目工具即使同名也不能冒充 SDK 角色工具。`full_access` 仍允许通用文件工具访问项目外路径，不是角色目录的 OS sandbox，因此这里的人工确认保证只覆盖 `propose_role_revision` 工作流。
+所有宿主工具仍经过项目扩展 hook、run ownership 和 source-aware tool gate；工具 availability/schema 不等于 authorization，Pi 1 system message 中的工具声明也不能授予角色权限。`list_roles/read_role/propose_role_revision` 是 `source=sdk` 的显式只读模式例外：前两个只读宿主状态，最后一个只有用户 editor 提交才写角色 prompt。八个会话编排工具仍只在 `canManageSessions=true + full_access` 时可用；扩展或项目工具即使同名也不能冒充 SDK 角色工具。`full_access` 仍允许通用文件工具访问项目外路径，不是角色目录的 OS sandbox，因此这里的人工确认保证只覆盖 `propose_role_revision` 工作流。
 
 ## 入口
 

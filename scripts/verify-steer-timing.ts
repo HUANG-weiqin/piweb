@@ -1,11 +1,20 @@
 /**
- * SDK steer 时序验证（用户消息改走 steering 队列后的行为确认）：
- * 1. busy 时 prompt(steer) 的 promise 立即 resolve（preflightResult(true)）
+ * Pi 1.0.0 底层 Agent steer 时序验证（fake stream，不启动真实 provider）：
+ * 1. Agent.steer(message) 同步入队；AgentSession.prompt(...steer) / steer()
+ *    可先 await input handler，只有精确 queued disposition 才证明 SDK 接受，
+ *    initial prompt 则要求 started；preflightResult 不再使用 boolean。
  * 2. steer 消息在当前 assistant turn 工具调用全部结束后、下一次模型调用前注入
  *    ——而不是像 followUp 那样等整个 run 自然结束
  * 3. 注入后 run 继续（模型处理该消息，可再发起工具调用）
- * 4. abort 清空 steer 队列
- * 5. run 结束时残留在 steer 队列的消息：下一次 run 开始时注入
+ * 4. AgentSession/宿主 abort 路径先清空 steer 队列
+ * 5. 底层 Agent 允许 run 结束后入队的消息在下次 run 注入；宿主必须拒绝迟到
+ *    admission，在 settlement 清理未投递等待、abort 先清队列，不能把这一行为
+ *    当成持久消息保证。
+ *
+ * 本脚本只观察 Agent 队列，不验证 AgentSession disposition 或宿主交付回执。
+ * 宿主用 invocation-scoped AsyncLocalStorage 跨 await 捕获 native agent.steer 的
+ * 精确 user message identity，enqueue 前同步检查 active ticket，调用返回后检查
+ * admission/投递结算；不能按正文或队列长度推断，也不能只靠同步栈捕获。
  */
 import { Agent } from "../node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-agent-core/dist/index.js";
 import { AssistantMessageEventStream } from "../node_modules/@earendil-works/pi-ai/dist/utils/event-stream.js";
@@ -86,7 +95,7 @@ async function waitFor(predicate: () => boolean, label: string): Promise<void> {
 }
 
 async function main() {
-  console.log("=== 场景 1：busy run 中 prompt(steer)，消息在工具序列结束后、下一次模型调用前注入 ===");
+  console.log("=== 场景 1：busy run 中 Agent.steer，消息在工具序列结束后、下一次模型调用前注入 ===");
   {
     const calls: LlmCall[] = [];
     const events: EventRecord[] = [];
@@ -95,10 +104,11 @@ async function main() {
     await waitFor(() => calls.length === 1, "llm#0");
     console.log("  [t0] run 进行中（llm#0 已调用，等待释放）");
 
-    // 模拟 AgentSession.prompt(text, {streamingBehavior:"steer", preflightResult})：
-    // _queueSteer 同步入队后立即 preflightResult(true)，promise 马上 resolve。
+    // 只模拟 AgentSession 最终调用的 native Agent.steer：这里同步入队。
+    // 上层 Pi 1 要 await 异步 input handler 并确认 queued disposition；宿主还须
+    // 检查 exact ticket 与调用结算，不能从本脚本的同步调用直接推出 prompt_admitted。
     agent.steer({ role: "user", content: [{ type: "text", text: "方向错了，改成 X" }], timestamp: Date.now() });
-    console.log("  [t1] prompt(steer) 已入队，preflightResult(true) —— 宿主可回 prompt_admitted");
+    console.log("  [t1] Agent.steer 已同步入队（不证明宿主 prompt_admitted 或 durable delivery）");
 
     calls[0]!.release(); // 释放 llm#0：assistant 响应完成、无工具调用 → 内层循环回来取 steering
     await waitFor(() => {
@@ -136,7 +146,7 @@ async function main() {
     const run = agent.prompt([{ role: "user", content: [{ type: "text", text: "long task" }], timestamp: Date.now() }] as never);
     await waitFor(() => calls.length === 1, "llm#0");
     agent.steer({ role: "user", content: [{ type: "text", text: "会被 abort 清掉" }], timestamp: Date.now() });
-    // AgentSession.abort → clearQueue() → agent.steeringQueue.clear()
+    // 模拟宿主/AgentSession abort 的清队列部分；此处不触发真正的 abort。
     agent.steeringQueue.clear();
     console.log("  [t1] steering 队列已清空（等待中消息消失）");
     calls[0]!.release();
@@ -155,6 +165,7 @@ async function main() {
     calls[0]!.release();
     await run;
     console.log("  [t1] run#1 已结束");
+    // 仅展示底层残留队列行为；宿主 exact-ticket gate 不允许这种迟到 admission。
     agent.steer({ role: "user", content: [{ type: "text", text: "迟到消息" }], timestamp: Date.now() });
     const run2 = agent.prompt([{ role: "user", content: [{ type: "text", text: "second" }], timestamp: Date.now() }] as never);
     await waitFor(() => calls.length >= 2, "llm#1（run#2）");

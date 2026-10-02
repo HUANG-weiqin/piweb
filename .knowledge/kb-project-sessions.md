@@ -1,6 +1,6 @@
 # 项目与持久会话
 
-`updated: 2026-09-30`
+`updated: 2026-10-02`
 
 ## 这个模块是干什么的
 
@@ -114,7 +114,7 @@ Project store handle 按 canonical cwd 引用计数；ProjectSessionCoordinator 
 - `piweb.run_settlement.v1`：精确 run outcome 与 final text；可选 `outputMetrics` 只保存服务端单调钟观测到的成功 assistant segment 的 provider output token 总数与首 token→完成时长总和，用于 active branch 的 focused snapshot 恢复，不进入跨会话 wait 结果；
 - `piweb.meta_operation.v1`：破坏性 meta 工具的 started/completed 幂等状态；
 - `piweb.compaction_threshold.v1`：当前会话 20%–90% 的自动压缩阈值，缺省为 70%，最后一条单调时间记录生效。
-- `piweb.compaction_resume.v1`：压缩后继续同一 workbench run 的隐藏 `custom_message`，必须 `display=false` 且只携带合法 `runId`，只校验不投影为卡片或 settlement。默认压缩由 Pi 0.85.1 私有 `_runDefaultCompaction` 在 `session_before_compact` 后执行；custom 结果直接采用并跳过模型解析，否则每次 attempt fresh-resolve 冻结的 compaction identity。显式模型必须可用、contextWindow 为有限正数且不小于本次 primary，失败无 fallback；缺少当前必填 role snapshot 字段的 JSONL 一律 fail closed，不做读时补值或语义迁移。
+- `piweb.compaction_resume.v1`：压缩后继续同一 workbench run 的隐藏 `custom_message`，必须 `display=false` 且只携带合法 `runId`，只校验不投影为卡片或 settlement。默认压缩由 Pi 1.0.0 私有五参数 `_runDefaultCompaction(preparation, model, customInstructions, signal, reason)` 在 `session_before_compact` 后执行；custom 结果直接采用并跳过模型解析，否则每次 attempt fresh-resolve 冻结的 compaction identity。Pi 先 await 摘要认证再捕获 stream，因此 request override 必须保持到完整 await 结算后再恢复。显式模型必须可用、contextWindow 为有限正数且不小于本次 primary，失败无 fallback；缺少当前必填 role snapshot 字段的 JSONL 一律 fail closed，不做读时补值或语义迁移。
 - `piweb.bash_execution_notice.v1`：已退役的旧版 context `custom_message`。reserved parser 仅保留严格读取兼容，避免已有 JSONL 会话变为不可读；新 run 不再写入，history/wire 不再投影。旧物理记录不由读路径改写，也不构成执行存活或恢复授权。
 - `piweb.context_hint.v1`：LoopList 注入器写入的隐藏 `custom_message`，必须 `display=false`、`content` 为有界字符串且没有 `details`；它只承载每轮 `<piweb_ctx>`/`piweb_work` 提示，不恢复任何宿主状态，也不投影为卡片或 settlement。读取端对未知 `piweb.*` 一律 fail closed，因此新增此类提示必须与写入端同步注册进 reserved registry，否则含该提示的会话文件会被整体判为损坏。
 - 历史 `piweb.wait_poll.v1` 只接受严格合法的旧 `custom` carrier（UUID `runId`、1–8 整数 `count`、无额外字段），验证后不恢复任何 poll/quota/wait 生命周期状态；畸形记录和其它未知 `piweb.*` 仍 fail closed。
@@ -148,8 +148,8 @@ Project store handle 按 canonical cwd 引用计数；ProjectSessionCoordinator 
 - 标题候选仅由 ConversationActor 易失持有；同一 captured runtime 仍健康、没有 active run/compaction/rewind/role switch 时才同步提交。任何 `session_info`（包括人工清空）都优先；任一 actor run 的 abort、fatal、dispose 或 runtime 替换都会取消候选，迟到或忽略 signal 的 provider 结果没有追加权。正常或失败的主 run 结算不取消标题，候选可在随后安全 idle 边界提交；不增加后台 run、持久队列或恢复状态。候选生成后，Coordinator 只可为仍存活 actor 的浏览器项目列表临时投影其名称，便于首轮长 run 及时显示；该 preview 不进入 ProjectStore catalog、JSONL、恢复或自动命名资格，失效时必须撤回。
 - 提交沿用当前 writer-owned、已由宿主落盘并 reopen 的 SessionManager 的同步 `setSessionName()` 边界，不再另做完整 JSONL inspection 门。成功后更新项目展示；若 setter 已改内存再抛错，使用现有 session-persistence quarantine 拒绝后续写入并报告错误，不能回滚或改写已经完成的主 run settlement。此保证不泛化到尚未持久化的新建 Pi manager；全项目 catalog refresh 也不是 durable proof。
 - Coordinator 对已经确认 live 且 `running | waiting` 的 exact actor 无 await 地直调 admission，不排在无关 conversation 的项目 lifecycle 长任务后；closing/deleting、actor identity 与 Actor 自身 gate 仍逐层校验。idle、queued 或 race-to-idle 不经此捷径启动新 run，仍走既有 lifecycle 与 inbox-first 路径。
-- busy 时浏览器 `prompt`（带 promptId）只在 actor phase 为 `running | waiting` 且 `session.isStreaming=true` 时由 actor 调用 `session.prompt(text, { streamingBehavior: "steer", preflightResult })`；pre-stream 窗口必须在触碰 SDK 前拒绝，否则 SDK 会把 steer-mode prompt 当成新 run。busy 的 `/` 前缀 prompt 也在 SDK 前拒绝，因为 Pi 会先 await command lookup，越过宿主的同步对象身份捕获边界；idle slash 仍由普通 run 路径处理。注册了 input extension handler 时同样拒绝 busy browser prompt，因为 handler 可 `handled` 而不入队。真正接受后，消息在当前 assistant turn 工具调用全部结束、下一次模型调用前注入。会话创建时把 `steeringMode` 固定为 `all`：排队消息一次模型轮次全部注入，inbox 消息同队列同样批量。宿主零 pump/零重建。idle 时经 project lifecycle 起新 run，且不越过已有 inbox 工作。
-- admitted 是 actor 内存 FIFO（`promptId + text`），有界（单会话最多 64 条）；宿主只在同步调用 `AgentSession.prompt(...steer)` / `steer()` 的栈内观察真实 `agent.steer(message)`，把该次 SDK 入队的原始 user `AgentMessage` 对象绑定到 accepted observation。不能用 steering mirror 文本或长度证明来源：前驱可同时 drain，可信 extension 也可产生同文 user message。abort/正常结算/fatal 都清空 admissions 和 accepted observation。进程重启时未投递消息丢失——UI 必须诚实显示"等待中"而非"已发送"。
+- Pi 1 的 `preflightResult` 使用精确 disposition，而不是 boolean：initial prompt 只接受 `started`，busy browser prompt 与显式 `steer()` 只接受 `queued`；`handled` 不证明启动或入队。busy 时浏览器 `prompt`（带 promptId）只在 actor phase 为 `running | waiting` 且 `session.isStreaming=true` 时由 actor 调用 `session.prompt(text, { streamingBehavior: "steer", preflightResult })`；pre-stream 窗口必须在触碰 SDK 前拒绝，否则 SDK 会把 steer-mode prompt 当成新 run。busy 的 `/` 前缀 prompt 仍在 SDK 前拒绝，不让 extension command 路径越过 host run ownership；idle slash 仍由普通 run 路径处理。注册了 input extension handler 时同样拒绝 busy browser prompt，因为 handler 可 `handled` 而不入队。真正接受后，消息在当前 assistant turn 工具调用全部结束、下一次模型调用前注入。会话创建时把 `steeringMode` 固定为 `all`：排队消息一次模型轮次全部注入，inbox 消息同队列同样批量。宿主零 pump/零重建。idle 时经 project lifecycle 起新 run，且不越过已有 inbox 工作。
+- admitted 是 actor 内存 FIFO（`promptId + text`），有界（单会话最多 64 条）；PiRuntime 用 invocation-scoped `AsyncLocalStorage` 包住异步 `AgentSession.prompt(...steer)` / `steer()`，即使 Pi await input handler 也能隔离并捕获该调用的真实 native `agent.steer(message)`。真实 enqueue 前同步复核 exact active ticket，再把恰好一个原始 user `AgentMessage` 对象绑定到 accepted observation；调用返回后仍检查 disposition 与 admission/投递结算，不能把已结束 run 的迟到接受当作成功。不能只在同步调用栈内捕获，也不能用 steering mirror 文本或长度证明来源：前驱可同时 drain，可信 extension 也可产生同文 user message。abort/正常结算/fatal 都清空 admissions 和 accepted observation。进程重启时未投递消息丢失——UI 必须诚实显示"等待中"而非"已发送"。
 - 投递证明：只在 raw user `message_end` 后，从同一 SessionManager entries 找到 `entry.message === rawMessage` 的对象引用。每个有 initial user 的 run 的首个 raw user end 无条件先归 initial；后续 busy browser admission 与显式 steer 按 SDK 接受顺序共用 accepted-but-unobserved FIFO，并且只有 FIFO 头捕获的 queued object 与 raw object 为同一引用时才结算精确 promptId/delivery。extension 可在 `message_end` 原地替换正文而不改变该身份；同文 extension user message 不消费或越过 host record。run settlement 本身不是交付证明。admissions 不能跨 restart 恢复。
 - 工作台不迁移或恢复 `.piweb/pending-prompts` 队列；当前格式不存在该目录，发现旧队列状态即 fail closed。未投递 browser prompt 只存在于当前进程的 admitted FIFO，重启或 abort 后由协议诚实丢失。
 - 当前 JSONL 不保留 `piweb.pending_prompt_delivery.v1` 或 `piweb.pending_prompt_batch.v1` 兼容读取；发现这些已废弃记录即 fail closed。
@@ -159,6 +159,8 @@ Project store handle 按 canonical cwd 引用计数；ProjectSessionCoordinator 
 ## Pi SessionManager 边界
 
 - 使用项目自有的 custom `sessionDir`；不能依赖 Pi 默认 cwd 编码目录作为 project key。
+- provider 上下文以 `SessionManager.buildSessionProjection().messages` 为规范视图；`buildSessionContext()` 委托同一投影。它按 active branch 应用最新 compaction、system state 与 `context_edit` 替换/省略；不能把 `buildContextEntries()` 中仍位于保留范围的旧 compaction 当成有效旧摘要。物理 `getEntries()` / JSONL 仍是完整 audit、tree 引用、永久账本与原始字节权威，不因 provider 投影排除而删除。
+- current-leaf fork 从冻结 physical branch 的规范 projection 生成独立 child：只物化最新 compaction、有效 system message/compaction snapshot，以及已经应用 context edits 的 retained/post messages；不复制 context-edit carrier，不复活省略正文或旧 physical summary。`firstKeptEntryId === compaction.id` 是合法 retain-none self-boundary，child 仍以自己的 compaction ID 表达空保留范围。fork 保留有效上下文与角色配置，但重建 host lifecycle，不复制 run ledger、card、receipt 或 LoopList。
 - 列举使用 `SessionManager.listAll(sessionDir)`，避免项目移动后被旧 header cwd 过滤；但不能信任它的完整性，因为 SDK 会静默跳过部分损坏文件。
 - Agent 完整列表、显式 audit 与 cascade delete 的索引刷新都先后快照受控目录中的全部常规 `.jsonl`，目录在 SDK 扫描期间变化会 fail closed。宿主完整读取每个文件，验证尾换行、逐行 JSON、有限数值、header identity，以及当前格式的 entry payload / tree 引用；随后要求 SDK 索引与该磁盘全集按规范路径和 ID 精确一一对应。
 - 单目标 preview/open 不依赖该完整索引：用 file descriptor 读取每个受控常规文件的有界首行，只把能通过 session header 验证的同 ID 文件当作 collision candidate；随后稳定读取并完整验证目标。头行无法在上限内解析的文件没有 identity claim；I/O、路径或扫描期不确定性不能被当作无关。proof commit 复验所有 target candidate 的 path/inode/header claim，正常无关 body append 不改变该 scope。
@@ -167,9 +169,9 @@ Project store handle 按 canonical cwd 引用计数；ProjectSessionCoordinator 
 - 打开时第三个参数传当前 canonical cwd；JSONL header 保留原 cwd，运行态使用新位置。旧会话允许 header cwd 缺失或为空，但存在时必须是字符串。
 - 新 Pi manager 默认要到首条 assistant 消息才创建文件。工作台一次写入合法 header 和 conversation metadata 后丢弃 pending manager，再用公开 `open()` 重开。
 - `SessionManager` 没有 flush/close/fsync，也没有内建锁；正常 append 是同步 JSONL 写入。
-- writer lease 必须先于 `open()`；宿主只接受当前 Pi JSONL 格式，绝不让 SDK 通过打开旧格式而原地迁移用户文件。
+- writer lease 必须先于 `open()`；宿主只接受当前 v3 header，严格审计同时覆盖先前 Pi 0.85 v3 fixture 与 Pi 1.0.0 的合法 payload，不接受 v1/v2 header，也不让 SDK 原地迁移用户文件。Pi 1 合法形状包括 `usage` entry、带祖先 target 与角色匹配 replacement/null 的 `context_edit`、`role=system` 的 sections/tool delta、compaction `systemMessage` snapshot，以及 assistant `pending/deferred` stop reasons 和对应可选 payload；未知字段、非法值、跨分支 edit 与非有限 usage 仍 fail closed。
 - coordinator 打开已有对话时最多等待旧 writer lease 5 秒；等待队列 FIFO 且可取消。actor singleflight 确保浏览器和 Agent 不会因并发 open 获得第二个 writer。cold focus 被后继导航取消时，只结束该 PiConnection 对 shared opening 的等待；coordinator 自有的 singleflight、lease、文件打开和 actor activation 继续结算并供后续调用复用。
-- `open()` 前宿主再次验证文件非空、以换行结束、每条非空 JSONL 可解析、所有数值有限、compaction `tokensBefore` 非负、首 header 身份匹配，并且 entry ID 唯一、parent/label 引用有效、compaction 保留点属于当前分支祖先链。宿主 reserved entry 还必须绑定该 header identity：outbound card 的 source 与 inbound message 的 target 都必须是当前 conversation，不能把另一会话的合法记录搬入本文件。branch summary 可引用已有节点，或使用 Pi 合法的 `parentId=null + fromId=root` 哨兵。crash partial tail 或“合法 JSON、非法 Pi entry”都会 fail closed，不能被 SDK 静默跳过或恢复成空历史。
+- `open()` 前宿主再次验证文件非空、以换行结束、每条非空 JSONL 可解析、所有数值有限、compaction `tokensBefore` 非负、首 header 身份匹配，并且 entry ID 唯一、parent/label 引用有效、compaction 保留点属于当前分支祖先链或合法 retain-none self-boundary。宿主 reserved entry 还必须绑定该 header identity：outbound card 的 source 与 inbound message 的 target 都必须是当前 conversation，不能把另一会话的合法记录搬入本文件。branch summary 可引用已有节点，或使用 Pi 合法的 `parentId=null + fromId=root` 哨兵。crash partial tail 或“合法 JSON、非法 Pi entry”都会 fail closed，不能被 SDK 静默跳过或恢复成空历史。
 - 第一版只有进程内租约；跨进程文件锁尚未实现。
 
 ## 项目权限边界
@@ -206,7 +208,7 @@ Project store handle 按 canonical cwd 引用计数；ProjectSessionCoordinator 
 
 ## 当前边界
 
-- 没有 archive、用户多选批量删除、fork/import、附件和跨设备同步；Agent 会话列表只有有界 cursor，不构成浏览器历史分页。
+- 没有 archive、用户多选批量删除、import、附件和跨设备同步；Agent 会话列表只有有界 cursor，不构成浏览器历史分页。
 - Agent 完整列表、显式 audit 与 cascade delete 仍完整验证全部 JSONL 并与 Pi `listAll()` 对照；完整证明回执只在进程内复用。启动/浏览器另用 path-keyed catalog v3：持久化有界展示摘要（role 不含 systemPrompt）和单一 `recoveryNeeded`。只有 canonical path、dev/ino/size/mtimeNs/ctimeNs 与 header 完全相等才跨重启复用发现；每轮仍重证安全目录、稳定 header 全集与唯一 identity。缺失、旧版、损坏或变更只使对应文件重读；不能把 I/O/inspection 失败记成无工作。发现不调用 SDK `listAll()`，不填充完整证明回执，也不能替代 exact target proof。目录观察提交仍受 owner/CAS 与 actor projection revision 保护；一个活跃文件的更新不得丢弃全部未变文件观察。跨重启负向发现要求 catalog 为宿主产生且未被另行篡改；格式合法的假阴性 cache 篡改及 same-fingerprint ABA 不在保证内。持久 cache 仍限 4 MiB：超限只保存能装入预算的稳定观察前缀并标 `coverage: "unknown"`，进程内保留完整观察；冷重启只重读预算外的未知行，不因超限清空所有加速。该 cache coverage 不替代当轮完整成员证明。删除 cache 安全但会重新建立观察。
 - 压缩只减少模型上下文，不物理缩小 JSONL。单会话 cold open 仍需目标完整校验与 SDK 全量加载；本次目录发现优化不承诺这笔成本随当前上下文大小缩小，也不删除旧消息、图片或账本。
 - 没有跨进程 writer lock 和断电级 durability。
