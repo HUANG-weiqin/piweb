@@ -7,6 +7,7 @@ import {
   type ModelsSimpleStreamOptions,
 } from "@earendil-works/pi-ai";
 import { closeOpenAICodexWebSocketSessions } from "@earendil-works/pi-ai/api/openai-codex-responses";
+import { normalizeContext } from "@earendil-works/pi-ai/utils/transcript";
 import { buildBaseOptions } from "@earendil-works/pi-ai/api/simple-options";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import type { ServiceTier } from "../shared/protocol.js";
@@ -125,8 +126,9 @@ function streamCodexWithServiceTier(
   tier: ServiceTier,
 ) {
   const codexModel = model as Model<typeof CODEX_RESPONSES_API>;
+  const transcriptContext = normalizeContext(context);
   const base = {
-    ...buildBaseOptions(codexModel, context, options, options?.apiKey),
+    ...buildBaseOptions(codexModel, transcriptContext, options, options?.apiKey),
     toolChoice: options?.toolChoice,
   };
   const clampedReasoning = options?.reasoning
@@ -136,7 +138,7 @@ function streamCodexWithServiceTier(
     ? undefined
     : clampedReasoning;
 
-  return modelRuntime.stream(codexModel, context, {
+  return modelRuntime.stream(codexModel, transcriptContext, {
     ...base,
     reasoningEffort,
     serviceTier: tier,

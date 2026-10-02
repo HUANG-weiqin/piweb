@@ -1,4 +1,5 @@
-import { types as nodeTypes } from "node:util";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { isDeepStrictEqual, types as nodeTypes } from "node:util";
 import {
   createAgentSessionFromServices,
   createAgentSessionServices,
@@ -171,8 +172,13 @@ function installRuntimePromptMutationBoundary(
     return nativeRefreshTools.call(session, ...args);
   };
   const guardedEmitBeforeAgentStart: typeof runner.emitBeforeAgentStart = async (...args) => {
+    // AgentSession supplies its normalized base options; snapshot them before
+    // the extension runner creates and exposes its mutable normalized copy.
+    const expectedOptions = structuredClone(args[2]);
     const result = await nativeEmitBeforeAgentStart.call(runner, ...args);
-    if (result?.systemPrompt !== undefined) rejectMutation();
+    if (!isDeepStrictEqual(result.systemPromptOptions, expectedOptions)) {
+      rejectMutation();
+    }
     return result;
   };
 
@@ -210,11 +216,44 @@ interface SessionBoundaryAdapter {
   dispose(): void;
 }
 
-interface SteeringCaptureAdapter extends SessionBoundaryAdapter {
-  capture<T>(operation: () => T): {
-    result: T;
-    message?: AgentMessage;
+function installSessionCacheWarmingOff(
+  settingsManager: SettingsManager,
+): SessionBoundaryAdapter {
+  const originalDescriptor = Object.getOwnPropertyDescriptor(
+    settingsManager,
+    "getCacheWarmingMode",
+  );
+  const getCacheWarmingMode = () => "off" as const;
+  Object.defineProperty(settingsManager, "getCacheWarmingMode", {
+    configurable: true,
+    enumerable: false,
+    writable: true,
+    value: getCacheWarmingMode,
+  });
+  let installed = true;
+  return {
+    dispose(): void {
+      if (!installed) return;
+      installed = false;
+      if (settingsManager.getCacheWarmingMode !== getCacheWarmingMode) return;
+      if (originalDescriptor) {
+        Object.defineProperty(
+          settingsManager,
+          "getCacheWarmingMode",
+          originalDescriptor,
+        );
+      } else {
+        delete (settingsManager as Partial<SettingsManager>).getCacheWarmingMode;
+      }
+    },
   };
+}
+
+interface SteeringCaptureAdapter extends SessionBoundaryAdapter {
+  capture<T>(
+    onMessage: (message: AgentMessage) => void,
+    operation: () => Promise<T>,
+  ): Promise<T>;
 }
 
 function cloneSessionManagerResult<T>(value: T): T {
@@ -238,6 +277,9 @@ function createReadonlySessionManagerFacade(
     ),
     buildContextEntries: () => cloneSessionManagerResult(
       sessionManager.buildContextEntries(),
+    ),
+    buildSessionProjection: () => cloneSessionManagerResult(
+      sessionManager.buildSessionProjection(),
     ),
     getHeader: () => cloneSessionManagerResult(sessionManager.getHeader()),
     getEntries: () => cloneSessionManagerResult(sessionManager.getEntries()),
@@ -290,10 +332,19 @@ function installSteeringCaptureBoundary(
   session: AgentSession,
 ): SteeringCaptureAdapter {
   const nativeSteer = session.agent.steer;
-  let activeCapture: AgentMessage[] | undefined;
+  const captures = new AsyncLocalStorage<{
+    active: boolean;
+    count: number;
+    onMessage: (message: AgentMessage) => void;
+  }>();
   const observedSteer: typeof session.agent.steer = (message) => {
-    if (activeCapture !== undefined && message.role === "user") {
-      activeCapture.push(message);
+    const capture = captures.getStore();
+    if (capture?.active && message.role === "user") {
+      if (capture.count !== 0) {
+        throw new Error("Pi input must enqueue exactly one steering identity");
+      }
+      capture.count += 1;
+      capture.onMessage(message);
     }
     return nativeSteer.call(session.agent, message);
   };
@@ -303,21 +354,22 @@ function installSteeringCaptureBoundary(
   }
 
   return {
-    capture<T>(operation: () => T) {
-      if (activeCapture !== undefined) {
-        throw new Error("Nested steering identity capture is not supported");
-      }
-      const messages: AgentMessage[] = [];
-      activeCapture = messages;
-      try {
-        const result = operation();
-        return {
-          result,
-          ...(messages.length === 1 ? { message: messages[0] } : {}),
-        };
-      } finally {
-        activeCapture = undefined;
-      }
+    async capture<T>(
+      onMessage: (message: AgentMessage) => void,
+      operation: () => Promise<T>,
+    ): Promise<T> {
+      const capture = { active: true, count: 0, onMessage };
+      return captures.run(capture, async () => {
+        try {
+          const result = await operation();
+          if (capture.count !== 1) {
+            throw new Error("Pi input did not enqueue exactly one steering identity");
+          }
+          return result;
+        } finally {
+          capture.active = false;
+        }
+      });
     },
     dispose(): void {
       session.agent.steer = nativeSteer;
@@ -426,10 +478,10 @@ export interface CreatedPiSession {
   modelRuntime: ModelRuntime;
   modelRegistry: ModelRegistry;
   releaseTurnBoundaryPause?(): void;
-  captureSteeringMessage<T>(operation: () => T): {
-    result: T;
-    message?: AgentMessage;
-  };
+  captureSteeringMessage<T>(
+    onMessage: (message: AgentMessage) => void,
+    operation: () => Promise<T>,
+  ): Promise<T>;
   activateExtensions(): Promise<void>;
   activateExtensionErrors(handler: (error: ExtensionError) => void): readonly ExtensionError[];
   dynamicProviderNames(): ReadonlySet<string>;
@@ -1212,6 +1264,7 @@ export class PiRuntime implements PiRuntimeLike {
     let runtimePromptMutationAdapter: RuntimePromptMutationAdapter | undefined;
     let extensionSessionManagerAdapter: SessionBoundaryAdapter | undefined;
     let fixedModelAdapter: SessionBoundaryAdapter | undefined;
+    let cacheWarmingAdapter: SessionBoundaryAdapter | undefined;
     let steeringCaptureAdapter: SteeringCaptureAdapter | undefined;
     let contextBudgetController: AgentContextBudgetController | undefined;
     let computerPresentationAdapter: SessionBoundaryAdapter | undefined;
@@ -1262,6 +1315,7 @@ export class PiRuntime implements PiRuntimeLike {
         runtimePromptMutationAdapter,
         fixedModelAdapter,
         extensionSessionManagerAdapter,
+        cacheWarmingAdapter,
         steeringCaptureAdapter,
       ]) {
         try {
@@ -1301,6 +1355,7 @@ export class PiRuntime implements PiRuntimeLike {
       });
       this.throwServiceDiagnostics(services.diagnostics);
       settings = services.settingsManager;
+      cacheWarmingAdapter = installSessionCacheWarmingOff(settings);
       if (options.bashExecutions) {
         const shellPath = settings.getShellPath();
         const commandPrefix = settings.getShellCommandPrefix();
@@ -1501,11 +1556,6 @@ export class PiRuntime implements PiRuntimeLike {
         } catch (teardownError) {
           failures.push(teardownError);
         }
-        try {
-          disposeSessionBoundaryAdapters();
-        } catch (cleanupError) {
-          failures.push(cleanupError);
-        }
         if (teardownSucceeded) {
           try {
             toolProjectionAdapter?.dispose();
@@ -1513,6 +1563,11 @@ export class PiRuntime implements PiRuntimeLike {
             failures.push(cleanupError);
           }
         }
+      }
+      try {
+        disposeSessionBoundaryAdapters();
+      } catch (cleanupError) {
+        failures.push(cleanupError);
       }
       this.sessionRegistries.delete(owner);
       if (failures.length > 1) {
@@ -1558,11 +1613,11 @@ export class PiRuntime implements PiRuntimeLike {
       releaseTurnBoundaryPause: () => {
         turnBoundaryController?.releaseQueuePause();
       },
-      captureSteeringMessage: (operation) => {
+      captureSteeringMessage: (onMessage, operation) => {
         if (!steeringCaptureAdapter) {
           throw new Error("Steering identity boundary is unavailable");
         }
-        return steeringCaptureAdapter.capture(operation);
+        return steeringCaptureAdapter.capture(onMessage, operation);
       },
       activateExtensions: () => {
         activationAttempted = true;

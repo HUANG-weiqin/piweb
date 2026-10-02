@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -61,6 +62,7 @@ import type {
   CreatedPiSession,
   CreatePiSessionOptions,
   CredentialChangeIntent,
+  PromptOptions,
   PiRuntimeLike,
   ToolCallGate,
 } from "./pi-runtime.js";
@@ -112,8 +114,12 @@ interface FakeSession extends AgentSession {
   disposeCalls: number;
   eventListener?: (event: AgentSessionEvent) => void;
   steerCalls: string[];
-  /** Real text steering queue mirroring the SDK (admission verification reads it). */
+  /** Real text steering queue mirror; identity capture uses exact AgentMessage. */
   steeringMessages: string[];
+  steeringAgentMessages: AgentMessage[];
+  onSteeringEnqueue?: (message: AgentMessage) => void;
+  nextSteeringMessage?: AgentMessage;
+  queueSteeringMessage(text: string): AgentMessage;
   /** Simulated SDK queued text for steers (may differ from the submitted text). */
   steerExpandedText?: string;
   /** Simulated input-extension handlers (admission precheck). */
@@ -182,14 +188,34 @@ function fakeSession(): FakeSession {
     turnBoundaryPauseReleases: 0,
     resumeImplementation: async () => undefined,
     steeringMessages: [],
+    steeringAgentMessages: [],
+    nextSteeringMessage: undefined,
     promptCalls: [],
-    prompt: function (text: string, options?: Parameters<AgentSession["prompt"]>[1]) {
+    prompt: async function (text: string, options?: Parameters<AgentSession["prompt"]>[1]) {
       this.promptCalls.push({
         text,
         streamingBehavior: options?.streamingBehavior,
         ...(options?.images === undefined ? {} : { images: options.images }),
       });
-      return this.promptImplementation(text, options);
+      let preflightReported = false;
+      const reportPreflight = (disposition: Parameters<NonNullable<
+        PromptOptions["preflightResult"]
+      >>[0]) => {
+        if (preflightReported) return;
+        preflightReported = true;
+        options?.preflightResult?.(disposition);
+      };
+      const reportedOptions = options === undefined
+        ? undefined
+        : { ...options, preflightResult: reportPreflight };
+      if (options?.streamingBehavior !== "steer") {
+        reportPreflight("started");
+      }
+      const result = await this.promptImplementation(text, reportedOptions);
+      if (!preflightReported) {
+        reportPreflight(options?.streamingBehavior === "steer" ? "queued" : "started");
+      }
+      return result;
     },
     setSessionName: function (name: string) {
       this.setSessionNameImplementation(name);
@@ -205,13 +231,28 @@ function fakeSession(): FakeSession {
       this.customMessages.push({ message, options });
       return this.resumeImplementation(message, options);
     },
+    queueSteeringMessage: function (this: FakeSession, text: string) {
+      const queuedText = this.steerExpandedText ?? text;
+      const message = this.nextSteeringMessage ?? agentMessage({
+        role: "user",
+        content: [{ type: "text", text: queuedText }],
+        timestamp: Date.now(),
+      });
+      this.nextSteeringMessage = undefined;
+      this.onSteeringEnqueue?.(message);
+      this.steeringMessages.push(queuedText);
+      this.steeringAgentMessages.push(message);
+      return message;
+    },
     steer: async function (text: string) {
       this.steerCalls.push(text);
-      this.steeringMessages.push(this.steerExpandedText ?? text);
+      this.queueSteeringMessage(text);
+      return "queued" as const;
     },
     clearQueue: function () {
       this.clearQueueCalls++;
       this.steeringMessages.splice(0);
+      this.steeringAgentMessages.splice(0);
       return { steering: [], followUp: [] };
     },
     abort: async function () {
@@ -268,8 +309,12 @@ class FakeRuntime implements PiRuntimeLike {
   readonly modelRuntime = {} as unknown as ModelRuntime;
   readonly modelRegistry = {} as ModelRegistry;
   readonly session = fakeSession();
+  private readonly steeringCaptureStorage =
+    new AsyncLocalStorage<(message: AgentMessage) => void>();
 
   constructor() {
+    this.session.onSteeringEnqueue = (message) =>
+      this.steeringCaptureStorage.getStore()?.(message);
     // The actor issues the isolated title request through the public session
     // stream function, so the fake must capture calls at that boundary.
     this.session.agent.streamFunction = ((
@@ -293,9 +338,8 @@ class FakeRuntime implements PiRuntimeLike {
   computerUse?: CreatedPiSession["computerUse"];
   bashExecutions?: BashExecutionLifecycle;
   extensionErrorHandler?: (error: ExtensionError) => void;
-  nextSteeringCapture?: AgentMessage;
+  captureSteeringMessageImplementation?: CreatedPiSession["captureSteeringMessage"];
   readonly steeringCaptures: AgentMessage[] = [];
-  private nextSteeringTimestamp = 1;
 
   takeSteeringCapture(expectedText: string): AgentMessage {
     const index = this.steeringCaptures.findIndex((message) =>
@@ -371,30 +415,25 @@ class FakeRuntime implements PiRuntimeLike {
         this.session.turnBoundaryPaused = false;
         this.session.turnBoundaryPauseReleases++;
       },
-      captureSteeringMessage: (operation) => {
-        const before = [...this.session.steeringMessages];
-        const explicitMessage = this.nextSteeringCapture;
-        this.nextSteeringCapture = undefined;
-        const result = operation();
-        const remaining = [...before];
-        const queuedText = this.session.steeringMessages.find((text) => {
-          const index = remaining.indexOf(text);
-          if (index < 0) return true;
-          remaining.splice(index, 1);
-          return false;
+      captureSteeringMessage: (onMessage, operation) => {
+        if (this.captureSteeringMessageImplementation) {
+          return this.captureSteeringMessageImplementation(onMessage, operation);
+        }
+        let count = 0;
+        return this.steeringCaptureStorage.run((message) => {
+          if (count !== 0) {
+            throw new Error("Pi input must enqueue exactly one steering identity");
+          }
+          count++;
+          onMessage(message);
+          this.steeringCaptures.push(message);
+        }, async () => {
+          const result = await operation();
+          if (count !== 1) {
+            throw new Error("Pi input did not enqueue exactly one steering identity");
+          }
+          return result;
         });
-        const message = explicitMessage ?? (queuedText === undefined
-          ? undefined
-          : agentMessage({
-              role: "user",
-              content: [{ type: "text", text: queuedText }],
-              timestamp: this.nextSteeringTimestamp++,
-            }));
-        if (message !== undefined) this.steeringCaptures.push(message);
-        return {
-          result,
-          ...(message === undefined ? {} : { message }),
-        };
       },
       activateExtensions: async () => {
         if (this.activationError) throw this.activationError;
@@ -716,8 +755,8 @@ describe("ConversationActor Bash lifecycle", () => {
     const promptFinished = deferred<void>();
     runtime.session.promptImplementation = async (text, options) => {
       if (options?.streamingBehavior === "steer") {
-        runtime.session.steeringMessages.push(text);
-        options.preflightResult?.(true);
+        runtime.session.queueSteeringMessage(text);
+        options.preflightResult?.("queued");
         return;
       }
       (runtime.session as unknown as { isStreaming: boolean }).isStreaming = true;
@@ -791,8 +830,7 @@ describe("ConversationActor Bash lifecycle", () => {
     const promptFinished = deferred<void>();
     runtime.session.promptImplementation = async (text, options) => {
       if (options?.streamingBehavior === "steer") {
-        runtime.session.steeringMessages.push(text);
-        options.preflightResult?.(false);
+        options.preflightResult?.("handled");
         return;
       }
       promptStarted.resolve();
@@ -824,9 +862,9 @@ describe("ConversationActor Bash lifecycle", () => {
       runId: RUN_A,
       promptId: RUN_B,
       text: "rejected preflight",
-    })).rejects.toThrow("preflight rejected");
+    })).rejects.toThrow("Prompt was handled, not queued for steering");
 
-    runtime.nextSteeringCapture = agentMessage({
+    runtime.session.nextSteeringMessage = agentMessage({
       role: "user",
       content: [{ type: "text", text: "rejected explicit steer" }],
       timestamp: Date.now(),
@@ -839,7 +877,7 @@ describe("ConversationActor Bash lifecycle", () => {
     expect(bash.promoteForeground).not.toHaveBeenCalled();
 
     const queued = deferred<void>();
-    runtime.nextSteeringCapture = agentMessage({
+    runtime.session.nextSteeringMessage = agentMessage({
       role: "user",
       content: [{ type: "text", text: "stale explicit steer" }],
       timestamp: Date.now(),
@@ -1715,12 +1753,10 @@ describe("ConversationActor", () => {
         await vi.waitFor(() => expect(runtime.session.promptCalls).toHaveLength(1));
         await expect(running).resolves.toMatchObject({ outcome: "completed" });
         expect(manager.getSessionName()).toBeUndefined();
-        expect(runtime.titleCalls[0]?.[1]).toMatchObject({
-          messages: [{
-            role: "user",
-            content: "让首轮会话自动生成简短标题",
-          }],
-        });
+        expect(runtime.titleCalls[0]?.[1].messages).toContainEqual(expect.objectContaining({
+          role: "user",
+          content: "让首轮会话自动生成简短标题",
+        }));
         expect(runtime.titleCalls[0]?.[1].tools).toBeUndefined();
 
         expect(runtime.titleCalls[0]?.[2]).toMatchObject({
@@ -2264,8 +2300,8 @@ describe("ConversationActor", () => {
       fixture.runtime.session.promptImplementation = async (text, options) => {
         if (text === "follow up") {
           // admit 的调用：SDK 接受即入队返回
-          fixture.runtime.session.steeringMessages.push(text);
-          options?.preflightResult?.(true);
+          fixture.runtime.session.queueSteeringMessage(text);
+          options?.preflightResult?.("queued");
           return;
         }
         emit()?.(nativeEvent({ type: "agent_start" }));
@@ -2319,14 +2355,215 @@ describe("ConversationActor", () => {
       await fixture.actor.dispose();
     });
 
+    it("fails closed when a busy prompt becomes an idle prompt before Pi preflight", async () => {
+      const fixture = await openActor();
+      const { runStarted, finishRun, running } = busyRun(fixture);
+      await runStarted.promise;
+      const normalPromptImplementation = fixture.runtime.session.promptImplementation;
+      let unownedRunStarts = 0;
+      fixture.runtime.session.promptImplementation = async (text, options) => {
+        if (options?.streamingBehavior === "steer") {
+          fixture.runtime.session.isStreaming = false;
+          options.preflightResult?.("started");
+          unownedRunStarts++;
+          return;
+        }
+        return normalPromptImplementation(text, options);
+      };
+
+      await expect(fixture.actor.admitBrowserPrompt({
+        promptId: PROMPT_ID,
+        runId: RUN_B,
+        text: "race to idle",
+      })).rejects.toThrow("Prompt was started, not queued for steering");
+      expect(unownedRunStarts).toBe(0);
+      expect(fixture.events).not.toContainEqual(expect.objectContaining({
+        type: "prompt_admitted",
+        promptId: PROMPT_ID,
+      }));
+
+      finishRun.resolve();
+      await running;
+      await fixture.actor.dispose();
+    });
+
+    it("does not enqueue explicit steering after async input handling outlives its run", async () => {
+      const fixture = await openActor();
+      const { runStarted, finishRun, running } = busyRun(fixture);
+      await runStarted.promise;
+      const allowPreEnqueue = deferred<void>();
+      const message = agentMessage({
+        role: "user",
+        content: [{ type: "text", text: "late steer" }],
+        timestamp: 42,
+      });
+      fixture.runtime.captureSteeringMessageImplementation = async (
+        onMessage,
+        operation,
+      ) => {
+        await allowPreEnqueue.promise;
+        onMessage(message);
+        return operation();
+      };
+      const explicitSteer = fixture.actor.steer(RUN_A, "late steer");
+      void explicitSteer.catch(() => undefined);
+
+      finishRun.resolve();
+      await running;
+      allowPreEnqueue.resolve();
+      await expect(explicitSteer).rejects.toThrow(
+        "The agent run stopped accepting messages before enqueue",
+      );
+      expect(fixture.runtime.session.steerCalls).not.toContain("late steer");
+      expect(fixture.runtime.session.steeringMessages).not.toContain("late steer");
+
+      await fixture.actor.dispose();
+    });
+
+    it("rejects explicit steer when Pi goes idle during async input handling", async () => {
+      const fixture = await openActor();
+      const promptStarted = deferred<void>();
+      const releasePrompt = deferred<void>();
+      const releaseCapture = deferred<void>();
+      fixture.runtime.session.promptImplementation = async () => {
+        fixture.runtime.session.eventListener?.(nativeEvent({ type: "agent_start" }));
+        fixture.runtime.session.isStreaming = true;
+        promptStarted.resolve();
+        await releasePrompt.promise;
+      };
+      const completion = fixture.actor.startPrompt({
+        runId: RUN_A,
+        text: "long task",
+        origin: "browser",
+      });
+      await promptStarted.promise;
+      const message = agentMessage({
+        role: "user",
+        content: [{ type: "text", text: "steer after sdk end" }],
+        timestamp: 45,
+      });
+      fixture.runtime.captureSteeringMessageImplementation = async (
+        onMessage,
+        operation,
+      ) => {
+        await releaseCapture.promise;
+        onMessage(message);
+        return operation();
+      };
+      const steer = fixture.actor.steer(RUN_A, "steer after sdk end");
+      void steer.catch(() => undefined);
+      fixture.runtime.session.isStreaming = false;
+      fixture.runtime.session.eventListener?.(nativeEvent({ type: "agent_end" }));
+      let runSettled = false;
+      void completion.then(() => { runSettled = true; });
+      await Promise.resolve();
+      expect(runSettled).toBe(false);
+
+      releaseCapture.resolve();
+      await expect(steer).rejects.toThrow(
+        "The agent run stopped accepting messages before enqueue",
+      );
+      expect(fixture.runtime.session.steerCalls).not.toContain("steer after sdk end");
+      expect(fixture.runtime.session.steeringMessages).not.toContain("steer after sdk end");
+      expect(fixture.runtime.session.steeringAgentMessages).toEqual([]);
+
+      releasePrompt.resolve();
+      await completion;
+      await fixture.actor.dispose();
+    });
+
+    it("does not admit a browser prompt after async capture outlives its run", async () => {
+      const fixture = await openActor();
+      const { runStarted, finishRun, running } = busyRun(fixture);
+      await runStarted.promise;
+      const allowPreEnqueue = deferred<void>();
+      const promptCallsBefore = fixture.runtime.session.promptCalls.slice();
+      const message = agentMessage({
+        role: "user",
+        content: [{ type: "text", text: "late browser prompt" }],
+        timestamp: 43,
+      });
+      fixture.runtime.captureSteeringMessageImplementation = async (
+        onMessage,
+        operation,
+      ) => {
+        await allowPreEnqueue.promise;
+        onMessage(message);
+        return operation();
+      };
+      const admission = fixture.actor.admitBrowserPrompt({
+        promptId: PROMPT_ID,
+        runId: RUN_A,
+        text: "late browser prompt",
+      });
+      void admission.catch(() => undefined);
+
+      expect(fixture.actor.pendingPromptAdmissions()).toEqual([{
+        promptId: PROMPT_ID,
+        text: "late browser prompt",
+      }]);
+      finishRun.resolve();
+      await running;
+      const promptCallsAtSettlement = fixture.runtime.session.promptCalls.slice();
+      const steeringMessagesAtSettlement = fixture.runtime.session.steeringMessages.slice();
+      allowPreEnqueue.resolve();
+      await expect(admission).rejects.toThrow(
+        "The agent run stopped accepting messages before enqueue",
+      );
+
+      expect(promptCallsAtSettlement).toEqual(promptCallsBefore);
+      expect(fixture.runtime.session.promptCalls).toEqual(promptCallsAtSettlement);
+      expect(fixture.runtime.session.steeringMessages).toEqual(steeringMessagesAtSettlement);
+      expect(fixture.actor.pendingPromptAdmissions()).toEqual([]);
+      expect(fixture.events).not.toContainEqual(expect.objectContaining({
+        type: "prompt_admitted",
+        promptId: PROMPT_ID,
+      }));
+      await fixture.actor.dispose();
+    });
+
+    it("rejects an explicit steer when its capture settles after the run", async () => {
+      const fixture = await openActor();
+      const { runStarted, finishRun, running } = busyRun(fixture);
+      await runStarted.promise;
+      const allowCaptureResolve = deferred<void>();
+      const message = agentMessage({
+        role: "user",
+        content: [{ type: "text", text: "late captured steer" }],
+        timestamp: 44,
+      });
+      fixture.runtime.captureSteeringMessageImplementation = async (
+        onMessage,
+        operation,
+      ) => {
+        onMessage(message);
+        const result = await operation();
+        await allowCaptureResolve.promise;
+        return result;
+      };
+      const steer = fixture.actor.steer(RUN_A, "late captured steer");
+      void steer.catch(() => undefined);
+
+      await vi.waitFor(() => {
+        expect(fixture.runtime.session.steerCalls).toContain("late captured steer");
+      });
+      finishRun.resolve();
+      await running;
+      allowCaptureResolve.resolve();
+      await expect(steer).rejects.toThrow(
+        "The agent run stopped accepting messages before admission completed",
+      );
+      await fixture.actor.dispose();
+    });
+
     it("rejects a busy admission while the run ticket is still queued", async () => {
       const fixture = await openActor();
       const promptStarted = deferred();
       const promptFinished = deferred();
       fixture.runtime.session.promptImplementation = async (text, options) => {
         if (options?.streamingBehavior === "steer") {
-          fixture.runtime.session.steeringMessages.push(text);
-          options?.preflightResult?.(true);
+          fixture.runtime.session.queueSteeringMessage(text);
+          options?.preflightResult?.("queued");
           return;
         }
         promptStarted.resolve();
@@ -2385,8 +2622,8 @@ describe("ConversationActor", () => {
       const finishRun = deferred();
       fixture.runtime.session.promptImplementation = async (text, options) => {
         if (options?.streamingBehavior === "steer") {
-          fixture.runtime.session.steeringMessages.push(text);
-          options?.preflightResult?.(true);
+          fixture.runtime.session.queueSteeringMessage(text);
+          options?.preflightResult?.("queued");
           return;
         }
         emit()?.(nativeEvent({ type: "agent_start" }));
@@ -2460,7 +2697,7 @@ describe("ConversationActor", () => {
         content: [{ type: "text", text: "follow up" }],
         timestamp: 2,
       });
-      fixture.runtime.nextSteeringCapture = queuedMessage;
+      fixture.runtime.session.nextSteeringMessage = queuedMessage;
       await fixture.actor.admitBrowserPrompt({
         promptId: PROMPT_ID,
         runId: RUN_A,
@@ -2508,8 +2745,8 @@ describe("ConversationActor", () => {
       const finishRun = deferred();
       fixture.runtime.session.promptImplementation = async (text, options) => {
         if (options?.streamingBehavior === "steer") {
-          fixture.runtime.session.steeringMessages.push(text);
-          options?.preflightResult?.(true);
+          fixture.runtime.session.queueSteeringMessage(text);
+          options?.preflightResult?.("queued");
           return;
         }
         emit()?.(nativeEvent({ type: "agent_start" }));
@@ -2576,8 +2813,8 @@ describe("ConversationActor", () => {
       const finishRun = deferred();
       fixture.runtime.session.promptImplementation = async (text, options) => {
         if (options?.streamingBehavior === "steer") {
-          fixture.runtime.session.steeringMessages.push(text);
-          options?.preflightResult?.(true);
+          fixture.runtime.session.queueSteeringMessage(text);
+          options?.preflightResult?.("queued");
           return;
         }
         emit()?.(nativeEvent({ type: "agent_start" }));
@@ -2646,8 +2883,8 @@ describe("ConversationActor", () => {
       const finishRun = deferred();
       fixture.runtime.session.promptImplementation = async (text, options) => {
         if (options?.streamingBehavior === "steer") {
-          fixture.runtime.session.steeringMessages.push(text);
-          options?.preflightResult?.(true);
+          fixture.runtime.session.queueSteeringMessage(text);
+          options?.preflightResult?.("queued");
           return;
         }
         emit()?.(nativeEvent({ type: "agent_start" }));
@@ -2709,8 +2946,8 @@ describe("ConversationActor", () => {
       fixture.runtime.session.promptImplementation = async (text, options) => {
         // Pi 0.85.1 awaits slash-command lookup before it reaches agent.steer.
         await Promise.resolve();
-        fixture.runtime.session.steeringMessages.push(text);
-        options?.preflightResult?.(true);
+        fixture.runtime.session.queueSteeringMessage(text);
+        options?.preflightResult?.("queued");
       };
 
       await expect(fixture.actor.admitBrowserPrompt({
@@ -2742,8 +2979,8 @@ describe("ConversationActor", () => {
       fixture.runtime.session.promptImplementation = async (text, options) => {
         if (options?.streamingBehavior === "steer") {
           steerCalls.push(text);
-          fixture.runtime.session.steeringMessages.push(text);
-          options?.preflightResult?.(true);
+          fixture.runtime.session.queueSteeringMessage(text);
+          options?.preflightResult?.("queued");
           return;
         }
         emit()?.(nativeEvent({ type: "agent_start" }));
@@ -2783,9 +3020,9 @@ describe("ConversationActor", () => {
       let beforePreflight: (() => void) | undefined;
       fixture.runtime.session.promptImplementation = async (text, options) => {
         if (options?.streamingBehavior === "steer") {
-          fixture.runtime.session.steeringMessages.push(text);
+          fixture.runtime.session.queueSteeringMessage(text);
           beforePreflight?.();
-          options?.preflightResult?.(true);
+          options?.preflightResult?.("queued");
           return;
         }
         emit()?.(nativeEvent({ type: "agent_start" }));
@@ -2852,8 +3089,8 @@ describe("ConversationActor", () => {
       const finishRun = deferred();
       fixture.runtime.session.promptImplementation = async (text, options) => {
         if (options?.streamingBehavior === "steer") {
-          fixture.runtime.session.steeringMessages.push(text);
-          options?.preflightResult?.(true);
+          fixture.runtime.session.queueSteeringMessage(text);
+          options?.preflightResult?.("queued");
           return;
         }
         emit()?.(nativeEvent({ type: "agent_start" }));
@@ -2891,8 +3128,8 @@ describe("ConversationActor", () => {
       const finishRun = deferred();
       fixture.runtime.session.promptImplementation = async (text, options) => {
         if (options?.streamingBehavior === "steer") {
-          fixture.runtime.session.steeringMessages.push(text);
-          options?.preflightResult?.(true);
+          fixture.runtime.session.queueSteeringMessage(text);
+          options?.preflightResult?.("queued");
           return;
         }
         emit()?.(nativeEvent({ type: "agent_start" }));
@@ -3097,8 +3334,8 @@ describe("ConversationActor", () => {
           return;
         }
         // admit 的调用：SDK 接受即入队返回
-        fixture.runtime.session.steeringMessages.push(text);
-        options?.preflightResult?.(true);
+        fixture.runtime.session.queueSteeringMessage(text);
+        options?.preflightResult?.("queued");
       };
       const running = fixture.actor.startPrompt({
         runId: RUN_A,
@@ -4499,8 +4736,8 @@ describe("ConversationActor", () => {
     const finishRun = deferred();
     fixture.runtime.session.promptImplementation = async (text, options) => {
       if (options?.streamingBehavior === "steer") {
-        fixture.runtime.session.steeringMessages.push(text);
-        options.preflightResult?.(true);
+        fixture.runtime.session.queueSteeringMessage(text);
+        options.preflightResult?.("queued");
       }
     };
     fixture.runtime.session.resumeImplementation = async () => {
@@ -5897,7 +6134,7 @@ describe("ConversationActor", () => {
     await fixture.actor.dispose();
   });
 
-  it("steers the exact active run even before the SDK streaming flag catches up", async () => {
+  it("steers the exact active run after SDK streaming starts and waits for delivery", async () => {
     const fixture = await openActor();
     const promptStarted = deferred();
     const promptFinished = deferred();
@@ -5934,6 +6171,7 @@ describe("ConversationActor", () => {
     expect(fixture.runtime.session.isStreaming).toBe(false);
     // The SDK queues the EXPANDED steer text; the raw delivery carries it.
     fixture.runtime.session.steerExpandedText = "template-expanded guidance";
+    fixture.runtime.session.isStreaming = true;
     const guidance = fixture.actor.steer(RUN_A, "  change direction  ");
     const transformedGuidance = fixture.runtime.takeSteeringCapture(
       "template-expanded guidance",
@@ -5980,7 +6218,7 @@ describe("ConversationActor", () => {
     };
     await fixture.actor.abort(RUN_A);
     await expect(undelivered).rejects.toThrow(
-      "Run ended before queued guidance was delivered",
+      "The agent run stopped accepting messages before admission completed",
     );
     await completion;
     expect(fixture.runtime.session.clearQueueCalls).toBe(1);
@@ -5994,6 +6232,7 @@ describe("ConversationActor", () => {
     const promptStarted = deferred();
     const promptFinished = deferred();
     fixture.runtime.session.promptImplementation = async () => {
+      fixture.runtime.session.isStreaming = true;
       promptStarted.resolve();
       await promptFinished.promise;
     };

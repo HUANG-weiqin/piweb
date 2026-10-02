@@ -12,20 +12,7 @@ export type AgentTurnBoundaryHandler = (
   input: AgentTurnBoundaryCheck,
 ) => boolean;
 
-interface TurnBoundaryContext {
-  toolResults: unknown[];
-}
-
-interface AgentLoopConfig {
-  shouldStopAfterTurn?: (
-    context: TurnBoundaryContext,
-  ) => boolean | Promise<boolean>;
-}
-
-interface AgentLoopOwner {
-  createLoopConfig(...args: unknown[]): AgentLoopConfig;
-  hasQueuedMessages(): boolean;
-}
+type FinishTurn = NonNullable<AgentSession["agent"]["finishTurn"]>;
 
 export interface AgentTurnBoundaryController {
   releaseQueuePause(): void;
@@ -33,58 +20,59 @@ export interface AgentTurnBoundaryController {
 }
 
 /**
- * Bridges Pi core's graceful post-turn stop hook, which AgentSession does not
- * currently expose. Keep this SDK-shape dependency isolated here.
+ * Bridges Pi core's completed-tool-turn hook while preserving its own decision
+ * and the SDK's queued steering messages across the host compaction checkpoint.
  */
 export function installAgentTurnBoundaryCheck(
   session: AgentSession,
   handler: AgentTurnBoundaryHandler,
 ): AgentTurnBoundaryController {
-  const agent = session.agent as unknown as AgentLoopOwner;
-  const original = agent.createLoopConfig;
-  const originalHasQueuedMessages = agent.hasQueuedMessages;
-  if (
-    typeof original !== "function"
-    || typeof originalHasQueuedMessages !== "function"
-  ) {
+  const agent = session.agent;
+  const previousFinishTurn = agent.finishTurn;
+  const previousHasQueuedMessages = agent.hasQueuedMessages;
+  if (typeof previousHasQueuedMessages !== "function") {
     throw new Error("Pi Agent does not expose its turn-boundary queue controls");
   }
 
-  const hadOwnMethod = Object.hasOwn(agent, "createLoopConfig");
+  const hadOwnFinishTurn = Object.hasOwn(agent, "finishTurn");
   const hadOwnQueueCheck = Object.hasOwn(agent, "hasQueuedMessages");
   let queuePaused = false;
-  function createLoopConfig(
-    this: AgentLoopOwner,
-    ...args: unknown[]
-  ): AgentLoopConfig {
-    const config = original.apply(this, args);
-    const previousShouldStop = config.shouldStopAfterTurn;
-    return {
-      ...config,
-      shouldStopAfterTurn: async (context) => {
-        let hostShouldStop = false;
-        try {
-          hostShouldStop = handler({
-            contextUsage: session.getContextUsage(),
-            hasToolResults: context.toolResults.length > 0,
-          });
-        } catch {
-          // Pi requires this callback to be non-throwing. A later boundary can
-          // retry the advisory host check without breaking the Agent loop.
-        }
-        if (hostShouldStop) queuePaused = true;
-        return Boolean(await previousShouldStop?.call(config, context))
-          || hostShouldStop;
-      },
-    };
-  }
 
-  function hasQueuedMessages(this: AgentLoopOwner): boolean {
-    return !queuePaused && originalHasQueuedMessages.call(this);
-  }
+  const finishTurn: FinishTurn = async (turn, signal) => {
+    const previousDecision = await previousFinishTurn?.call(agent, turn, signal);
+    if (previousDecision !== undefined) return previousDecision;
 
-  agent.createLoopConfig = createLoopConfig;
+    if (
+      turn.message.stopReason !== "toolUse"
+      || turn.toolResults.length === 0
+    ) {
+      return;
+    }
+
+    let hostShouldStop = false;
+    try {
+      hostShouldStop = handler({
+        contextUsage: session.getContextUsage(),
+        hasToolResults: turn.toolResults.length > 0,
+      });
+    } catch {
+      // Pi requires host boundary checks to be non-throwing. A later boundary
+      // can retry the advisory check without breaking the Agent loop.
+    }
+
+    if (!hostShouldStop) return;
+
+    queuePaused = true;
+    return { action: "end" };
+  };
+
+  const hasQueuedMessages: AgentSession["agent"]["hasQueuedMessages"] = function () {
+    return !queuePaused && previousHasQueuedMessages.call(agent);
+  };
+
+  agent.finishTurn = finishTurn;
   agent.hasQueuedMessages = hasQueuedMessages;
+
   let installed = true;
   return {
     releaseQueuePause: () => {
@@ -94,13 +82,13 @@ export function installAgentTurnBoundaryCheck(
       if (!installed) return;
       installed = false;
       queuePaused = false;
-      if (agent.createLoopConfig === createLoopConfig) {
-        if (hadOwnMethod) agent.createLoopConfig = original;
-        else delete (agent as Partial<AgentLoopOwner>).createLoopConfig;
+      if (agent.finishTurn === finishTurn) {
+        if (hadOwnFinishTurn) agent.finishTurn = previousFinishTurn;
+        else delete (agent as Partial<typeof agent>).finishTurn;
       }
       if (agent.hasQueuedMessages === hasQueuedMessages) {
-        if (hadOwnQueueCheck) agent.hasQueuedMessages = originalHasQueuedMessages;
-        else delete (agent as Partial<AgentLoopOwner>).hasQueuedMessages;
+        if (hadOwnQueueCheck) agent.hasQueuedMessages = previousHasQueuedMessages;
+        else delete (agent as Partial<typeof agent>).hasQueuedMessages;
       }
     },
   };

@@ -157,6 +157,21 @@ describe("installCompactionBoundary", () => {
     adapter.dispose();
   });
 
+  it("accepts a null boundary and lets Pi anchor the summary at its own entry", () => {
+    const manager = SessionManager.inMemory("E:\\work");
+    manager.appendMessage(assistantText("fully summarized"));
+    const adapter = installCompactionBoundary(manager);
+
+    manager.appendCompaction("summary", null, 20);
+
+    const compaction = latestCompaction(manager);
+    if (compaction?.type !== "compaction") {
+      throw new Error("compaction entry was not appended");
+    }
+    expect(compaction.firstKeptEntryId).toBe(compaction.id);
+    adapter.dispose();
+  });
+
   it("rewinds to a fixed point across more than one tool dependency", () => {
     const manager = SessionManager.inMemory("E:\\work");
     const firstCallId = manager.appendMessage(assistantToolCall("tool-1"));

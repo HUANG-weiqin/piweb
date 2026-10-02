@@ -1,4 +1,5 @@
 import type { ModelsSimpleStreamOptions } from "@earendil-works/pi-ai";
+import { normalizeContext } from "@earendil-works/pi-ai/utils/transcript";
 import { closeOpenAICodexWebSocketSessions } from "@earendil-works/pi-ai/api/openai-codex-responses";
 import type {
   AgentSession,
@@ -85,11 +86,11 @@ function codexModel(overrides: Record<string, unknown> = {}) {
   };
 }
 
-const context = {
+const context = normalizeContext({
   systemPrompt: "",
   messages: [],
   tools: [],
-};
+});
 
 describe("service tier compatibility boundary", () => {
   beforeEach(() => {
@@ -293,7 +294,7 @@ describe("service tier compatibility boundary", () => {
     override.dispose();
   });
 
-  it("composes with default compaction by capturing the decorated stream synchronously", async () => {
+  it("composes with Pi 1 default compaction across asynchronous auth", async () => {
     const { modelRuntime, stream, streamSimple } = fakeModelRuntime();
     const { session, upstream } = fakeSession(modelRuntime);
     const serviceTierOverride = installServiceTierOverride(
@@ -306,13 +307,11 @@ describe("service tier compatibility boundary", () => {
     async function runDefaultCompaction(
       _preparation: unknown,
       requestModel: unknown,
-      _apiKey: unknown,
-      _headers: unknown,
       _customInstructions: unknown,
       _signal: unknown,
-      _env: unknown,
       _reason: unknown,
     ): Promise<unknown> {
+      await Promise.resolve();
       return this.agent.streamFunction(
         requestModel as never,
         context as never,
@@ -331,7 +330,7 @@ describe("service tier compatibility boundary", () => {
 
     expect(session.agent.streamFunction).toBe(upstream);
     await privateSession._runDefaultCompaction(
-      {}, model, undefined, undefined, undefined, undefined, undefined, "manual",
+      {}, model, undefined, undefined, "manual",
     );
     expect(stream).toHaveBeenCalledWith(model, context, expect.objectContaining({
       reasoningEffort: "minimal",

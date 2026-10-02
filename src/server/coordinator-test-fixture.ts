@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
@@ -8,8 +9,9 @@ import type {
   AgentSession,
   AgentSessionEvent,
   ExtensionError,
-  ModelRuntime,
   ModelRegistry,
+  ModelRuntime,
+  PromptOptions,
   SessionManager,
   SettingsManager,
   ToolDefinition,
@@ -73,6 +75,9 @@ import {
   RoleCatalog,
   type RoleCatalogModel,
 } from "./role-catalog.js";
+
+type PromptDisposition = Parameters<NonNullable<PromptOptions["preflightResult"]>>[0];
+type QueuedInputDisposition = Awaited<ReturnType<AgentSession["steer"]>>;
 
 const RUN_A = "ba39f161-b67f-47c9-9285-e391427ed7d0";
 const RUN_B = "65feacc3-00b4-45bd-80ee-5e18bc32f7dc";
@@ -152,7 +157,8 @@ class FakeSessionControl {
   readonly received: ReceivedCustomMessage[] = [];
   readonly promptTexts: string[] = [];
   readonly steerTexts: string[] = [];
-  steerImplementation: (text: string) => Promise<void> | void = () => undefined;
+  steerImplementation: (text: string) => Promise<QueuedInputDisposition> | QueuedInputDisposition =
+    () => "queued";
   readonly behaviors: SessionBehavior[] = [];
   readonly continuationBehaviors: SessionBehavior[] = [];
   readonly pendingSteers: ReceivedCustomMessage[] = [];
@@ -161,21 +167,18 @@ class FakeSessionControl {
   abortCalls = 0;
   disposeCalls = 0;
   skipNextCustomMessagePersistence = false;
-  /**
-   * Real text steering queue mirroring the SDK; admissions must verify a
-   * queue entry actually appeared. Raw deliveries never drain it in the fake
-   * (the actor only reads length/indices), matching the SDK's append order.
-   */
+  /** Real text mirror of the fake SDK queue; identity capture is separate. */
   readonly steeringMessages: string[] = [];
   /** Exact user message objects queued at the simulated SDK steering boundary. */
   readonly steeringAgentMessages: AgentMessage[] = [];
-  /** Simulated SDK preflight result for busy browser steer prompts. */
-  steerPromptPreflightResult?: boolean;
+  onSteeringEnqueue?: (message: AgentMessage) => void;
+  /** Exact Pi prompt disposition for busy browser steer prompts. */
+  steerPromptPreflightResult?: PromptDisposition;
   /** Simulated SDK queued text (may differ from the submitted prompt text). */
   steerPromptExpandedText?: string;
   /** Simulated SDK queued text for steers (may differ from the submitted text). */
   steerExpandedText?: string;
-  /** Simulated extension-handled input: preflight true but NO queue entry. */
+  /** Simulated extension-handled input: Pi reports `handled` with no queue entry. */
   steerPromptHandled?: boolean;
   /** Simulated input-extension handlers (admission precheck). */
   hasInputExtensionHandlers?: boolean;
@@ -220,29 +223,30 @@ class FakeSessionControl {
       },
       prompt: async (
         text: string,
-        options?: {
-          streamingBehavior?: "steer" | "followUp";
-          preflightResult?: (ok: boolean) => void;
-        },
+        options?: PromptOptions,
       ) => {
         control.promptTexts.push(text);
         if (options?.streamingBehavior === "steer") {
           // Busy browser prompts queue into the SDK steering queue; they do
           // not start a turn. The raw user message_end arrives later via
-          // emitUserMessage. Mirror the SDK: queue first, then preflight.
-          const ok = control.steerPromptPreflightResult ?? true;
-          if (ok && !control.steerPromptHandled) {
+          // emitUserMessage. Mirror Pi 1: only `queued` adds a user message.
+          const disposition = control.steerPromptPreflightResult
+            ?? (control.steerPromptHandled ? "handled" : "queued");
+          if (disposition === "queued") {
             const queuedText = control.steerPromptExpandedText ?? text;
-            control.steeringMessages.push(queuedText);
-            control.steeringAgentMessages.push(agentMessage({
+            const message = agentMessage({
               role: "user",
               content: queuedText,
               timestamp: Date.now(),
-            }));
+            });
+            control.onSteeringEnqueue?.(message);
+            control.steeringMessages.push(queuedText);
+            control.steeringAgentMessages.push(message);
           }
-          options.preflightResult?.(ok);
+          options.preflightResult?.(disposition);
           return;
         }
+        options?.preflightResult?.("started");
         await control.runNext();
       },
       getSteeringMessages: () => control.steeringMessages.slice(),
@@ -250,15 +254,20 @@ class FakeSessionControl {
         eventType === "input" && control.hasInputExtensionHandlers === true,
       steer: (text: string) => {
         control.steerTexts.push(text);
-        const result = control.steerImplementation(text);
-        const queuedText = control.steerExpandedText ?? text;
-        control.steeringMessages.push(queuedText);
-        control.steeringAgentMessages.push(agentMessage({
-          role: "user",
-          content: queuedText,
-          timestamp: Date.now(),
-        }));
-        return result;
+        return Promise.resolve(control.steerImplementation(text)).then((disposition) => {
+          if (disposition === "queued") {
+            const queuedText = control.steerExpandedText ?? text;
+            const message = agentMessage({
+              role: "user",
+              content: queuedText,
+              timestamp: Date.now(),
+            });
+            control.onSteeringEnqueue?.(message);
+            control.steeringMessages.push(queuedText);
+            control.steeringAgentMessages.push(message);
+          }
+          return disposition;
+        });
       },
       clearQueue: () => {
         control.pendingSteers.splice(0);
@@ -601,6 +610,8 @@ class FakeRuntime implements PiRuntimeLike {
       options,
       this.nextSessionBehaviors.shift() ?? [],
     );
+    const captureStorage = new AsyncLocalStorage<(message: AgentMessage) => void>();
+    control.onSteeringEnqueue = (message) => captureStorage.getStore()?.(message);
     // The actor issues the isolated title request through the public session
     // stream function, so capture calls at that boundary.
     control.session.agent.streamFunction = ((
@@ -620,14 +631,21 @@ class FakeRuntime implements PiRuntimeLike {
       settings: fakeSettings(),
       modelRuntime: this.modelRuntime,
       modelRegistry: this.sessionModelRegistry ?? this.modelRegistry,
-      captureSteeringMessage: (operation) => {
-        const before = control.steeringAgentMessages.length;
-        const result = operation();
-        const message = control.steeringAgentMessages[before];
-        return {
-          result,
-          ...(message === undefined ? {} : { message }),
-        };
+      captureSteeringMessage: async (onMessage, operation) => {
+        let count = 0;
+        return captureStorage.run((message) => {
+          if (count !== 0) {
+            throw new Error("Pi input must enqueue exactly one steering identity");
+          }
+          count++;
+          onMessage(message);
+        }, async () => {
+          const result = await operation();
+          if (count !== 1) {
+            throw new Error("Pi input did not enqueue exactly one steering identity");
+          }
+          return result;
+        });
       },
       activateExtensions: () =>
         this.activateSession?.(conversationId, options)

@@ -3,6 +3,7 @@ import {
   type AgentSession,
   type AgentSessionEvent,
   type ExtensionError,
+  type PromptOptions,
   type ModelRegistry,
   type SessionManager,
   type SettingsManager,
@@ -12,6 +13,7 @@ import {
   type AssistantMessage,
   type ImageContent,
 } from "@earendil-works/pi-ai";
+import { normalizeContext } from "@earendil-works/pi-ai/utils/transcript";
 import { Type } from "typebox";
 import {
   DEFAULT_COMPACTION_THRESHOLD_PERCENT,
@@ -100,6 +102,7 @@ type AgentMessage = Extract<
   Parameters<AgentSession["agent"]["steer"]>[0],
   { role: "user" }
 >;
+type PromptDisposition = Parameters<NonNullable<PromptOptions["preflightResult"]>>[0];
 
 type BashRunCleanup = Awaited<ReturnType<BashExecutionLifecycle["close"]>>;
 
@@ -2119,14 +2122,26 @@ export class ConversationActor {
       },
       async (ticket) => {
         await this.appendPendingBashNotifications(ticket);
+        let disposition: PromptDisposition | undefined;
         await this.session.prompt(text, {
           ...(images === undefined ? {} : { images }),
-          preflightResult: (accepted) => {
-            if (accepted && isCancelling(ticket)) {
+          preflightResult: (result) => {
+            disposition = result;
+            if (result !== "started") {
+              throw new Error(
+                `Host-owned prompt was ${result}, not started`,
+              );
+            }
+            if (isCancelling(ticket)) {
               throw new Error("Run cancelled before agent start");
             }
           },
         });
+        if (disposition !== "started") {
+          throw new Error(
+            `Host-owned prompt was ${disposition ?? "not admitted"}, not started`,
+          );
+        }
       },
     );
   }
@@ -2135,7 +2150,8 @@ export class ConversationActor {
    * busy 时浏览器 prompt：消息进 SDK steering 队列（不建 run ticket）。
    * steering 在当前 assistant turn 的工具调用全部结束后、下一次模型调用前注入，
    * 用户消息因此能及时纠正 agent 方向（followUp 要等整个 run 结束才读取）。
-   * preflightResult(true) 后还要验证 SDK steering queue 确实新增 entry 才 resolve；
+   * Pi 1 `preflightResult('queued')` 与 SDK native enqueue 前的精确 AgentMessage
+    * capture/observation 共同将消息关联到当前 run 后才 resolve；
    * 轮到时若已 idle 则转 startPrompt。投递确认由 prompt_delivered 表达。
    */
   async admitBrowserPrompt(input: {
@@ -2222,7 +2238,7 @@ export class ConversationActor {
     //   would start an unowned SDK run (and the later queue proof could not
     //   undo it). The browser keeps its draft: no prompt_admitted.
     // - input extensions: the SDK can consume the prompt without queueing
-    //   (preflight(true) without a queue entry). Extension commands are
+    //   (preflightResult('handled') without a queued AgentMessage). Extension commands are
     //   already host-rejected before this point.
     if (!this.session.isStreaming) {
       throw new Error(
@@ -2239,73 +2255,59 @@ export class ConversationActor {
       text: input.text || "[图片]",
     };
     this.pendingAdmissions.push(admission);
-    let accepted = false;
-    let preflightResult: boolean | undefined;
+    let disposition: PromptDisposition | undefined;
     let observation: PendingGuidanceObservation | undefined;
     try {
-      await new Promise<void>((resolve, reject) => {
-        let queued: Promise<void>;
-        try {
-          const captured = this.requireCreated().captureSteeringMessage(() =>
-            this.session.prompt(input.text, {
-              streamingBehavior: "steer",
-              ...(images === undefined ? {} : { images }),
-              preflightResult: (ok) => {
-                accepted = ok;
-                preflightResult = ok;
-                queueMicrotask(() => {
-                  if (!ok) {
-                    reject(new Error("Prompt preflight rejected"));
-                    return;
-                  }
-                  if (observation === undefined) {
-                    reject(new Error(
-                      "Prompt was handled without a steering identity",
-                    ));
-                    return;
-                  }
-                  if (
-                    this.activeRun !== ticket
-                    || (
-                      ticket.state.phase !== "running"
-                      && ticket.state.phase !== "waiting"
-                    )
-                  ) {
-                    reject(new Error(
-                      "The agent run stopped accepting messages before admission completed",
-                    ));
-                    return;
-                  }
-                  this.onRunInputAccepted(ticket);
-                  resolve();
-                });
-              },
-            })
-          );
-          queued = Promise.resolve(captured.result);
-          if (captured.message === undefined) {
-            if (preflightResult !== false) {
-              throw new Error(
-                "Prompt was handled without being queued for steering",
-              );
-            }
-          } else {
-            observation = {
-              admission,
-              queuedMessage: captured.message,
-              waited: false,
-            };
-            ticket.pendingGuidanceObservations.push(observation);
+      await this.requireCreated().captureSteeringMessage(
+        (queuedMessage) => {
+          if (
+            this.activeRun !== ticket
+            || (
+              ticket.state.phase !== "running"
+              && ticket.state.phase !== "waiting"
+            )
+          ) {
+            throw new Error("The agent run stopped accepting messages before enqueue");
           }
-        } catch (error) {
-          reject(error);
-          return;
-        }
-        void queued.catch((error: unknown) => {
-          // 主 promise 覆盖整个队列 drain；若投递确认已发生，忽略迟到错误。
-          if (!accepted) reject(error);
-        });
-      });
+          observation = {
+            admission,
+            queuedMessage,
+            waited: false,
+          };
+          ticket.pendingGuidanceObservations.push(observation);
+        },
+        async () => {
+          await this.session.prompt(input.text, {
+            streamingBehavior: "steer",
+            ...(images === undefined ? {} : { images }),
+            preflightResult: (result) => {
+              disposition = result;
+              if (result !== "queued") {
+                throw new Error(
+                  `Prompt was ${result}, not queued for steering`,
+                );
+              }
+            },
+          });
+          if (disposition !== "queued") {
+            throw new Error(
+              `Prompt was ${disposition ?? "not admitted"}, not queued for steering`,
+            );
+          }
+        },
+      );
+      if (
+        this.activeRun !== ticket
+        || (
+          ticket.state.phase !== "running"
+          && ticket.state.phase !== "waiting"
+        )
+      ) {
+        throw new Error(
+          "The agent run stopped accepting messages before admission completed",
+        );
+      }
+      this.onRunInputAccepted(ticket);
     } catch (error) {
       if (observation !== undefined) {
         const index = ticket.pendingGuidanceObservations.indexOf(observation);
@@ -2430,36 +2432,52 @@ export class ConversationActor {
       const index = ticket.guidanceDeliveries.indexOf(pendingGuidance);
       if (index >= 0) ticket.guidanceDeliveries.splice(index, 1);
     };
-    // AgentSession.steer queues synchronously before its promise resolves. Do
-    // not route this through the actor operation queue: that queue is occupied
-    // by the active run until settlement. Capture the exact AgentMessage object
-    // at Pi's agent.steer boundary so extension replacement cannot change its
-    // delivery identity.
-    let queued: Promise<void>;
+    // Do not route this through the actor operation queue: that queue is
+    // occupied by the active run until settlement. Pi may await input handlers
+    // before steering, so register the exact identity at the pre-enqueue Agent
+    // boundary under this admission's async-scoped capture token.
     let observation: PendingGuidanceObservation | undefined;
-    try {
-      const captured = this.requireCreated().captureSteeringMessage(() =>
-        images === undefined
+    const queued = this.requireCreated().captureSteeringMessage(
+      (queuedMessage) => {
+        if (
+          this.activeRun !== ticket
+          || (
+            ticket.state.phase !== "running"
+            && ticket.state.phase !== "waiting"
+          )
+          || !this.session.isStreaming
+        ) {
+          throw new Error("The agent run stopped accepting messages before enqueue");
+        }
+        observation = {
+          steer: pendingGuidance,
+          queuedMessage,
+          waited: false,
+        };
+        ticket.pendingGuidanceObservations.push(observation);
+      },
+      async () => {
+        const disposition = await (images === undefined
           ? this.session.steer(trimmed)
-          : this.session.steer(trimmed, images)
-      );
-      queued = Promise.resolve(captured.result);
-      if (captured.message === undefined) {
-        throw new Error("Steer was accepted without a steering identity");
-      }
-      observation = {
-        steer: pendingGuidance,
-        queuedMessage: captured.message,
-        waited: false,
-      };
-      ticket.pendingGuidanceObservations.push(observation);
-    } catch (error) {
-      removePendingGuidance();
-      delivery.reject(error);
-      return Promise.reject(error);
-    }
+          : this.session.steer(trimmed, images));
+        if (disposition !== "queued") {
+          throw new Error(`Steer was ${disposition}, not queued`);
+        }
+      },
+    );
     return queued.then(
       () => {
+        if (
+          this.activeRun !== ticket
+          || (
+            ticket.state.phase !== "running"
+            && ticket.state.phase !== "waiting"
+          )
+        ) {
+          throw new Error(
+            "The agent run stopped accepting messages before admission completed",
+          );
+        }
         this.onRunInputAccepted(ticket);
         return delivery.promise;
       },
@@ -3629,14 +3647,14 @@ export class ConversationActor {
         const response = await Promise.race([
           Promise.resolve(session.agent.streamFunction(
             model,
-            {
+            normalizeContext({
               systemPrompt: AUTO_TITLE_SYSTEM_PROMPT,
               messages: [{
                 role: "user",
                 content: clipUnicode(prompt, AUTO_TITLE_INPUT_CHARACTERS),
                 timestamp: this.now().getTime(),
               }],
-            },
+            }),
             {
               signal: controller.signal,
               timeoutMs: AUTO_TITLE_TIMEOUT_MS,

@@ -1,4 +1,5 @@
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
+import { normalizeContext } from "@earendil-works/pi-ai/utils/transcript";
 import { describe, expect, it, vi } from "vitest";
 import { MAX_MODEL_REFERENCE_BYTES } from "../shared/protocol.js";
 import {
@@ -16,6 +17,8 @@ type DefaultImplementation = (
   receiver: PrivateSession,
   args: unknown[],
 ) => Promise<unknown>;
+
+const context = normalizeContext({ systemPrompt: "", messages: [], tools: [] });
 
 function model(overrides: Record<string, unknown> = {}) {
   return {
@@ -46,21 +49,15 @@ function fakeSession(implementation: DefaultImplementation) {
   function original(
     preparation: unknown,
     requestModel: unknown,
-    apiKey: unknown,
-    headers: unknown,
     customInstructions: unknown,
     signal: unknown,
-    env: unknown,
     reason: unknown,
   ): Promise<unknown> {
     return implementation(this as PrivateSession, [
       preparation,
       requestModel,
-      apiKey,
-      headers,
       customInstructions,
       signal,
-      env,
       reason,
     ]);
   }
@@ -87,11 +84,8 @@ function defaultArgs(requestModel = model()): unknown[] {
   return [
     { preparation: true },
     requestModel,
-    "main-api-key",
-    { "X-Main": "secret" },
     "focus summary",
     new AbortController().signal,
-    { MAIN_ENV: "secret" },
     "manual",
   ];
 }
@@ -108,7 +102,7 @@ function defaultResult(args: unknown[], details: unknown = { readFiles: ["README
 
 describe("installDefaultCompactionRequestOverride", () => {
   it.each(["manual", "threshold"] as const)(
-    "rewrites the %s private default call with its receiver and all eight positions intact",
+    "rewrites only the model in Pi 1's five-argument default call",
     async (reason) => {
     let receiver: unknown;
     let received: unknown[] | undefined;
@@ -117,7 +111,7 @@ describe("installDefaultCompactionRequestOverride", () => {
       received = args;
       current.agent.streamFunction(
         args[1] as never,
-        {} as never,
+        context,
         { reasoning: "max", transport: "auto", maxRetries: 4, timeoutMs: 321 },
       );
       return defaultResult(args);
@@ -134,7 +128,7 @@ describe("installDefaultCompactionRequestOverride", () => {
       id: "compact-model",
     });
     const args = defaultArgs();
-    args[7] = reason;
+    args[4] = reason;
 
     await expect(fixture.invoke(...args)).resolves.toMatchObject({
       summary: "summary",
@@ -151,12 +145,9 @@ describe("installDefaultCompactionRequestOverride", () => {
     expect(received).toEqual([
       args[0],
       compactionModel,
-      undefined,
-      undefined,
+      args[2],
+      args[3],
       args[4],
-      args[5],
-      undefined,
-      args[7],
     ]);
     expect(getModel).toHaveBeenCalledExactlyOnceWith("compact-provider", "compact-model");
     const streamOptions = (fixture.originalStream as unknown as ReturnType<typeof vi.fn>)
@@ -179,7 +170,7 @@ describe("installDefaultCompactionRequestOverride", () => {
     let received: unknown[] | undefined;
     const fixture = fakeSession(async (current, args) => {
       received = args;
-      current.agent.streamFunction(args[1] as never, {} as never, { reasoning: "max" });
+      current.agent.streamFunction(args[1] as never, context, { reasoning: "max" });
       return defaultResult(args);
     });
     const getModel = vi.fn();
@@ -205,27 +196,42 @@ describe("installDefaultCompactionRequestOverride", () => {
     override.dispose();
   });
 
-  it("restores the session stream after Pi captures it while split summaries use the capture", async () => {
+  it("keeps the wrapper installed until Pi reads streamFunction after async auth", async () => {
+    const auth = deferred<void>();
+    const startedStream = deferred<void>();
     const result = deferred<ReturnType<typeof defaultResult>>();
     let streamFromDefault: AgentSession["agent"]["streamFunction"] | undefined;
     const fixture = fakeSession(async (current) => {
+      await auth.promise;
       streamFromDefault = current.agent.streamFunction;
+      startedStream.resolve();
+      streamFromDefault(
+        model({ provider: "compact-provider", id: "compact-model" }) as never,
+        context,
+        { reasoning: "high" },
+      );
       return result.promise;
     });
-    const compactionModel = model({ contextWindow: 120_000 });
+    const compactionModel = model({
+      provider: "compact-provider",
+      id: "compact-model",
+      contextWindow: 120_000,
+    });
     const override = installDefaultCompactionRequestOverride(fixture.session, {
       getModel: () => compactionModel,
     }, { provider: "compact-provider", id: "compact-model" });
 
     const operation = fixture.invoke(...defaultArgs());
-    expect(fixture.session.agent.streamFunction).toBe(fixture.originalStream);
-    streamFromDefault?.(compactionModel as never, {} as never, { reasoning: "high" });
-    streamFromDefault?.(compactionModel as never, {} as never, { reasoning: "max" });
-    expect(fixture.originalStream).toHaveBeenCalledTimes(2);
-    expect(fixture.session.agent.streamFunction).toBe(fixture.originalStream);
+    expect(fixture.session.agent.streamFunction).not.toBe(fixture.originalStream);
+    auth.resolve();
+    await startedStream.promise;
+    expect(streamFromDefault).not.toBe(fixture.originalStream);
+    expect(fixture.originalStream).toHaveBeenCalledTimes(1);
+    expect(fixture.session.agent.streamFunction).not.toBe(fixture.originalStream);
 
     result.resolve(defaultResult(defaultArgs()));
     await expect(operation).resolves.toMatchObject({ summary: "summary" });
+    expect(fixture.session.agent.streamFunction).toBe(fixture.originalStream);
     override.dispose();
   });
 
@@ -233,7 +239,7 @@ describe("installDefaultCompactionRequestOverride", () => {
     const receivedModels: unknown[] = [];
     const fixture = fakeSession(async (current, args) => {
       receivedModels.push(args[1]);
-      current.agent.streamFunction(args[1] as never, {} as never, {});
+      current.agent.streamFunction(args[1] as never, context, {});
       return defaultResult(args);
     });
     const first = model({ id: "compact-model", contextWindow: 120_000 });
@@ -256,7 +262,7 @@ describe("installDefaultCompactionRequestOverride", () => {
 
   it("captures the explicit model identity at installation", async () => {
     const fixture = fakeSession(async (current, args) => {
-      current.agent.streamFunction(args[1] as never, {} as never, {});
+      current.agent.streamFunction(args[1] as never, context, {});
       return defaultResult(args);
     });
     const reference = { provider: "compact-provider", id: "initial-model" };
@@ -308,7 +314,7 @@ describe("installDefaultCompactionRequestOverride", () => {
   it("guards overlapping default attempts", async () => {
     const first = deferred<ReturnType<typeof defaultResult>>();
     const fixture = fakeSession(async (current, args) => {
-      current.agent.streamFunction(args[1] as never, {} as never, {});
+      current.agent.streamFunction(args[1] as never, context, {});
       return first.promise;
     });
     const override = installDefaultCompactionRequestOverride(fixture.session, {
@@ -371,7 +377,7 @@ describe("installDefaultCompactionRequestOverride", () => {
     }, { provider: "compact-provider", id: "compact-model" });
     const controller = new AbortController();
     const args = defaultArgs();
-    args[5] = controller.signal;
+    args[3] = controller.signal;
 
     const operation = fixture.invoke(...args);
     controller.abort();
@@ -388,8 +394,8 @@ describe("installDefaultCompactionRequestOverride", () => {
     const primary = model();
     const events: unknown[] = [];
     const fixture = fakeSession(async (current, args) => {
-      current.agent.streamFunction(args[1] as never, {} as never, {});
-      current.agent.streamFunction(args[1] as never, {} as never, {});
+      current.agent.streamFunction(args[1] as never, context, {});
+      current.agent.streamFunction(args[1] as never, context, {});
       return defaultResult(args, undefined);
     });
     const override = installDefaultCompactionRequestOverride(
@@ -430,7 +436,7 @@ describe("installDefaultCompactionRequestOverride", () => {
       throw new Error("observer failed");
     });
     const fixture = fakeSession(async (current, args) => {
-      current.agent.streamFunction(args[1] as never, {} as never, {});
+      current.agent.streamFunction(args[1] as never, context, {});
       return defaultResult(args);
     });
     const override = installDefaultCompactionRequestOverride(
@@ -462,7 +468,7 @@ describe("installDefaultCompactionRequestOverride", () => {
   ])("rejects an invalid %s before provider dispatch", async (_label, overrides) => {
     const events: unknown[] = [];
     const fixture = fakeSession(async (current, args) => {
-      current.agent.streamFunction(args[1] as never, {} as never, {});
+      current.agent.streamFunction(args[1] as never, context, {});
       return defaultResult(args);
     });
     const override = installDefaultCompactionRequestOverride(
@@ -483,8 +489,8 @@ describe("installDefaultCompactionRequestOverride", () => {
   it("fails closed if a split request changes the provider or model identity", async () => {
     const events: unknown[] = [];
     const fixture = fakeSession(async (current, args) => {
-      current.agent.streamFunction(args[1] as never, {} as never, {});
-      current.agent.streamFunction(model({ id: "other-model" }) as never, {} as never, {});
+      current.agent.streamFunction(args[1] as never, context, {});
+      current.agent.streamFunction(model({ id: "other-model" }) as never, context, {});
       return defaultResult(args);
     });
     const override = installDefaultCompactionRequestOverride(
@@ -509,7 +515,7 @@ describe("installDefaultCompactionRequestOverride", () => {
       const failure = new Error(kind);
       const events: unknown[] = [];
       const fixture = fakeSession(async (current, args) => {
-        current.agent.streamFunction(args[1] as never, {} as never, {});
+        current.agent.streamFunction(args[1] as never, context, {});
         throw failure;
       });
       const override = installDefaultCompactionRequestOverride(

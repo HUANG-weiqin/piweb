@@ -10,7 +10,7 @@ import {
 import { COMPACTION_SERVICE_TIER_SUPPRESSION } from "./service-tier.js";
 
 const COMPACTION_THINKING_TARGET = "minimal";
-const DEFAULT_COMPACTION_ARGUMENT_COUNT = 8;
+const DEFAULT_COMPACTION_ARGUMENT_COUNT = 5;
 
 export interface DefaultCompactionModelReference {
   provider: string;
@@ -174,9 +174,6 @@ export function installDefaultCompactionRequestOverride(
         }
         assertCompactionModelFits(requestArgs[1], compactionModel);
         requestArgs[1] = compactionModel;
-        requestArgs[2] = undefined;
-        requestArgs[3] = undefined;
-        requestArgs[6] = undefined;
       }
       const expectedTarget = modelIdentity(
         requestArgs[1],
@@ -225,20 +222,19 @@ export function installDefaultCompactionRequestOverride(
       };
 
       session.agent.streamFunction = compactionStream;
-      let result: Promise<unknown>;
       try {
-        // Pi captures streamFunction by value before this async method returns.
-        result = Reflect.apply(original, privateSession, requestArgs);
+        // Pi 1 resolves the summarization auth before reading streamFunction.
+        // Keep the request wrapper installed through the full async attempt.
+        const settled = await Reflect.apply(original, privateSession, requestArgs);
+        if (!attempt) {
+          throw new Error("Unsupported Pi default compaction result without a request stream");
+        }
+        return withDefaultCompactionProvenance(settled, attempt);
       } finally {
         if (session.agent.streamFunction === compactionStream) {
           session.agent.streamFunction = capturedStream;
         }
       }
-      const settled = await result;
-      if (!attempt) {
-        throw new Error("Unsupported Pi default compaction result without a request stream");
-      }
-      return withDefaultCompactionProvenance(settled, attempt);
     } finally {
       if (attempt) {
         notifyCompactionAttempt(observer, { type: "ended", id: attempt.id });

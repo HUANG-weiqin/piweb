@@ -1964,8 +1964,11 @@ describe("ProjectSessionCoordinator", () => {
     );
 
     await vi.waitFor(() => expect(fixture.runtime.titleCalls).toHaveLength(1));
-    expect(fixture.runtime.titleCalls[0]?.[1]).toMatchObject({
-      messages: [{ role: "user", content: promptText }],
+    const titleContext = fixture.runtime.titleCalls[0]?.[1];
+    expect(titleContext?.messages[0]).toMatchObject({ role: "system" });
+    expect(titleContext?.messages.at(-1)).toMatchObject({
+      role: "user",
+      content: promptText,
     });
     expect(fixture.runtime.titleCalls[0]?.[2]).toMatchObject({
       sessionId: actor.sessionManager.getSessionId(),
@@ -8740,8 +8743,8 @@ describe("ProjectSessionCoordinator", () => {
       "the caller wait",
     );
 
-    // Extension-handled input: the SDK preflights true but never queues a
-    // steering entry. Fail closed: reject, no admission, no wait wake.
+    // Extension-handled input: Pi reports `handled` without queueing a
+    // steering identity. Fail closed: reject, no admission, no wait wake.
     const control = fixture.runtime.control(caller.conversationId);
     control.steerPromptHandled = true;
     await expect(fixture.coordinator.prompt(
@@ -8750,7 +8753,7 @@ describe("ProjectSessionCoordinator", () => {
       callerRunId,
       "handled prompt",
       "handled-prompt-1",
-    )).rejects.toThrow("handled without being queued for steering");
+    )).rejects.toThrow("Prompt was handled, not queued for steering");
     control.steerPromptHandled = undefined;
     expect(caller.pendingPromptAdmissions()).toEqual([]);
     await expect(Promise.race([
@@ -9027,15 +9030,15 @@ describe("ProjectSessionCoordinator", () => {
     )).rejects.toMatchObject({
       message: expect.stringContaining("SDK steer rejected"),
     });
-    control.steerImplementation = () => undefined;
-    control.steerPromptPreflightResult = false;
+    control.steerImplementation = () => "queued";
+    control.steerPromptPreflightResult = "handled";
     await expect(fixture.coordinator.prompt(
       fixture.handle,
       caller.conversationId,
       callerRunId,
       "rejected prompt",
       "rejected-prompt-1",
-    )).rejects.toThrow("Prompt preflight rejected");
+    )).rejects.toThrow("Prompt was handled, not queued for steering");
     control.steerPromptPreflightResult = undefined;
     expect(caller.pendingPromptAdmissions()).toEqual([]);
 

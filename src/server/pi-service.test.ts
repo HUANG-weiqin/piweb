@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -95,6 +96,7 @@ interface FakeSession extends AgentSession {
   eventListener?: (event: AgentSessionEvent) => void;
   steerCalls: string[];
   steeringAgentMessages: AgentMessage[];
+  onSteeringEnqueue?: (message: AgentMessage) => void;
   toolCallGate?: ToolCallGate;
   persistentManager?: SessionManager;
 }
@@ -135,7 +137,21 @@ function fakeSession(settings = fakeSettings()): FakeSession {
         if (this.eventListener === listener) this.eventListener = undefined;
       };
     },
-    prompt: async () => undefined,
+    prompt: async function (text: string, options?: PromptOptions) {
+      if (options?.streamingBehavior === "steer") {
+        const message = {
+          role: "user",
+          content: [{ type: "text", text }],
+          timestamp: Date.now(),
+        } as AgentMessage;
+        this.onSteeringEnqueue?.(message);
+        this.steeringMessages.push(text);
+        this.steeringAgentMessages.push(message);
+        options.preflightResult?.("queued");
+        return;
+      }
+      options?.preflightResult?.("started");
+    },
     sendCustomMessage: async function (
       message: Parameters<AgentSession["sendCustomMessage"]>[0],
       sendOptions: Parameters<AgentSession["sendCustomMessage"]>[1],
@@ -155,12 +171,15 @@ function fakeSession(settings = fakeSettings()): FakeSession {
     hasExtensionHandlers: () => false,
     steer: async function (text: string) {
       this.steerCalls.push(text);
-      this.steeringMessages.push(text);
-      this.steeringAgentMessages.push({
+      const message = {
         role: "user",
         content: [{ type: "text", text }],
         timestamp: Date.now(),
-      } as AgentMessage);
+      } as AgentMessage;
+      this.onSteeringEnqueue?.(message);
+      this.steeringMessages.push(text);
+      this.steeringAgentMessages.push(message);
+      return "queued" as const;
     },
     clearQueue: function () {
       this.steeringMessages.splice(0);
@@ -253,20 +272,29 @@ class FakeRuntime implements PiRuntimeLike {
     const created = await this.create(cwd);
     created.session.toolCallGate = options.toolCallGate;
     created.session.persistentManager = options.sessionManager;
+    const captureStorage = new AsyncLocalStorage<(message: AgentMessage) => void>();
+    created.session.onSteeringEnqueue = (message) => captureStorage.getStore()?.(message);
     let disposePromise: Promise<void> | undefined;
     let activatedHandler: ((error: ExtensionError) => void) | undefined;
     return {
       ...created,
       modelRuntime: this.modelRuntime,
       modelRegistry: this.sessionModelRegistry ?? this.modelRegistry,
-      captureSteeringMessage: (operation) => {
-        const before = created.session.steeringAgentMessages.length;
-        const result = operation();
-        const message = created.session.steeringAgentMessages[before];
-        return {
-          result,
-          ...(message === undefined ? {} : { message }),
-        };
+      captureSteeringMessage: async (onMessage, operation) => {
+        let count = 0;
+        return captureStorage.run((message) => {
+          if (count !== 0) {
+            throw new Error("Pi input must enqueue exactly one steering identity");
+          }
+          count++;
+          onMessage(message);
+        }, async () => {
+          const result = await operation();
+          if (count !== 1) {
+            throw new Error("Pi input did not enqueue exactly one steering identity");
+          }
+          return result;
+        });
       },
       activateExtensions: () => this.activate(options),
       activateExtensionErrors: (handler) => {
@@ -7027,7 +7055,8 @@ describe("PiConnection coordinated project view", () => {
       const started = deferred();
       const finish = deferred();
       const firstSession = harness.runtime.created[0]!;
-      firstSession.prompt = async () => {
+      firstSession.prompt = async (_text, options) => {
+        options?.preflightResult?.("started");
         started.resolve();
         await finish.promise;
         firstSession.persistentManager?.appendMessage(agentMessage({

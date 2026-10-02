@@ -32,8 +32,9 @@ function findEarlierToolCall(
 
 function safeFirstKeptEntryId(
   manager: SessionManager,
-  proposedEntryId: string,
-): string {
+  proposedEntryId: string | null,
+): string | null {
+  if (proposedEntryId === null) return null;
   const branch = manager.getBranch();
   let boundaryIndex = branch.findIndex((entry) => entry.id === proposedEntryId);
   if (boundaryIndex < 0) {

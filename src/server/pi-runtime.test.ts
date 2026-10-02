@@ -6,6 +6,7 @@ import {
   type Api,
   type Transport,
 } from "@earendil-works/pi-ai";
+import { normalizeContext } from "@earendil-works/pi-ai/utils/transcript";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -19,6 +20,7 @@ import {
   type AgentSession,
   type CreateModelRuntimeOptions,
   type ExtensionAPI,
+  type BuildSystemPromptOptions,
   type InlineExtension,
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
@@ -53,6 +55,25 @@ function deferred(): { promise: Promise<void>; resolve(): void } {
     resolve = done;
   });
   return { promise, resolve };
+}
+
+function normalizedPromptOptions(
+  cwd: string,
+  selectedTools: string[],
+): BuildSystemPromptOptions {
+  return {
+    cwd,
+    customPrompt: undefined,
+    forceSystemPrompt: undefined,
+    selectedTools,
+    toolSnippets: {},
+    toolGuidelines: {},
+    promptGuidelines: [],
+    appendSystemPrompt: "",
+    sections: {},
+    contextFiles: [],
+    skills: [],
+  };
 }
 
 async function within<T>(promise: Promise<T>, milliseconds: number): Promise<T> {
@@ -217,7 +238,7 @@ describe("PiRuntime session ownership", () => {
       contextWindow: 100_000,
       maxTokens: 8_192,
     };
-    const context = { systemPrompt: "", messages: [], tools: [] };
+    const context = normalizeContext({ systemPrompt: "", messages: [], tools: [] });
 
     await officialSessionStream(model as never, context as never, {
       maxRetries: 4,
@@ -262,7 +283,7 @@ describe("PiRuntime session ownership", () => {
       contextWindow: 200_000,
       maxTokens: 8_192,
     };
-    const context = { systemPrompt: "", messages: [], tools: [] };
+    const context = normalizeContext({ systemPrompt: "", messages: [], tools: [] });
 
     await sessionStream(model as never, context as never, {
       sessionId: created.session.sessionId,
@@ -372,27 +393,15 @@ describe("PiRuntime session ownership", () => {
     };
     appendMessages();
     const reference = { provider: "compact-provider", id: "compact-model" };
-    const calls: Array<{ receiver: unknown; args: unknown[]; targetAuth: unknown }> = [];
+    const authRequests: Array<{ provider: string; id: string }> = [];
     const providerRequests: Array<{ model: unknown; options: unknown }> = [];
     const compactionAttemptEvents: unknown[] = [];
     const runtime = await testRuntime(
       () => [],
       async (result) => {
-        const privateSession = result.session as AgentSession & {
-          _runDefaultCompaction(
-            preparation: { firstKeptEntryId: string; tokensBefore: number },
-            requestModel: unknown,
-            apiKey: unknown,
-            headers: unknown,
-            customInstructions: unknown,
-            signal: unknown,
-            env: unknown,
-            reason: unknown,
-          ): Promise<unknown>;
-          _getSummarizationRequestAuth(model: unknown): Promise<unknown>;
-        };
         const modelRuntime = result.session.modelRuntime;
         vi.spyOn(modelRuntime, "getAuth").mockImplementation(async (model) => {
+          authRequests.push({ provider: model.provider, id: model.id });
           if (model.provider === "main-provider") {
             return {
               auth: {
@@ -412,9 +421,7 @@ describe("PiRuntime session ownership", () => {
             env: { COMPACT_ENV: "kept" },
           } as never;
         });
-        const compactProvider = modelRuntime.getProvider("compact-provider");
-        if (!compactProvider) throw new Error("Missing compact test provider");
-        (compactProvider as { streamSimple: typeof compactProvider.streamSimple }).streamSimple = (
+        vi.spyOn(modelRuntime, "streamSimple").mockImplementation((
           requestModel,
           _context,
           requestOptions,
@@ -439,48 +446,7 @@ describe("PiRuntime session ownership", () => {
             timestamp: Date.now(),
           } as never));
           return stream;
-        };
-        privateSession._runDefaultCompaction = async function (
-          preparation,
-          requestModel,
-          apiKey,
-          headers,
-          customInstructions,
-          signal,
-          env,
-          reason,
-        ) {
-          const compactionStream = this.agent.streamFunction;
-          calls.push({
-            receiver: this,
-            args: [
-              preparation,
-              requestModel,
-              apiKey,
-              headers,
-              customInstructions,
-              signal,
-              env,
-              reason,
-            ],
-            targetAuth: await this._getSummarizationRequestAuth(requestModel),
-          });
-          await (await compactionStream(
-            requestModel as never,
-            { systemPrompt: "", messages: [], tools: [] } as never,
-            {
-              timeoutMs: 321,
-              websocketConnectTimeoutMs: 222,
-              maxRetries: 4,
-              maxRetryDelayMs: 987,
-            },
-          )).result();
-          return {
-            summary: "instrumented default summary",
-            firstKeptEntryId: preparation.firstKeptEntryId,
-            tokensBefore: preparation.tokensBefore,
-          };
-        };
+        });
         reference.id = "mutated-after-create";
       },
       async (modelRuntime) => {
@@ -515,7 +481,7 @@ describe("PiRuntime session ownership", () => {
       _runAutoCompaction(reason: string, willRetry: boolean): Promise<boolean>;
     })._runAutoCompaction("threshold", false);
 
-    expect(calls).toHaveLength(2);
+    expect(providerRequests).toHaveLength(2);
     expect(compactionAttemptEvents.map((event) => (event as { type: string }).type)).toEqual([
       "started",
       "ended",
@@ -545,64 +511,33 @@ describe("PiRuntime session ownership", () => {
           }),
         }),
       ]));
-    expect(calls.map((call) => call.receiver)).toEqual([
-      created.session,
-      created.session,
+    expect(authRequests).toEqual([
+      { provider: "compact-provider", id: "compact-model" },
+      { provider: "compact-provider", id: "compact-model" },
     ]);
-    for (const call of calls) {
-      expect(call.args).toHaveLength(8);
-      expect(call.args[1]).toMatchObject({
+    for (const request of providerRequests) {
+      expect(request.model).toMatchObject({
         provider: "compact-provider",
         id: "compact-model",
-        baseUrl: "https://compact.invalid/v1",
+        baseUrl: "https://compact-auth.invalid/v1",
       });
-      expect(call.args[2]).toBeUndefined();
-      expect(call.args[3]).toBeUndefined();
-      expect(call.args[6]).toBeUndefined();
-      expect(call.targetAuth).toMatchObject({
-        model: expect.objectContaining({ baseUrl: "https://compact-auth.invalid/v1" }),
-        apiKey: "compact-api-key-sentinel",
-      });
-    }
-    expect(calls.map((call) => call.args[7])).toEqual(["manual", "threshold"]);
-    for (const request of providerRequests) {
       expect(request.options).not.toMatchObject({
         apiKey: "main-api-key-sentinel",
         headers: expect.objectContaining({ "x-main-sentinel": "must-not-leak" }),
         env: expect.objectContaining({ MAIN_ENV_SENTINEL: "must-not-leak" }),
       });
     }
-    expect(providerRequests).toEqual([
-      {
-        model: expect.objectContaining({
-          provider: "compact-provider",
-          baseUrl: "https://compact-auth.invalid/v1",
-        }),
-        options: expect.objectContaining({
-          apiKey: "compact-api-key-sentinel",
-          headers: { "x-compact": "kept" },
-          env: { COMPACT_ENV: "kept" },
-          timeoutMs: 321,
-          websocketConnectTimeoutMs: 222,
-          maxRetries: 4,
-          maxRetryDelayMs: 987,
-        }),
-      },
-      {
-        model: expect.objectContaining({
-          provider: "compact-provider",
-          baseUrl: "https://compact-auth.invalid/v1",
-        }),
-        options: expect.objectContaining({
-          apiKey: "compact-api-key-sentinel",
-          headers: { "x-compact": "kept" },
-          env: { COMPACT_ENV: "kept" },
-          timeoutMs: 321,
-          websocketConnectTimeoutMs: 222,
-          maxRetries: 4,
-          maxRetryDelayMs: 987,
-        }),
-      },
+    expect(providerRequests.map((request) => request.options)).toEqual([
+      expect.objectContaining({
+        apiKey: "compact-api-key-sentinel",
+        headers: { "x-compact": "kept" },
+        env: { COMPACT_ENV: "kept" },
+      }),
+      expect.objectContaining({
+        apiKey: "compact-api-key-sentinel",
+        headers: { "x-compact": "kept" },
+        env: { COMPACT_ENV: "kept" },
+      }),
     ]);
     await created.dispose();
   });
@@ -611,25 +546,16 @@ describe("PiRuntime session ownership", () => {
     const cwd = await temporaryDirectory("piweb-runtime-turn-boundary-");
     const checks: unknown[] = [];
     let upstreamReceiver: unknown;
-    let originalCreateLoopConfig: unknown;
+    let upstreamFinishTurn: AgentSession["agent"]["finishTurn"];
     const runtime = await testRuntime(
       () => [],
       async (result) => {
-        const loopOwner = result.session.agent as unknown as {
-          createLoopConfig(...args: unknown[]): Record<string, unknown>;
+        const agent = result.session.agent;
+        upstreamFinishTurn = async function (turn, signal) {
+          upstreamReceiver = this;
+          return undefined;
         };
-        const nativeCreateLoopConfig = loopOwner.createLoopConfig;
-        loopOwner.createLoopConfig = function (...args) {
-          return {
-            ...nativeCreateLoopConfig.apply(this, args),
-            marker: "upstream-config",
-            shouldStopAfterTurn: function () {
-              upstreamReceiver = this;
-              return false;
-            },
-          };
-        };
-        originalCreateLoopConfig = loopOwner.createLoopConfig;
+        agent.finishTurn = upstreamFinishTurn;
       },
     );
     const created = await runtime.createSession(cwd, {
@@ -640,50 +566,87 @@ describe("PiRuntime session ownership", () => {
     });
     const getContextUsage = vi.spyOn(created.session, "getContextUsage")
       .mockReturnValue({ tokens: 700, contextWindow: 1_000, percent: 70 });
-    const loopOwner = created.session.agent as unknown as {
-      createLoopConfig(): {
-        shouldStopAfterTurn?: (input: { toolResults: unknown[] }) => Promise<boolean>;
-      };
-    };
-    const shouldStop = loopOwner.createLoopConfig().shouldStopAfterTurn;
-    created.session.agent.steer({
+    const agent = created.session.agent;
+    agent.steer({
       role: "user",
       content: [{ type: "text", text: "queued guidance" }],
       timestamp: Date.now(),
     });
-    expect(created.session.agent.hasQueuedMessages()).toBe(true);
+    expect(agent.hasQueuedMessages()).toBe(true);
+    const toolTurn = {
+      message: { stopReason: "toolUse" },
+      toolResults: [{}],
+      context: { messages: [] },
+      newMessages: [],
+    } as Parameters<NonNullable<AgentSession["agent"]["finishTurn"]>>[0];
 
-    await expect(shouldStop?.({ toolResults: [{}] })).resolves.toBe(true);
+    await expect(agent.finishTurn?.(toolTurn)).resolves.toEqual({ action: "end" });
     expect(created.session.agent.hasQueuedMessages()).toBe(false);
     expect(getContextUsage).toHaveBeenCalledOnce();
     expect(checks).toEqual([{
       contextUsage: { tokens: 700, contextWindow: 1_000, percent: 70 },
       hasToolResults: true,
     }]);
-    expect(upstreamReceiver).toMatchObject({ marker: "upstream-config" });
+    expect(upstreamReceiver).toBe(agent);
     created.releaseTurnBoundaryPause?.();
-    expect(created.session.agent.hasQueuedMessages()).toBe(true);
+    expect(agent.hasQueuedMessages()).toBe(true);
     await created.dispose();
-    expect(loopOwner.createLoopConfig).toBe(originalCreateLoopConfig);
+    expect(agent.finishTurn).toBe(upstreamFinishTurn);
   });
 
-  it("captures the exact synchronous user message queued through agent.steer", async () => {
+  it("isolates concurrent async steering identity captures before enqueue", async () => {
     const cwd = await temporaryDirectory("piweb-runtime-steering-identity-");
     const runtime = await testRuntime(() => []);
     const created = await runtime.createSession(cwd);
-    const message: Parameters<typeof created.session.agent.steer>[0] = {
+    const first: Parameters<typeof created.session.agent.steer>[0] = {
       role: "user",
-      content: [{ type: "text", text: "queued guidance" }],
+      content: [{ type: "text", text: "same queued guidance" }],
       timestamp: 1,
     };
+    const second: Parameters<typeof created.session.agent.steer>[0] = {
+      role: "user",
+      content: [{ type: "text", text: "same queued guidance" }],
+      timestamp: 2,
+    };
+    const captured: unknown[] = [];
 
-    const captured = created.captureSteeringMessage(() =>
-      created.session.agent.steer(message)
-    );
+    await Promise.all([
+      created.captureSteeringMessage((message) => captured.push(message), async () => {
+        await Promise.resolve();
+        created.session.agent.steer(first);
+      }),
+      created.captureSteeringMessage((message) => captured.push(message), async () => {
+        await Promise.resolve();
+        created.session.agent.steer(second);
+      }),
+    ]);
 
-    expect(captured?.message).toBe(message);
+    expect(captured).toEqual([first, second]);
     expect(created.session.agent.hasQueuedMessages()).toBe(true);
     await created.dispose();
+  });
+
+  it("disables session cache warming without changing the configured user preference", async () => {
+    const cwd = await temporaryDirectory("piweb-runtime-cache-warming-");
+    const runtime = await testRuntime(
+      () => [],
+      undefined,
+      undefined,
+      () => SettingsManager.inMemory({ cacheWarming: "idle" }),
+    );
+    const created = await runtime.createSession(cwd);
+    const settings = created.settings;
+
+    expect(settings.getCacheWarmingMode()).toBe("off");
+    expect(settings.getSettings().cacheWarming).toBe("idle");
+    expect(created.session.cacheWarmingStatus).toMatchObject({
+      state: "inactive",
+      reason: "cache warming disabled",
+    });
+
+    await created.dispose();
+    expect(settings.getCacheWarmingMode()).toBe("idle");
+    expect(settings.getSettings().cacheWarming).toBe("idle");
   });
 
   it("owns the supplied manager compaction boundary for the session lifetime", async () => {
@@ -1195,8 +1158,7 @@ describe("PiRuntime session ownership", () => {
             await created.session.extensionRunner.emitBeforeAgentStart(
               "request",
               undefined,
-              created.session.systemPrompt,
-              {} as never,
+              normalizedPromptOptions(cwd, created.session.getActiveToolNames()),
             );
           } catch (error) {
             startupOverrideError = error;
@@ -1231,10 +1193,76 @@ describe("PiRuntime session ownership", () => {
     await expect(created.session.extensionRunner.emitBeforeAgentStart(
       "request",
       undefined,
-      systemPrompt,
-      {} as never,
+      normalizedPromptOptions(cwd, created.session.getActiveToolNames()),
     )).rejects.toThrow("Runtime system prompt changes are not supported");
     expect(created.session.systemPrompt).toBe(systemPrompt);
+
+    await created.dispose();
+  });
+
+  const promptTopologyMutations: Array<[
+    string,
+    (options: BuildSystemPromptOptions) => void,
+  ]> = [
+    ["selectedTools", (options) => options.selectedTools!.push("unexpected-tool")],
+    ["forceSystemPrompt", (options) => { options.forceSystemPrompt = "unexpected"; }],
+    ["customPrompt", (options) => { options.customPrompt = "unexpected"; }],
+    ["appendSystemPrompt", (options) => { options.appendSystemPrompt = "unexpected"; }],
+    ["sections", (options) => { options.sections!.piweb_test = "unexpected"; }],
+    ["contextFiles", (options) => options.contextFiles!.push({ path: "test.md", content: "unexpected" })],
+    ["skills", (options) => options.skills!.push({} as never)],
+    ["toolSnippets", (options) => { options.toolSnippets!.test = "unexpected"; }],
+    ["toolGuidelines", (options) => { options.toolGuidelines!.test = ["unexpected"]; }],
+    ["promptGuidelines", (options) => options.promptGuidelines!.push("unexpected")],
+  ];
+
+  it.each(promptTopologyMutations)(
+    "rejects in-place before_agent_start mutation of %s",
+    async (_field, mutate) => {
+      const cwd = await temporaryDirectory("piweb-runtime-prompt-topology-");
+      const runtime = await testRuntime(() => [
+        (pi) => {
+          pi.on("before_agent_start", (event) => {
+            mutate(event.systemPromptOptions);
+          });
+        },
+      ]);
+      const created = await runtime.createSession(cwd);
+      await created.activateExtensions();
+      const options = normalizedPromptOptions(cwd, created.session.getActiveToolNames());
+      const before = structuredClone(options);
+
+      await expect(created.session.extensionRunner.emitBeforeAgentStart(
+        "request",
+        undefined,
+        options,
+      )).rejects.toThrow("Runtime system prompt changes are not supported");
+      expect(options).toEqual(before);
+
+      await created.dispose();
+    },
+  );
+
+  it("allows before_agent_start mutations that restore the normalized prompt topology", async () => {
+    const cwd = await temporaryDirectory("piweb-runtime-prompt-topology-noop-");
+    const runtime = await testRuntime(() => [
+      (pi) => {
+        pi.on("before_agent_start", (event) => {
+          event.systemPromptOptions.sections.piweb_test = "temporary";
+          delete event.systemPromptOptions.sections.piweb_test;
+        });
+      },
+    ]);
+    const created = await runtime.createSession(cwd);
+    await created.activateExtensions();
+    const options = normalizedPromptOptions(cwd, created.session.getActiveToolNames());
+
+    const result = await created.session.extensionRunner.emitBeforeAgentStart(
+      "request",
+      undefined,
+      options,
+    );
+    expect(result.systemPromptOptions).toEqual(options);
 
     await created.dispose();
   });
@@ -1450,6 +1478,7 @@ describe("PiRuntime session ownership", () => {
       nested: { value: "original" },
     });
     let startFacade: unknown;
+    let startProjection: unknown;
     let shutdownFacade: unknown;
     let facadeKeys: string[] = [];
     let startHasMutator = true;
@@ -1458,6 +1487,7 @@ describe("PiRuntime session ownership", () => {
       (pi) => {
         pi.on("session_start", (_event, context) => {
           startFacade = context.sessionManager;
+          startProjection = context.sessionManager.buildSessionProjection();
           facadeKeys = Object.keys(context.sessionManager).sort();
           startHasMutator = "appendCustomEntry" in context.sessionManager;
           const entry = context.sessionManager.getEntries().find(
@@ -1487,9 +1517,11 @@ describe("PiRuntime session ownership", () => {
     created.activateExtensionErrors(() => undefined);
     expect(startFacade).toBe(runner.sessionManager);
     expect(startFacade).not.toBe(manager);
+    expect(startProjection).toEqual(manager.buildSessionProjection());
     expect(startHasMutator).toBe(false);
     expect(facadeKeys).toEqual([
       "buildContextEntries",
+      "buildSessionProjection",
       "getBranch",
       "getCwd",
       "getEntries",
