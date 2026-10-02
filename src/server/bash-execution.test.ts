@@ -196,7 +196,7 @@ describe("run-scoped Bash execution", () => {
 
   it.each([
     { exitCode: 2, error: /Command exited with code 2/ },
-    { exitCode: null, error: /without a known exit code/ },
+    { exitCode: null, error: /terminated without an exit code/ },
   ])("keeps native failures explicit for exitCode $exitCode", async ({ exitCode, error }) => {
     const fixture = makeFixture(async () => ({ exitCode }));
     await expect(invoke(fixture.tool("bash"), { command: "fail" })).rejects.toThrow(error);
@@ -212,7 +212,7 @@ describe("run-scoped Bash execution", () => {
       return { exitCode: null };
     });
     await expect(invoke(fixture.tool("bash"), { command: "unknown-exit" }))
-      .rejects.toThrow(/without a known exit code.*Full output:/s);
+      .rejects.toThrow(/Full output:.*terminated without an exit code/s);
   });
 
   it("preserves a stop/exit race as the observed native result", async () => {
