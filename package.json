@@ -24,8 +24,8 @@
     "visual:verify": "node scripts/visual-verify.mjs"
   },
   "dependencies": {
-    "@earendil-works/pi-ai": "0.85.1",
-    "@earendil-works/pi-coding-agent": "0.85.1",
+    "@earendil-works/pi-ai": "1.0.0",
+    "@earendil-works/pi-coding-agent": "1.0.0",
     "@piweb/context-compressor": "workspace:*",
     "chokidar": "4.0.3",
     "picomatch": "4.0.3",
