@@ -112,18 +112,32 @@ function fakeSettings(): SettingsManager {
 }
 
 function fakeSession(settings = fakeSettings()): FakeSession {
+  let sessionStreaming = false;
+  let agentStreaming = false;
   const session = {
     abortCalls: 0,
     compactCalls: 0,
     disposed: false,
     steerCalls: [],
     steeringAgentMessages: [],
-    isStreaming: false,
+    get isStreaming() {
+      return sessionStreaming;
+    },
+    set isStreaming(value: boolean) {
+      sessionStreaming = value;
+      agentStreaming = value;
+    },
     model: { provider: "test", id: "model", contextWindow: 1000 },
     messages: [],
     agent: {
       state: {
         messages: [],
+        get isStreaming() {
+          return agentStreaming;
+        },
+        set isStreaming(value: boolean) {
+          agentStreaming = value;
+        },
       },
     },
     thinkingLevel: "off",

@@ -2237,10 +2237,15 @@ export class ConversationActor {
     // - pre-stream: the SDK run is not streaming yet — a steer-mode prompt
     //   would start an unowned SDK run (and the later queue proof could not
     //   undo it). The browser keeps its draft: no prompt_admitted.
+    // - post-loop settlement: AgentSession remains streaming after its low-level
+    //   Agent has ended, but a native steer can no longer reach that completed loop.
     // - input extensions: the SDK can consume the prompt without queueing
     //   (preflightResult('handled') without a queued AgentMessage). Extension commands are
     //   already host-rejected before this point.
-    if (!this.session.isStreaming) {
+    if (
+      !this.session.isStreaming
+      || !this.session.agent.state.isStreaming
+    ) {
       throw new Error(
         "The agent run is not streaming yet; cannot queue a message",
       );
@@ -2266,6 +2271,8 @@ export class ConversationActor {
               ticket.state.phase !== "running"
               && ticket.state.phase !== "waiting"
             )
+            || !this.session.isStreaming
+            || !this.session.agent.state.isStreaming
           ) {
             throw new Error("The agent run stopped accepting messages before enqueue");
           }
@@ -2446,6 +2453,7 @@ export class ConversationActor {
             && ticket.state.phase !== "waiting"
           )
           || !this.session.isStreaming
+          || !this.session.agent.state.isStreaming
         ) {
           throw new Error("The agent run stopped accepting messages before enqueue");
         }

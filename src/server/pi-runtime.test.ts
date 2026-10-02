@@ -763,6 +763,109 @@ describe("PiRuntime session ownership", () => {
     vi.useRealTimers();
   });
 
+  it("routes ordinary and post-tool requests through the live Pi Web converter", async () => {
+    const cwd = await temporaryDirectory("piweb-runtime-live-converter-");
+    await writeFile(join(cwd, "probe.txt"), "provider continuation evidence\n");
+    const manager = SessionManager.inMemory(cwd);
+    let sdkConverter: AgentSession["agent"]["convertToLlm"] | undefined;
+    const runtime = await testRuntime(
+      () => [],
+      async ({ session }) => {
+        sdkConverter = session.agent.convertToLlm;
+      },
+      async (modelRuntime) => {
+        modelRuntime.registerProvider("probe-provider", {
+          baseUrl: "https://probe.invalid/v1",
+          apiKey: "probe-key",
+          api: "openai-completions",
+          models: [{ ...providerModel("probe-model"), contextWindow: 100_000 }],
+        });
+        await modelRuntime.refresh({ allowNetwork: false });
+      },
+    );
+    const created = await runtime.createSession(cwd, {
+      sessionManager: manager,
+      model: { provider: "probe-provider", id: "probe-model" },
+      getLoopList: () => ({
+        items: [{ id: "probe", text: "Verify provider continuation", status: "active" }],
+        armed: true,
+      }),
+    });
+    await created.activateExtensions();
+    const piWebConverter = created.session.agent.convertToLlm;
+    const observedConverter = vi.fn((messages: Parameters<
+      typeof piWebConverter
+    >[0]) => piWebConverter.call(created.session.agent, messages));
+    created.session.agent.convertToLlm = observedConverter;
+    const providerContexts: unknown[] = [];
+    let providerCalls = 0;
+    vi.spyOn(created.modelRuntime, "streamSimple").mockImplementation((
+      model,
+      context,
+    ) => {
+      providerContexts.push(context);
+      providerCalls++;
+      const stream = createAssistantMessageEventStream();
+      const content = providerCalls === 1
+        ? [{
+            type: "toolCall" as const,
+            id: "probe-read",
+            name: "read",
+            arguments: { path: "probe.txt" },
+          }]
+        : [{ type: "text" as const, text: "done" }];
+      queueMicrotask(() => stream.end({
+        role: "assistant",
+        content,
+        api: model.api,
+        provider: model.provider,
+        model: model.id,
+        stopReason: providerCalls === 1 ? "toolUse" : "stop",
+        usage: {
+          input: 1,
+          output: 1,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 2,
+          cost: {
+            input: 0,
+            output: 0,
+            cacheRead: 0,
+            cacheWrite: 0,
+            total: 0,
+          },
+        },
+        timestamp: Date.now(),
+      } as never));
+      return stream;
+    });
+
+    try {
+      let disposition: unknown;
+      await created.session.prompt("read the probe", {
+        preflightResult: (result) => { disposition = result; },
+      });
+
+      expect(disposition).toBe("started");
+      expect(providerCalls).toBe(2);
+      expect(observedConverter).toHaveBeenCalledTimes(2);
+      expect(providerContexts).toHaveLength(2);
+      expect(providerContexts[1]).toMatchObject({
+        messages: expect.arrayContaining([
+          expect.objectContaining({ role: "toolResult", toolCallId: "probe-read" }),
+        ]),
+      });
+      expect(manager.getEntries()).toContainEqual(expect.objectContaining({
+        type: "custom_message",
+        customType: "piweb.context_hint.v1",
+      }));
+    } finally {
+      created.session.agent.convertToLlm = piWebConverter;
+      await created.dispose();
+    }
+    expect(created.session.agent.convertToLlm).toBe(sdkConverter);
+  });
+
   it("persists the latest active LoopList hint and skips it without active work", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     const cwd = await temporaryDirectory("piweb-runtime-work-hint-");

@@ -199,13 +199,27 @@ class FakeSessionControl {
     this.behaviors.push(...initialBehaviors);
     const control = this;
     const messages = manager.buildSessionContext().messages;
+    let sessionStreaming = false;
+    let agentStreaming = false;
     this.session = {
-      isStreaming: false,
+      get isStreaming() {
+        return sessionStreaming;
+      },
+      set isStreaming(value: boolean) {
+        sessionStreaming = value;
+        agentStreaming = value;
+      },
       messages,
       sessionId: this.manager.getSessionId(),
       agent: {
         state: {
           messages,
+          get isStreaming() {
+            return agentStreaming;
+          },
+          set isStreaming(value: boolean) {
+            agentStreaming = value;
+          },
         },
         transport: "sse",
       },

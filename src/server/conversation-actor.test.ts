@@ -150,6 +150,8 @@ function fakeSettings(): SettingsManager {
 }
 
 function fakeSession(): FakeSession {
+  let sessionStreaming = false;
+  let agentStreaming = false;
   const session = {
     abortCalls: 0,
     abortCompactionCalls: 0,
@@ -159,13 +161,25 @@ function fakeSession(): FakeSession {
     clearQueueCalls: 0,
     disposeCalls: 0,
     steerCalls: [],
-    isStreaming: false,
+    get isStreaming() {
+      return sessionStreaming;
+    },
+    set isStreaming(value: boolean) {
+      sessionStreaming = value;
+      agentStreaming = value;
+    },
     messages: [],
     sessionId: "fake-session-id",
     agent: {
       state: {
         messages: [],
         thinkingLevel: "off",
+        get isStreaming() {
+          return agentStreaming;
+        },
+        set isStreaming(value: boolean) {
+          agentStreaming = value;
+        },
       },
       transport: "sse",
     },
@@ -2387,6 +2401,45 @@ describe("ConversationActor", () => {
       await fixture.actor.dispose();
     });
 
+    it("does not admit a browser steer after the Pi agent loop has ended", async () => {
+      const fixture = await openActor();
+      const { runStarted, finishRun, running } = busyRun(fixture);
+      await runStarted.promise;
+      const releaseEnqueue = deferred<void>();
+      fixture.runtime.session.promptImplementation = async (text, options) => {
+        await releaseEnqueue.promise;
+        fixture.runtime.session.queueSteeringMessage(text);
+        options?.preflightResult?.("queued");
+      };
+
+      const admission = fixture.actor.admitBrowserPrompt({
+        promptId: PROMPT_ID,
+        runId: RUN_A,
+        text: "after low-level loop",
+      });
+      void admission.catch(() => undefined);
+      (fixture.runtime.session.agent.state as { isStreaming: boolean })
+        .isStreaming = false;
+      expect(fixture.runtime.session.isStreaming).toBe(true);
+      releaseEnqueue.resolve();
+
+      await expect(admission).rejects.toThrow(
+        "The agent run stopped accepting messages before enqueue",
+      );
+      expect(fixture.runtime.session.steeringMessages).not.toContain(
+        "after low-level loop",
+      );
+      expect(fixture.actor.pendingPromptAdmissions()).toEqual([]);
+      expect(fixture.events).not.toContainEqual(expect.objectContaining({
+        type: "prompt_admitted",
+        promptId: PROMPT_ID,
+      }));
+
+      finishRun.resolve();
+      await running;
+      await fixture.actor.dispose();
+    });
+
     it("does not enqueue explicit steering after async input handling outlives its run", async () => {
       const fixture = await openActor();
       const { runStarted, finishRun, running } = busyRun(fixture);
@@ -2452,8 +2505,10 @@ describe("ConversationActor", () => {
       };
       const steer = fixture.actor.steer(RUN_A, "steer after sdk end");
       void steer.catch(() => undefined);
-      fixture.runtime.session.isStreaming = false;
+      (fixture.runtime.session.agent.state as { isStreaming: boolean })
+        .isStreaming = false;
       fixture.runtime.session.eventListener?.(nativeEvent({ type: "agent_end" }));
+      expect(fixture.runtime.session.isStreaming).toBe(true);
       let runSettled = false;
       void completion.then(() => { runSettled = true; });
       await Promise.resolve();
