@@ -1,0 +1,4 @@
+{"type":"session","version":3,"id":"0190f1fa-1111-7aaa-8aaa-111111111111","timestamp":"2025-08-14T10:00:00.000Z","cwd":"E:\\work"}
+{"type":"message","id":"00000001","parentId":null,"timestamp":"2025-08-14T10:00:01.000Z","message":{"role":"user","content":"Summarize this file.","timestamp":1755165601000}}
+{"type":"message","id":"00000002","parentId":"00000001","timestamp":"2025-08-14T10:00:02.000Z","message":{"role":"assistant","content":[{"type":"text","text":"The file contains three functions."}],"api":"openai-completions","provider":"openai","model":"gpt-5","usage":{"input":44,"output":12,"cacheRead":0,"cacheWrite":0,"totalTokens":56,"cost":{"input":0.0001,"output":0.0002,"cacheRead":0,"cacheWrite":0,"total":0.0003}},"stopReason":"stop","timestamp":1755165602000}}
+{"type":"compaction","id":"00000003","parentId":"00000002","timestamp":"2025-08-14T10:00:03.000Z","summary":"The file contains three functions.","firstKeptEntryId":"00000001","tokensBefore":56}

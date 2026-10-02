@@ -19,19 +19,23 @@ const ENTRY_TYPES = new Set([
   "message",
   "thinking_level_change",
   "model_change",
+  "usage",
   "compaction",
   "branch_summary",
+  "context_edit",
   "custom",
   "custom_message",
   "label",
   "session_info",
 ]);
 const ASSISTANT_STOP_REASONS = new Set([
+  "pending",
   "stop",
   "length",
   "toolUse",
   "error",
   "aborted",
+  "deferred",
 ]);
 const USER_CONTENT_TYPES = new Set(["text", "image"]);
 const ASSISTANT_CONTENT_TYPES = new Set(["text", "thinking", "toolCall"]);
@@ -143,6 +147,17 @@ function assertStringArray(value: unknown, field: string): void {
   }
 }
 
+function assertAllowedFields(
+  record: UnknownRecord,
+  allowedFields: readonly string[],
+  field: string,
+): void {
+  const allowed = new Set(allowedFields);
+  for (const key of Object.keys(record)) {
+    if (!allowed.has(key)) throw new Error(`${field}.${key} is unsupported`);
+  }
+}
+
 function assertContentBlocks(
   value: unknown,
   field: string,
@@ -150,26 +165,40 @@ function assertContentBlocks(
 ): void {
   if (!Array.isArray(value)) throw new Error(`${field} must be an array`);
   for (let index = 0; index < value.length; index += 1) {
-    const block = requireRecord(value[index], `${field}[${index}]`);
+    const blockField = `${field}[${index}]`;
+    const block = requireRecord(value[index], blockField);
     const type = requireString(block, "type");
     if (!allowedTypes.has(type)) {
-      throw new Error(`${field}[${index}] has unsupported type ${type}`);
+      throw new Error(`${blockField} has unsupported type ${type}`);
     }
     if (type === "text") {
+      assertAllowedFields(block, ["type", "text", "textSignature"], blockField);
       requireString(block, "text", true);
       assertOptionalString(block, "textSignature");
     } else if (type === "image") {
+      assertAllowedFields(block, ["type", "data", "mimeType"], blockField);
       requireString(block, "data", true);
       requireString(block, "mimeType");
     } else if (type === "thinking") {
+      assertAllowedFields(
+        block,
+        ["type", "thinking", "thinkingSignature", "redacted"],
+        blockField,
+      );
       requireString(block, "thinking", true);
       assertOptionalString(block, "thinkingSignature");
       assertOptionalBoolean(block, "redacted");
     } else {
+      assertAllowedFields(
+        block,
+        ["type", "id", "name", "arguments", "thoughtSignature", "namespace"],
+        blockField,
+      );
       requireString(block, "id");
       requireString(block, "name");
-      requireRecord(block.arguments, "arguments");
+      requireRecord(block.arguments, `${blockField}.arguments`);
       assertOptionalString(block, "thoughtSignature");
+      assertOptionalString(block, "namespace");
     }
   }
 }
@@ -179,29 +208,200 @@ function assertUserLikeContent(value: unknown, field: string): void {
   assertContentBlocks(value, field, USER_CONTENT_TYPES);
 }
 
-function assertUsage(value: unknown): void {
-  const usage = requireRecord(value, "message.usage");
-  for (const field of [
+function assertUsage(value: unknown, field: string): void {
+  const usage = requireRecord(value, field);
+  assertAllowedFields(
+    usage,
+    [
+      "input",
+      "output",
+      "cacheRead",
+      "cacheWrite",
+      "cacheWrite1h",
+      "reasoning",
+      "totalTokens",
+      "cost",
+    ],
+    field,
+  );
+  for (const name of [
     "input",
     "output",
     "cacheRead",
     "cacheWrite",
     "totalTokens",
   ]) {
-    requireFiniteNumber(usage, field);
+    requireFiniteNumber(usage, name);
   }
   assertOptionalFiniteNumber(usage, "cacheWrite1h");
   assertOptionalFiniteNumber(usage, "reasoning");
-  const cost = requireRecord(usage.cost, "message.usage.cost");
-  for (const field of [
-    "input",
-    "output",
-    "cacheRead",
-    "cacheWrite",
-    "total",
-  ]) {
-    requireFiniteNumber(cost, field);
+  const cost = requireRecord(usage.cost, `${field}.cost`);
+  assertAllowedFields(
+    cost,
+    ["input", "output", "cacheRead", "cacheWrite", "total"],
+    `${field}.cost`,
+  );
+  for (const name of ["input", "output", "cacheRead", "cacheWrite", "total"]) {
+    requireFiniteNumber(cost, name);
   }
+}
+
+function assertOptionalUsage(record: UnknownRecord, field: string): void {
+  if (record[field] !== undefined) assertUsage(record[field], field);
+}
+
+function assertTool(value: unknown, field: string): void {
+  const tool = requireRecord(value, field);
+  assertAllowedFields(
+    tool,
+    ["name", "description", "parameters", "constrainedSampling"],
+    field,
+  );
+  requireString(tool, "name");
+  requireString(tool, "description", true);
+  requireRecord(tool.parameters, `${field}.parameters`);
+
+  const sampling = tool.constrainedSampling;
+  if (sampling === undefined || sampling === false) return;
+  const samplingRecord = requireRecord(sampling, `${field}.constrainedSampling`);
+  const samplingType = requireString(samplingRecord, "type");
+  if (samplingType === "json_schema") {
+    assertAllowedFields(
+      samplingRecord,
+      ["type", "strict"],
+      `${field}.constrainedSampling`,
+    );
+    const strict = requireString(samplingRecord, "strict");
+    if (strict !== "prefer" && strict !== "require") {
+      throw new Error(`${field}.constrainedSampling.strict is unsupported`);
+    }
+    return;
+  }
+  if (samplingType === "grammar") {
+    assertAllowedFields(
+      samplingRecord,
+      ["type", "variants"],
+      `${field}.constrainedSampling`,
+    );
+    const variants = requireRecord(
+      samplingRecord.variants,
+      `${field}.constrainedSampling.variants`,
+    );
+    assertAllowedFields(
+      variants,
+      ["openai_lark", "openai_regex"],
+      `${field}.constrainedSampling.variants`,
+    );
+    for (const variant of Object.keys(variants)) {
+      requireString(variants, variant, true);
+    }
+    return;
+  }
+  throw new Error(`${field}.constrainedSampling.type is unsupported: ${samplingType}`);
+}
+
+function assertSystemMessage(value: unknown, field: string): void {
+  const message = requireRecord(value, field);
+  assertAllowedFields(
+    message,
+    ["role", "content", "sections", "toolsAdded", "toolsRemoved", "timestamp"],
+    field,
+  );
+  if (requireString(message, "role") !== "system") {
+    throw new Error(`${field}.role must be system`);
+  }
+  if (typeof message.content !== "string") {
+    assertContentBlocks(message.content, `${field}.content`, new Set(["text"]));
+  }
+  requireFiniteNumber(message, "timestamp");
+  if (message.sections !== undefined) {
+    const sections = requireRecord(message.sections, `${field}.sections`);
+    for (const [name, content] of Object.entries(sections)) {
+      if (content !== null && typeof content !== "string") {
+        throw new Error(`${field}.sections.${name} must be a string or null`);
+      }
+    }
+  }
+  if (message.toolsAdded !== undefined) {
+    if (!Array.isArray(message.toolsAdded)) {
+      throw new Error(`${field}.toolsAdded must be an array`);
+    }
+    message.toolsAdded.forEach((tool, index) => {
+      assertTool(tool, `${field}.toolsAdded[${index}]`);
+    });
+  }
+  if (message.toolsRemoved !== undefined) {
+    if (!Array.isArray(message.toolsRemoved)) {
+      throw new Error(`${field}.toolsRemoved must be an array`);
+    }
+    message.toolsRemoved.forEach((value, index) => {
+      const tool = requireRecord(value, `${field}.toolsRemoved[${index}]`);
+      assertAllowedFields(tool, ["name"], `${field}.toolsRemoved[${index}]`);
+      requireString(tool, "name");
+    });
+  }
+}
+
+function assertDiagnostic(value: unknown, field: string): void {
+  const diagnostic = requireRecord(value, field);
+  assertAllowedFields(
+    diagnostic,
+    ["type", "timestamp", "error", "details"],
+    field,
+  );
+  requireString(diagnostic, "type");
+  requireFiniteNumber(diagnostic, "timestamp");
+  if (diagnostic.error !== undefined) {
+    const error = requireRecord(diagnostic.error, `${field}.error`);
+    assertAllowedFields(
+      error,
+      ["name", "message", "stack", "code"],
+      `${field}.error`,
+    );
+    assertOptionalString(error, "name");
+    requireString(error, "message", true);
+    assertOptionalString(error, "stack");
+    if (
+      error.code !== undefined
+      && typeof error.code !== "string"
+      && typeof error.code !== "number"
+    ) {
+      throw new Error(`${field}.error.code must be a string or number`);
+    }
+  }
+  if (diagnostic.details !== undefined) {
+    requireRecord(diagnostic.details, `${field}.details`);
+  }
+}
+
+function assertNestedCalls(value: unknown, field: string): void {
+  const nested = requireRecord(value, field);
+  assertAllowedFields(nested, ["calls", "complete"], field);
+  requireBoolean(nested, "complete");
+  if (!Array.isArray(nested.calls)) {
+    throw new Error(`${field}.calls must be an array`);
+  }
+  nested.calls.forEach((value, index) => {
+    const callField = `${field}.calls[${index}]`;
+    const call = requireRecord(value, callField);
+    assertAllowedFields(
+      call,
+      ["id", "name", "arguments", "argumentsBytes", "status", "durationMs", "error"],
+      callField,
+    );
+    requireString(call, "id");
+    requireString(call, "name");
+    if (call.arguments !== undefined) {
+      requireRecord(call.arguments, `${callField}.arguments`);
+    }
+    assertOptionalFiniteNumber(call, "argumentsBytes");
+    const status = requireString(call, "status");
+    if (status !== "ok" && status !== "error" && status !== "unfinished") {
+      throw new Error(`${callField}.status is unsupported: ${status}`);
+    }
+    assertOptionalFiniteNumber(call, "durationMs");
+    assertOptionalString(call, "error");
+  });
 }
 
 function assertMessage(value: unknown): void {
@@ -209,11 +409,39 @@ function assertMessage(value: unknown): void {
   const role = requireString(message, "role");
   assertOptionalFiniteNumber(message, "timestamp");
 
+  if (role === "system") {
+    assertSystemMessage(message, "message");
+    return;
+  }
   if (role === "user") {
+    assertAllowedFields(message, ["role", "content", "timestamp"], "message");
     assertUserLikeContent(message.content, "message.content");
     return;
   }
   if (role === "assistant") {
+    assertAllowedFields(
+      message,
+      [
+        "role",
+        "content",
+        "api",
+        "provider",
+        "model",
+        "responseModel",
+        "responseId",
+        "providerThinkingLevel",
+        "thinkingLevel",
+        "diagnostics",
+        "usage",
+        "stopReason",
+        "deferred",
+        "errorMessage",
+        "rawStopReason",
+        "endTurn",
+        "timestamp",
+      ],
+      "message",
+    );
     assertContentBlocks(
       message.content,
       "message.content",
@@ -222,17 +450,47 @@ function assertMessage(value: unknown): void {
     requireString(message, "api");
     requireString(message, "provider");
     requireString(message, "model");
-    assertUsage(message.usage);
+    assertUsage(message.usage, "message.usage");
     const stopReason = requireString(message, "stopReason");
     if (!ASSISTANT_STOP_REASONS.has(stopReason)) {
       throw new Error(`message.stopReason is unsupported: ${stopReason}`);
     }
     assertOptionalString(message, "responseModel");
     assertOptionalString(message, "responseId");
+    assertOptionalString(message, "providerThinkingLevel");
+    assertOptionalString(message, "thinkingLevel");
     assertOptionalString(message, "errorMessage");
+    assertOptionalString(message, "rawStopReason");
+    assertOptionalBoolean(message, "endTurn");
+    if (message.diagnostics !== undefined) {
+      if (!Array.isArray(message.diagnostics)) {
+        throw new Error("message.diagnostics must be an array");
+      }
+      message.diagnostics.forEach((diagnostic, index) => {
+        assertDiagnostic(diagnostic, `message.diagnostics[${index}]`);
+      });
+    }
+    if (message.deferred !== undefined) {
+      const deferred = requireRecord(message.deferred, "message.deferred");
+      assertAllowedFields(
+        deferred,
+        ["provider", "modelId", "api", "id", "expiresAt", "pollAfterMs", "data"],
+        "message.deferred",
+      );
+      for (const field of ["provider", "modelId", "api", "id"]) {
+        requireString(deferred, field);
+      }
+      assertOptionalFiniteNumber(deferred, "expiresAt");
+      assertOptionalFiniteNumber(deferred, "pollAfterMs");
+    }
     return;
   }
   if (role === "toolResult") {
+    assertAllowedFields(
+      message,
+      ["role", "toolCallId", "toolName", "content", "details", "usage", "nestedCalls", "isError", "timestamp", "addedToolNames"],
+      "message",
+    );
     requireString(message, "toolCallId");
     requireString(message, "toolName");
     assertContentBlocks(
@@ -244,9 +502,18 @@ function assertMessage(value: unknown): void {
     if (message.addedToolNames !== undefined) {
       assertStringArray(message.addedToolNames, "message.addedToolNames");
     }
+    assertOptionalUsage(message, "usage");
+    if (message.nestedCalls !== undefined) {
+      assertNestedCalls(message.nestedCalls, "message.nestedCalls");
+    }
     return;
   }
   if (role === "bashExecution") {
+    assertAllowedFields(
+      message,
+      ["role", "command", "output", "exitCode", "cancelled", "truncated", "fullOutputPath", "excludeFromContext", "timestamp"],
+      "message",
+    );
     requireString(message, "command", true);
     requireString(message, "output", true);
     assertOptionalFiniteNumber(message, "exitCode");
@@ -257,6 +524,11 @@ function assertMessage(value: unknown): void {
     return;
   }
   if (role === "custom") {
+    assertAllowedFields(
+      message,
+      ["role", "customType", "content", "display", "details", "timestamp"],
+      "message",
+    );
     requireString(message, "customType");
     assertUserLikeContent(message.content, "message.content");
     requireBoolean(message, "display");
@@ -265,9 +537,31 @@ function assertMessage(value: unknown): void {
   throw new Error(`message.role is unsupported: ${role}`);
 }
 
+function isAncestor(
+  targetId: string,
+  parentId: string | null,
+  parentsById: ReadonlyMap<string, string | null>,
+): boolean {
+  let ancestorId = parentId;
+  while (ancestorId !== null) {
+    if (ancestorId === targetId) return true;
+    ancestorId = parentsById.get(ancestorId) ?? null;
+  }
+  return false;
+}
+
+function assertEntryFields(entry: UnknownRecord, fields: readonly string[]): void {
+  assertAllowedFields(
+    entry,
+    ["type", "id", "parentId", "timestamp", ...fields],
+    "entry",
+  );
+}
+
 function assertKnownEntry(
   value: unknown,
   parentsById: Map<string, string | null>,
+  entriesById: Map<string, UnknownRecord>,
 ): void {
   const entry = requireRecord(value, "entry");
   const type = requireString(entry, "type");
@@ -295,23 +589,30 @@ function assertKnownEntry(
   }
 
   if (type === "message") {
+    assertEntryFields(entry, ["message"]);
     assertMessage(entry.message);
   } else if (type === "thinking_level_change") {
+    assertEntryFields(entry, ["thinkingLevel"]);
     requireString(entry, "thinkingLevel");
   } else if (type === "model_change") {
+    assertEntryFields(entry, ["provider", "modelId"]);
     requireString(entry, "provider");
     requireString(entry, "modelId");
+  } else if (type === "usage") {
+    assertEntryFields(entry, ["kind", "provider", "model", "usage", "note"]);
+    requireString(entry, "kind");
+    requireString(entry, "provider");
+    requireString(entry, "model");
+    assertUsage(entry.usage, "entry.usage");
+    assertOptionalString(entry, "note");
   } else if (type === "compaction") {
+    assertEntryFields(entry, ["summary", "firstKeptEntryId", "tokensBefore", "details", "usage", "fromHook", "systemMessage"]);
     requireString(entry, "summary", true);
     const firstKeptEntryId = requireString(entry, "firstKeptEntryId");
-    let ancestorId = parentId;
-    while (
-      ancestorId !== null
-      && ancestorId !== firstKeptEntryId
+    if (
+      firstKeptEntryId !== id
+      && !isAncestor(firstKeptEntryId, parentId, parentsById)
     ) {
-      ancestorId = parentsById.get(ancestorId) ?? null;
-    }
-    if (ancestorId !== firstKeptEntryId) {
       throw new Error(
         "firstKeptEntryId is not an ancestor of the compacted branch",
       );
@@ -320,7 +621,12 @@ function assertKnownEntry(
       throw new Error("tokensBefore must be non-negative");
     }
     assertOptionalBoolean(entry, "fromHook");
+    assertOptionalUsage(entry, "usage");
+    if (entry.systemMessage !== undefined) {
+      assertSystemMessage(entry.systemMessage, "entry.systemMessage");
+    }
   } else if (type === "branch_summary") {
+    assertEntryFields(entry, ["fromId", "summary", "details", "usage", "fromHook"]);
     const fromId = requireString(entry, "fromId");
     if (
       !parentsById.has(fromId)
@@ -330,23 +636,62 @@ function assertKnownEntry(
     }
     requireString(entry, "summary", true);
     assertOptionalBoolean(entry, "fromHook");
+    assertOptionalUsage(entry, "usage");
+  } else if (type === "context_edit") {
+    assertEntryFields(entry, ["targetId", "replacement"]);
+    const targetId = requireString(entry, "targetId");
+    const target = entriesById.get(targetId);
+    if (target === undefined || !isAncestor(targetId, parentId, parentsById)) {
+      throw new Error("context_edit.targetId must be on the active ancestor path");
+    }
+    let targetRole: "user" | "assistant" | "toolResult" | "custom";
+    if (target.type === "custom_message") {
+      targetRole = "custom";
+    } else if (target.type === "message" && isRecord(target.message)) {
+      const role = target.message.role;
+      if (role !== "user" && role !== "assistant" && role !== "toolResult") {
+        throw new Error("context_edit.targetId does not reference an editable message");
+      }
+      targetRole = role;
+    } else {
+      throw new Error("context_edit.targetId does not reference an editable message");
+    }
+    if (entry.replacement !== null) {
+      const replacement = requireRecord(entry.replacement, "entry.replacement");
+      assertAllowedFields(replacement, ["content"], "entry.replacement");
+      if (!("content" in replacement)) {
+        throw new Error("entry.replacement.content is required");
+      }
+      if (targetRole === "assistant") {
+        assertContentBlocks(replacement.content, "entry.replacement.content", ASSISTANT_CONTENT_TYPES);
+      } else if (targetRole === "toolResult") {
+        assertContentBlocks(replacement.content, "entry.replacement.content", USER_CONTENT_TYPES);
+      } else {
+        assertUserLikeContent(replacement.content, "entry.replacement.content");
+      }
+    }
   } else if (type === "custom") {
+    assertEntryFields(entry, ["customType", "data"]);
     requireString(entry, "customType");
   } else if (type === "custom_message") {
+    assertEntryFields(entry, ["customType", "content", "details", "display"]);
     requireString(entry, "customType");
     assertUserLikeContent(entry.content, "content");
     requireBoolean(entry, "display");
   } else if (type === "label") {
+    assertEntryFields(entry, ["targetId", "label"]);
     const targetId = requireString(entry, "targetId");
     if (!parentsById.has(targetId)) {
       throw new Error("targetId does not reference an earlier entry");
     }
     assertOptionalString(entry, "label");
   } else {
+    assertEntryFields(entry, ["name"]);
     assertOptionalString(entry, "name");
   }
 
   parentsById.set(id, parentId);
+  entriesById.set(id, entry);
 }
 
 function assertFiniteJsonNumbers(
@@ -426,6 +771,11 @@ function inspectPiSessionFileInternal(
   if (!isRecord(header) || header.type !== "session") {
     throw new Error(`Session file has an invalid header: ${sessionPath}`);
   }
+  assertAllowedFields(
+    header,
+    ["type", "version", "id", "timestamp", "cwd", "parentSession"],
+    "session header",
+  );
   if (header.version !== CURRENT_SESSION_VERSION) {
     throw new Error(
       `Session file has an unsupported header version: ${sessionPath}`,
@@ -466,9 +816,10 @@ function inspectPiSessionFileInternal(
   }
 
   const parentsById = new Map<string, string | null>();
+  const entriesById = new Map<string, UnknownRecord>();
   for (let index = 1; index < values.length; index += 1) {
     try {
-      assertKnownEntry(values[index], parentsById);
+      assertKnownEntry(values[index], parentsById, entriesById);
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       throw new Error(

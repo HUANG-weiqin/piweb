@@ -1,7 +1,11 @@
-import type {
-  SessionEntry,
-  SessionManager,
+import {
+  buildSessionProjection,
+  convertToLlm,
+  type ProjectedSessionEntry,
+  type SessionEntry,
+  type SessionManager,
 } from "@earendil-works/pi-coding-agent";
+import type { UserMessage } from "@earendil-works/pi-ai";
 import { z } from "zod";
 import {
   FORK_CONTEXT_CUSTOM_TYPE,
@@ -23,16 +27,6 @@ import {
  */
 
 export { FORK_CONTEXT_CUSTOM_TYPE };
-
-// Must match Pi 0.85.1 `core/messages.js`. The fork test proves equivalence
-// through the real SDK `convertToLlm`, so an SDK upgrade that changes these
-// prefixes fails fast instead of silently diverging child context.
-const COMPACTION_SUMMARY_PREFIX =
-  "The conversation history before this point was compacted into the following summary:\n\n<summary>\n";
-const COMPACTION_SUMMARY_SUFFIX = "\n</summary>";
-const BRANCH_SUMMARY_PREFIX =
-  "The following is a summary of a branch that this conversation came back from:\n\n<summary>\n";
-const BRANCH_SUMMARY_SUFFIX = "</summary>";
 
 const FORK_SESSION_NAME_SUFFIX = " 副本";
 
@@ -151,79 +145,93 @@ export interface PlannedFork {
     readonly details: unknown;
     readonly fromHook: boolean | undefined;
     readonly usage: unknown;
+    readonly firstKeptEntryId: string;
+    readonly systemMessage: Extract<SessionEntry, { type: "compaction" }>["systemMessage"];
   } | null;
   readonly post: readonly PlannedForkEntry[];
 }
 
-function toForkContextForOlderCompaction(
-  entry: Extract<SessionEntry, { type: "compaction" }>,
+function toForkContext(
+  sourceId: string,
+  sourceType: "branch_summary" | "custom_message",
+  message: ProjectedSessionEntry["messages"][number],
+  sourceCustomType?: string,
 ): PlannedForkEntry {
+  const projected = convertToLlm([message])[0]! as UserMessage;
   return {
     kind: "fork_context",
-    sourceId: entry.id,
-    sourceType: "compaction",
-    content: `${COMPACTION_SUMMARY_PREFIX}${entry.summary}${COMPACTION_SUMMARY_SUFFIX}`,
+    sourceId,
+    sourceType,
+    ...(sourceCustomType === undefined ? {} : { sourceCustomType }),
+    content: structuredClone(projected.content),
   };
 }
 
-function toForkContextForBranchSummary(
-  entry: Extract<SessionEntry, { type: "branch_summary" }>,
-): PlannedForkEntry {
-  return {
-    kind: "fork_context",
-    sourceId: entry.id,
-    sourceType: "branch_summary",
-    content: `${BRANCH_SUMMARY_PREFIX}${entry.summary}${BRANCH_SUMMARY_SUFFIX}`,
-  };
-}
-
-function toForkContextForCustomMessage(
-  entry: Extract<SessionEntry, { type: "custom_message" }>,
-): PlannedForkEntry {
-  const content = typeof entry.content === "string"
-    ? entry.content
-    : structuredClone(entry.content);
-  return {
-    kind: "fork_context",
-    sourceId: entry.id,
-    sourceType: "custom_message",
-    sourceCustomType: entry.customType,
-    content,
-  };
-}
-
-function canonicalizePhysicalEntry(
-  entry: SessionEntry,
+function canonicalizeProjectedEntry(
+  projected: ProjectedSessionEntry,
 ): PlannedForkEntry | null {
+  const entry = projected.sourceEntry;
   switch (entry.type) {
-    case "message":
-      return {
-        kind: "message",
-        sourceId: entry.id,
-        message: structuredClone(entry.message),
-      };
-    case "compaction":
-      return toForkContextForOlderCompaction(entry);
-    case "branch_summary":
-      return toForkContextForBranchSummary(entry);
-    case "custom_message":
-      return toForkContextForCustomMessage(entry);
+    case "message": {
+      const message = projected.messages[0];
+      return message === undefined
+        ? null
+        : {
+            kind: "message",
+            sourceId: entry.id,
+            message: structuredClone(message),
+          };
+    }
+    case "branch_summary": {
+      const message = projected.messages[0];
+      return message === undefined
+        ? null
+        : toForkContext(entry.id, entry.type, message);
+    }
+    case "custom_message": {
+      const message = projected.messages[0];
+      return message === undefined
+        ? null
+        : toForkContext(entry.id, entry.type, message, entry.customType);
+    }
     default:
-      // thinking_level_change, model_change, custom (ledger), label,
-      // session_info: never part of the forked effective context. Fresh
-      // effective settings are materialized explicitly by the stager.
+      // Pi's projection has already applied context edits and compaction
+      // visibility. State-only entries and older compaction summaries contribute
+      // no provider context here; effective role settings are staged separately.
       return null;
   }
 }
 
+function canonicalizeProjectionRange(
+  branch: readonly SessionEntry[],
+  projectedById: ReadonlyMap<string, ProjectedSessionEntry>,
+  start: number,
+  end: number,
+): PlannedForkEntry[] {
+  const planned: PlannedForkEntry[] = [];
+  for (let index = start; index < end; index += 1) {
+    const projected = projectedById.get(branch[index]!.id);
+    if (projected === undefined) continue;
+    const entry = canonicalizeProjectedEntry(projected);
+    if (entry !== null) planned.push(entry);
+  }
+  return planned;
+}
+
 /**
- * Split a frozen physical active branch into retained / latest / post.
- * Covered pre-compaction text is never returned.
+ * Split a frozen physical active branch using Pi's canonical provider projection.
+ * Older compactions and context-edit carriers with no projected messages are not
+ * materialized; edits are reflected in their projected source messages.
  */
 export function planForkEntries(
   snapshot: ForkSourceSnapshot,
 ): PlannedFork {
   const branch = [...snapshot.branch];
+  const projection = buildSessionProjection(branch);
+  const projectedById = new Map(
+    projection.entries.map((entry) => [entry.sourceEntry.id, entry]),
+  );
+
   let latestIndex = -1;
   for (let index = branch.length - 1; index >= 0; index -= 1) {
     if (branch[index]?.type === "compaction") {
@@ -232,12 +240,11 @@ export function planForkEntries(
     }
   }
   if (latestIndex === -1) {
-    const post: PlannedForkEntry[] = [];
-    for (const entry of branch) {
-      const planned = canonicalizePhysicalEntry(entry);
-      if (planned) post.push(planned);
-    }
-    return { retained: [], latestCompaction: null, post };
+    return {
+      retained: [],
+      latestCompaction: null,
+      post: canonicalizeProjectionRange(branch, projectedById, 0, branch.length),
+    };
   }
 
   const latest = branch[latestIndex]!;
@@ -252,18 +259,13 @@ export function planForkEntries(
       "Fork source has a compaction whose retained range is not on its active branch",
     );
   }
-  const retained: PlannedForkEntry[] = [];
-  for (let index = firstKeptIndex; index < latestIndex; index += 1) {
-    const planned = canonicalizePhysicalEntry(branch[index]!);
-    if (planned) retained.push(planned);
-  }
-  const post: PlannedForkEntry[] = [];
-  for (let index = latestIndex + 1; index < branch.length; index += 1) {
-    const planned = canonicalizePhysicalEntry(branch[index]!);
-    if (planned) post.push(planned);
-  }
   return {
-    retained,
+    retained: canonicalizeProjectionRange(
+      branch,
+      projectedById,
+      firstKeptIndex,
+      latestIndex,
+    ),
     latestCompaction: {
       sourceId: latest.id,
       summary: latest.summary,
@@ -271,8 +273,15 @@ export function planForkEntries(
       details: structuredClone(latest.details),
       fromHook: latest.fromHook,
       usage: structuredClone(latest.usage),
+      firstKeptEntryId: latest.firstKeptEntryId,
+      systemMessage: structuredClone(latest.systemMessage),
     },
-    post,
+    post: canonicalizeProjectionRange(
+      branch,
+      projectedById,
+      latestIndex + 1,
+      branch.length,
+    ),
   };
 }
 
@@ -367,15 +376,25 @@ export function applyForkSeedToManager(
 
   let compactionEntryId: string | null = null;
   if (planned.latestCompaction) {
+    if (planned.latestCompaction.systemMessage) {
+      manager.appendMessage(
+        structuredClone(planned.latestCompaction.systemMessage),
+      );
+    }
+    const firstKeptId = planned.latestCompaction.firstKeptEntryId
+        === planned.latestCompaction.sourceId
+      ? null
+      : firstKeptEntryId;
     compactionEntryId = manager.appendCompaction(
       planned.latestCompaction.summary,
-      firstKeptEntryId,
+      firstKeptId,
       planned.latestCompaction.tokensBefore,
       planned.latestCompaction.details,
       planned.latestCompaction.fromHook,
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       planned.latestCompaction.usage as any,
     );
+    firstKeptEntryId = firstKeptId ?? compactionEntryId;
   }
   for (const entry of planned.post) {
     appendPlanned(entry);

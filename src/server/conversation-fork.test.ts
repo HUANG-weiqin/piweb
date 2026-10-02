@@ -327,7 +327,7 @@ describe("current-leaf fork", () => {
     expect(() => planForkEntries(snapshot)).toThrow();
   });
 
-  it("carries an older compaction inside the retained range as fork context", () => {
+  it("does not re-materialize an older compaction inside the retained range", () => {
     const source = SessionManager.inMemory("E:\\work");
     source.appendMessage(user("m0"));
     const keptId = source.getLeafId()!;
@@ -339,7 +339,7 @@ describe("current-leaf fork", () => {
     const snapshot = snapshotOf(source);
     const planned = planForkEntries(snapshot);
     expect(planned.latestCompaction?.summary).toBe("RETAINED_LATEST_SUMMARY");
-    expect(planned.retained).toHaveLength(3);
+    expect(planned.retained).toHaveLength(2);
 
     const child = SessionManager.inMemory("E:\\work", { id: randomUUID() });
     applyForkSeedToManager(child, snapshot, {
@@ -357,8 +357,111 @@ describe("current-leaf fork", () => {
       entry.type === "custom_message"
       && (entry as { customType: string }).customType === FORK_CONTEXT_CUSTOM_TYPE
     ));
-    expect(forkContexts).toHaveLength(1);
-    expect(JSON.stringify(forkContexts)).toContain("RETAINED_OLD_SUMMARY");
+    expect(forkContexts).toHaveLength(0);
+    expect(JSON.stringify(entries)).not.toContain("RETAINED_OLD_SUMMARY");
+    expect(llmComparable(child.buildSessionContext().messages)).toEqual(
+      llmComparable(source.buildSessionContext().messages),
+    );
+  });
+
+  it("forks Pi's projected replacement/omission edits and effective system state", () => {
+    const source = SessionManager.inMemory("E:\\work");
+    const originalTool = {
+      name: "read",
+      description: "Read a file.",
+      parameters: { type: "object", properties: { path: { type: "string" } } },
+    };
+    const currentTool = {
+      name: "search",
+      description: "Search source.",
+      parameters: { type: "object", properties: { query: { type: "string" } } },
+    };
+    source.appendMessage({
+      role: "system",
+      content: "Base instructions.",
+      sections: { project: "Project rules." },
+      toolsAdded: [originalTool],
+      timestamp: 1,
+    } as never);
+    const replacedId = source.appendMessage(user("ORIGINAL_USER_TEXT"));
+    source.appendMessage(assistant("assistant reply"));
+    source.appendContextEdit(replacedId, { content: "REPLACED_USER_TEXT" });
+    const omittedId = source.appendMessage(user("OMITTED_USER_TEXT"));
+    source.appendContextEdit(omittedId, null);
+    source.appendMessage({
+      role: "system",
+      content: "Updated instructions.",
+      sections: { project: "Updated project rules.", safety: "No writes." },
+      toolsRemoved: [{ name: "read" }],
+      toolsAdded: [currentTool],
+      timestamp: 4,
+    } as never);
+    source.appendCompaction("LATEST_SUMMARY", replacedId, 30);
+    source.appendMessage(user("POST_COMPACTION_TEXT"));
+
+    const snapshot = snapshotOf(source);
+    const child = SessionManager.inMemory("E:\\work", { id: randomUUID() });
+    applyForkSeedToManager(child, snapshot, {
+      forkedAt: new Date().toISOString(),
+      compactionThresholdUpdatedAt: new Date().toISOString(),
+      serviceTierUpdatedAt: new Date().toISOString(),
+    });
+
+    expect(llmComparable(child.buildSessionContext().messages)).toEqual(
+      llmComparable(source.buildSessionContext().messages),
+    );
+    const childRaw = JSON.stringify(child.getEntries());
+    expect(childRaw).toContain("REPLACED_USER_TEXT");
+    expect(childRaw).not.toContain("ORIGINAL_USER_TEXT");
+    expect(childRaw).not.toContain("OMITTED_USER_TEXT");
+    expect(child.getEntries().some((entry) => entry.type === "context_edit")).toBe(false);
+    const sourceCompaction = source.getEntries().find((entry) => entry.type === "compaction");
+    const childCompaction = child.getEntries().find((entry) => entry.type === "compaction");
+    expect(sourceCompaction?.type).toBe("compaction");
+    expect(childCompaction?.type).toBe("compaction");
+    if (sourceCompaction?.type === "compaction" && childCompaction?.type === "compaction") {
+      expect(llmComparable([sourceCompaction.systemMessage!])).toEqual(
+        llmComparable([childCompaction.systemMessage!]),
+      );
+    }
+  });
+
+  it("preserves a retain-none self-boundary and excludes all covered entries", () => {
+    const source = SessionManager.inMemory("E:\\work");
+    source.appendMessage({
+      role: "system",
+      content: "Stable system state.",
+      timestamp: 1,
+    } as never);
+    const coveredId = source.appendMessage(user("COVERED_BEFORE_OLD_SUMMARY"));
+    source.appendCompaction("OLD_SUMMARY", coveredId, 10);
+    source.appendMessage(user("COVERED_BEFORE_SELF_BOUNDARY"));
+    const selfCompactionId = source.appendCompaction("LATEST_SELF_SUMMARY", null, 20);
+    source.appendMessage(user("POST_SELF_BOUNDARY"));
+
+    const snapshot = snapshotOf(source);
+    const planned = planForkEntries(snapshot);
+    expect(planned.latestCompaction?.sourceId).toBe(selfCompactionId);
+    expect(planned.latestCompaction?.firstKeptEntryId).toBe(selfCompactionId);
+    expect(planned.retained).toHaveLength(0);
+
+    const child = SessionManager.inMemory("E:\\work", { id: randomUUID() });
+    const applied = applyForkSeedToManager(child, snapshot, {
+      forkedAt: new Date().toISOString(),
+      compactionThresholdUpdatedAt: new Date().toISOString(),
+      serviceTierUpdatedAt: new Date().toISOString(),
+    });
+    const childCompaction = child.getEntries().find((entry) => entry.type === "compaction");
+    expect(childCompaction?.type).toBe("compaction");
+    if (childCompaction?.type === "compaction") {
+      expect(childCompaction.firstKeptEntryId).toBe(childCompaction.id);
+      expect(childCompaction.id).toBe(applied.compactionEntryId);
+    }
+    const childRaw = JSON.stringify(child.getEntries());
+    expect(childRaw).not.toContain("OLD_SUMMARY");
+    expect(childRaw).not.toContain("COVERED_BEFORE_OLD_SUMMARY");
+    expect(childRaw).not.toContain("COVERED_BEFORE_SELF_BOUNDARY");
+    expect(childRaw).toContain("LATEST_SELF_SUMMARY");
     expect(llmComparable(child.buildSessionContext().messages)).toEqual(
       llmComparable(source.buildSessionContext().messages),
     );

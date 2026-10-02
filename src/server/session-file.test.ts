@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { CURRENT_SESSION_VERSION } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
 import {
@@ -203,6 +204,162 @@ describe("validatePiSessionFile", () => {
       "session.jsonl",
       conversationId,
     )).toBe(conversationId);
+  });
+
+  it("accepts Pi 0.85 and Pi 1.0 v3 JSONL fixtures", () => {
+    const oldRaw = readFileSync(
+      new URL("./fixtures/pi-0.85-session-v3.jsonl", import.meta.url),
+      "utf8",
+    );
+    const currentRaw = readFileSync(
+      new URL("./fixtures/pi-1.0-session-v3.jsonl", import.meta.url),
+      "utf8",
+    );
+
+    expect(validatePiSessionFile(
+      oldRaw,
+      "pi-0.85-session-v3.jsonl",
+      "0190f1fa-1111-7aaa-8aaa-111111111111",
+    )).toBe("0190f1fa-1111-7aaa-8aaa-111111111111");
+
+    const current = inspectPiSessionFilePresentation(
+      currentRaw,
+      "pi-1.0-session-v3.jsonl",
+      "0190f1fa-2222-7aaa-8aaa-222222222222",
+    );
+    expect(current.entries.map((entry) => entry.type)).toContain("usage");
+    expect(current.entries.map((entry) => entry.type)).toContain("context_edit");
+    const compactions = current.entries.filter((entry) => entry.type === "compaction");
+    expect(compactions).toHaveLength(2);
+    expect(compactions[1]?.type === "compaction" && compactions[1].firstKeptEntryId)
+      .toBe(compactions[1]?.id);
+  });
+
+  it("rejects malformed Pi 1.0 system snapshots, context edits, and unsupported fields", () => {
+    const fixture = readFileSync(
+      new URL("./fixtures/pi-1.0-session-v3.jsonl", import.meta.url),
+      "utf8",
+    );
+    const entries = (): Record<string, unknown>[] => fixture
+      .trimEnd()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+
+    const badSystem = entries();
+    const systemCompaction = badSystem.find((entry) => entry.type === "compaction")!;
+    (systemCompaction.systemMessage as Record<string, unknown>).role = "assistant";
+    expect(() => validatePiSessionFile(
+      serialize(badSystem),
+      "bad-system-snapshot.jsonl",
+    )).toThrow(/role must be system/i);
+
+    const badEditTarget = entries();
+    const edit = badEditTarget.find((entry) => entry.type === "context_edit")!;
+    edit.targetId = "00000001";
+    expect(() => validatePiSessionFile(
+      serialize(badEditTarget),
+      "system-context-edit-target.jsonl",
+    )).toThrow(/editable message/i);
+
+    const badFields = entries();
+    const usage = badFields.find((entry) => entry.type === "usage")!;
+    usage.unrecognized = true;
+    expect(() => validatePiSessionFile(
+      serialize(badFields),
+      "unknown-pi1-entry-field.jsonl",
+    )).toThrow(/entry.unrecognized is unsupported/i);
+  });
+
+  it("accepts an in-progress Pi assistant stop reason", () => {
+    const fixture = readFileSync(
+      new URL("./fixtures/pi-1.0-session-v3.jsonl", import.meta.url),
+      "utf8",
+    );
+    const entries = fixture
+      .trimEnd()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    const assistantEntry = entries.find((entry) => entry.type === "message" && (
+      (entry.message as Record<string, unknown>).role === "assistant"
+    ))!;
+    const message = assistantEntry.message as Record<string, unknown>;
+    message.stopReason = "pending";
+    delete message.deferred;
+
+    expect(validatePiSessionFile(
+      serialize(entries),
+      "pending-assistant.jsonl",
+    )).toBe("0190f1fa-2222-7aaa-8aaa-222222222222");
+  });
+
+  it("rejects context edits across branches and role-incompatible replacements", () => {
+    const conversationId = randomUUID();
+    const base = (id: string, parentId: string | null) => ({
+      id,
+      parentId,
+      timestamp,
+    });
+    const crossBranch = serialize([
+      {
+        type: "session",
+        version: 3,
+        id: conversationId,
+        timestamp,
+        cwd: "E:\\work",
+      },
+      {
+        ...base("00000001", null),
+        type: "message",
+        message: { role: "user", content: "root", timestamp: 1 },
+      },
+      {
+        ...base("00000002", "00000001"),
+        type: "message",
+        message: { role: "user", content: "active branch", timestamp: 2 },
+      },
+      {
+        ...base("00000003", "00000001"),
+        type: "message",
+        message: { role: "user", content: "other branch", timestamp: 3 },
+      },
+      {
+        ...base("00000004", "00000002"),
+        type: "context_edit",
+        targetId: "00000003",
+        replacement: null,
+      },
+    ]);
+    expect(() => validatePiSessionFile(
+      crossBranch,
+      "cross-branch-context-edit.jsonl",
+      conversationId,
+    )).toThrow(/active ancestor path/i);
+
+    const fixture = readFileSync(
+      new URL("./fixtures/pi-1.0-session-v3.jsonl", import.meta.url),
+      "utf8",
+    );
+    const entries = fixture
+      .trimEnd()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    const edit = entries.find((entry) => entry.type === "context_edit")!;
+    edit.targetId = "00000003";
+    (edit.replacement as Record<string, unknown>).content = "not valid assistant content";
+    expect(() => validatePiSessionFile(
+      serialize(entries),
+      "assistant-context-edit-string.jsonl",
+    )).toThrow(/entry.replacement.content must be an array/i);
+  });
+
+  it("rejects non-finite Pi 1.0 usage numbers", () => {
+    const fixture = readFileSync(
+      new URL("./fixtures/pi-1.0-session-v3.jsonl", import.meta.url),
+      "utf8",
+    ).replace('"input":120', '"input":1e999');
+
+    expect(() => validatePiSessionFile(fixture, "non-finite-usage.jsonl"))
+      .toThrow(/non-finite JSON number/i);
   });
 
   it.each([
