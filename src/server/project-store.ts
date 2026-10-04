@@ -179,6 +179,11 @@ interface VerifiedSessionReadBatch {
   targets: ReadonlyMap<string, InspectedSessionFileRead>;
 }
 
+interface SessionInspectionCapture {
+  requestedIds: ReadonlySet<string>;
+  reads: Map<string, InspectedSessionFileRead>;
+}
+
 /**
  * Namespace evidence deliberately excludes mutable body fingerprints. A normal
  * append to an unrelated conversation must not invalidate an exact target
@@ -827,13 +832,6 @@ function indexFingerprintsByPath(
     indexed.set(file.pathKey, file);
   }
   return indexed;
-}
-
-function parseValidatedSessionValues(raw: string): unknown[] {
-  return raw
-    .split("\n")
-    .filter((line) => line.trim().length > 0)
-    .map((line) => JSON.parse(line) as unknown);
 }
 
 async function assertCanonicalOwnedDirectory(
@@ -1957,20 +1955,14 @@ export class ProjectStore {
         const verified = await this.readStableExpectedSessionFile(
           expected,
           conversationId,
+          true,
         );
-        const values = parseValidatedSessionValues(verified.raw);
-        for (let index = values.length - 1; index >= 1; index -= 1) {
-          const entry = values[index];
-          if (
-            typeof entry !== "object"
-            || entry === null
-            || !("type" in entry)
-            || entry.type !== "session_info"
-          ) continue;
+        const entries = verified.inspection.entries;
+        for (let index = entries.length - 1; index >= 0; index -= 1) {
+          const entry = entries[index]!;
+          if (entry.type !== "session_info") continue;
           if (expectedName === undefined) return true;
-          const persistedName = "name" in entry && typeof entry.name === "string"
-            ? entry.name.trim() || undefined
-            : undefined;
+          const persistedName = entry.name?.trim() || undefined;
           return persistedName === expectedName;
         }
         return false;
@@ -2530,12 +2522,14 @@ export class ProjectStore {
 
   private async getVerifiedSessionCatalog(
     allowedQuarantinePaths?: readonly string[] | string,
+    capture?: SessionInspectionCapture,
   ): Promise<VerifiedSessionCatalog> {
     for (
       let attempt = 0;
       attempt < MAX_INTEGRITY_PROOF_ATTEMPTS;
       attempt += 1
     ) {
+      capture?.reads.clear();
       let currentFiles: SessionFileFingerprint[];
       try {
         currentFiles = await this.listSafeSessionFiles(
@@ -2556,8 +2550,10 @@ export class ProjectStore {
         return await this.scanSafeSessionInformation(
           currentFiles,
           allowedQuarantinePaths,
+          capture,
         );
       } catch (error) {
+        capture?.reads.clear();
         if (
           !(error instanceof SessionDirectoryChangedError)
           || attempt === MAX_INTEGRITY_PROOF_ATTEMPTS - 1
@@ -2572,6 +2568,7 @@ export class ProjectStore {
   private async scanSafeSessionInformation(
     filesBeforeScan: readonly SessionFileFingerprint[],
     allowedQuarantinePaths?: readonly string[] | string,
+    capture?: SessionInspectionCapture,
   ): Promise<VerifiedSessionCatalog> {
     const information = await SessionManager.listAll(this.sessionDir);
     const validatedByPath = new Map<string, string>();
@@ -2584,10 +2581,16 @@ export class ProjectStore {
         throw new SessionDirectoryChangedError();
       }
       const receipt = this.validatedSessionReceipts.get(file.pathKey);
-      const conversationId = receipt !== undefined
-          && fingerprintsEqual(receipt.fingerprint, beforeRead)
-        ? receipt.conversationId
-        : await this.readValidatedSessionFile(file.path, beforeRead);
+      let conversationId: string;
+      if (receipt !== undefined && fingerprintsEqual(receipt.fingerprint, beforeRead)) {
+        conversationId = receipt.conversationId;
+      } else {
+        const read = await this.readValidatedSessionFile(file.path, beforeRead);
+        conversationId = read.inspection.conversationId;
+        if (capture?.requestedIds.has(conversationId)) {
+          capture.reads.set(conversationId, read);
+        }
+      }
       provedReceipts.push({ fingerprint: beforeRead, conversationId });
       const previousPath = pathsByConversation.get(conversationId);
       if (
@@ -2680,13 +2683,18 @@ export class ProjectStore {
   private async readValidatedSessionFile(
     path: string,
     beforeRead: Readonly<SessionFileFingerprint>,
-  ): Promise<string> {
+  ): Promise<InspectedSessionFileRead> {
     const raw = await readFile(path, "utf8");
     const afterRead = await this.fingerprintSafeSessionPath(path);
     if (!fingerprintsEqual(beforeRead, afterRead)) {
       throw new SessionDirectoryChangedError();
     }
-    return validatePiSessionFile(raw, path);
+    return {
+      path: afterRead.path,
+      raw,
+      fingerprint: afterRead,
+      inspection: inspectPiSessionFile(raw, path),
+    };
   }
 
   private async listSafeSessionFiles(
@@ -2911,7 +2919,11 @@ export class ProjectStore {
       attempt < MAX_INTEGRITY_PROOF_ATTEMPTS;
       attempt += 1
     ) {
-      const catalog = await this.getVerifiedSessionCatalog();
+      const capture: SessionInspectionCapture = {
+        requestedIds: new Set(conversationIds),
+        reads: new Map(),
+      };
+      const catalog = await this.getVerifiedSessionCatalog(undefined, capture);
       const informationById = new Map(
         catalog.information.map((item) => [item.id, item]),
       );
@@ -2932,13 +2944,25 @@ export class ProjectStore {
           ) {
             throw new SessionFileChangedError(conversationId);
           }
-          targets.set(
-            conversationId,
-            await this.readStableExpectedSessionFile(
-              expectedFile,
+          const captured = capture.reads.get(conversationId);
+          if (captured !== undefined) {
+            if (
+              captured.inspection.conversationId !== conversationId
+              || !pathsAreIdentical(captured.path, information.path)
+              || !fingerprintsEqual(captured.fingerprint, expectedFile)
+            ) {
+              throw new Error(`Verified inspection does not match its catalog: ${conversationId}`);
+            }
+            targets.set(conversationId, captured);
+          } else {
+            targets.set(
               conversationId,
-            ),
-          );
+              await this.readStableExpectedSessionFile(
+                expectedFile,
+                conversationId,
+              ),
+            );
+          }
         }
 
         const filesAfterRead = await this.listSafeSessionFiles();
@@ -2949,6 +2973,7 @@ export class ProjectStore {
         }
         return { catalog, targets };
       } catch (error) {
+        capture.reads.clear();
         this.verifiedCatalog = undefined;
         if (
           (

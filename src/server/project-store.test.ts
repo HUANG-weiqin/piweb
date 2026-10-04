@@ -72,6 +72,9 @@ interface ProjectStoreIntegrityInternals {
   unlinkSessionFile(path: string): Promise<void>;
   readStableNamespaceHeaderCensus(): Promise<unknown>;
   readSessionHeaderEvidence(expectedFile: { path: string }): Promise<unknown>;
+  publishVerifiedConversationCatalog(catalog: unknown): Promise<void>;
+  verifiedCatalog?: Record<string, unknown>;
+  validatedSessionReceipts: ReadonlyMap<string, unknown>;
 }
 
 async function createTemporaryDirectory(prefix: string): Promise<string> {
@@ -294,7 +297,7 @@ describe("ProjectStore", () => {
         readValidatedSessionFile(
           path: string,
           fingerprint: unknown,
-        ): Promise<string>;
+        ): Promise<unknown>;
       },
       "readValidatedSessionFile",
     );
@@ -1746,6 +1749,78 @@ describe("ProjectStore", () => {
     );
   });
 
+  it("proves persisted name intent with one parse of the latest physical entries", async () => {
+    const cwd = await createTemporaryDirectory("piweb-name-intent-parse-");
+    const store = await ProjectStore.open(cwd);
+    const conversation = await store.createConversation(randomUUID(), undefined, {
+      updateRecent: false, refreshIndex: false,
+    });
+    const baseId = conversation.appendMessage({
+      role: "user", content: "base", timestamp: 1,
+    });
+    const oldTitleId = conversation.appendSessionInfo("active branch title");
+    conversation.branch(baseId);
+    conversation.appendSessionInfo("  latest physical title  ");
+    conversation.branch(oldTitleId);
+    const marker = `name-intent-single-parse-${randomUUID()}`;
+    conversation.appendMessage({ role: "user", content: marker, timestamp: 2 });
+    const sessionFile = conversation.getSessionFile()!;
+    const messageLine = (await readFile(sessionFile, "utf8"))
+      .split("\n").find((line) => line.includes(marker))!;
+    const parse = vi.spyOn(JSON, "parse");
+    const stableRead = vi.spyOn(
+      store as unknown as ProjectStoreIntegrityInternals,
+      "readStableExpectedSessionFile",
+    );
+
+    await expect(store.hasPersistedConversationNameIntent(
+      conversation.getSessionId(), sessionFile, "latest physical title",
+    )).resolves.toBe(true);
+
+    expect(parse.mock.calls.filter(([raw]) => raw === messageLine)).toHaveLength(1);
+    expect(stableRead).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    { names: [], expectedName: undefined, intent: false },
+    { names: ["  trimmed title  "], expectedName: "trimmed title", intent: true },
+    { names: ["old", "new"], expectedName: "old", intent: false },
+    { names: ["named"], expectedName: undefined, intent: true },
+    { names: ["named", ""], expectedName: undefined, intent: true },
+    { names: ["named", "   "], expectedName: "named", intent: false },
+    { names: [""], expectedName: "", intent: false },
+  ])("preserves persisted name intent for $names / $expectedName", async ({
+    names, expectedName, intent,
+  }) => {
+    const cwd = await createTemporaryDirectory("piweb-name-intent-values-");
+    const store = await ProjectStore.open(cwd);
+    const conversation = await store.createConversation(randomUUID(), undefined, {
+      updateRecent: false, refreshIndex: false,
+    });
+    for (const name of names) conversation.appendSessionInfo(name);
+
+    await expect(store.hasPersistedConversationNameIntent(
+      conversation.getSessionId(), conversation.getSessionFile(), expectedName,
+    )).resolves.toBe(intent);
+  });
+
+  it("rejects a corrupt body before accepting persisted name intent", async () => {
+    const cwd = await createTemporaryDirectory("piweb-name-intent-corrupt-");
+    const store = await ProjectStore.open(cwd);
+    const conversation = await store.createConversation(randomUUID(), undefined, {
+      updateRecent: false, refreshIndex: false,
+    });
+    conversation.appendSessionInfo("persisted");
+    const sessionFile = conversation.getSessionFile()!;
+    const corrupt = `${await readFile(sessionFile, "utf8")}{"type":"message"\n`;
+    await writeFile(sessionFile, corrupt);
+
+    await expect(store.hasPersistedConversationNameIntent(
+      conversation.getSessionId(), sessionFile, "persisted",
+    )).rejects.toThrow("invalid JSON");
+    await expect(readFile(sessionFile, "utf8")).resolves.toBe(corrupt);
+  });
+
   it("serializes queued refreshes and reuses one unchanged verified scan", async () => {
     const cwd = await createTemporaryDirectory("piweb-refresh-queue-");
     const store = await ProjectStore.open(cwd);
@@ -1812,6 +1887,177 @@ describe("ProjectStore", () => {
     expect(listAll).toHaveBeenCalledTimes(1);
     expect(listSafeSessionFiles).toHaveBeenCalledTimes(3);
   });
+
+  it.each(["cold", "warm", "changed"] as const)(
+    "reuses current proof inspections for requested batch targets: %s",
+    async (mode) => {
+      const cwd = await createTemporaryDirectory("piweb-batch-proof-reuse-");
+      const store = await ProjectStore.open(cwd);
+      const conversations = await Promise.all([0, 1, 2].map(() =>
+        store.createConversation(randomUUID(), discoveryMeta(), {
+          updateRecent: false, refreshIndex: false,
+        }),
+      ));
+      if (mode !== "cold") await store.refreshConversations();
+      if (mode === "changed") conversations[0]!.appendSessionInfo("changed");
+      const requestedIds = conversations.slice(0, 2).map((entry) => entry.getSessionId());
+      const listAll = vi.spyOn(SessionManager, "listAll");
+      const internals = store as unknown as ProjectStoreIntegrityInternals;
+      const stableRead = vi.spyOn(internals, "readStableExpectedSessionFile");
+      aggregateReservedConversationEntriesMock.mockClear();
+
+      const inspections = await store.inspectConversations(requestedIds);
+
+      expect([...inspections.keys()]).toEqual(requestedIds);
+      for (const inspection of inspections.values()) {
+        expect(inspection).toMatchObject({ conversationMeta: discoveryMeta() });
+        expect(inspection).not.toHaveProperty("entries");
+      }
+      for (const conversationId of requestedIds) {
+        expect(aggregateReservedConversationEntriesMock.mock.calls.filter(
+          ([entries]) => Array.isArray(entries) && entries.length > 1
+            && entries[0]?.id === conversationId,
+        )).toHaveLength(1);
+      }
+      expect(listAll).toHaveBeenCalledTimes(mode === "warm" ? 0 : 1);
+      expect(stableRead).toHaveBeenCalledTimes(
+        mode === "cold" ? 0 : mode === "warm" ? 2 : 1,
+      );
+      if (mode === "changed") {
+        expect(stableRead.mock.calls[0]![1]).toBe(requestedIds[1]);
+      }
+      expect(Object.keys(internals.verifiedCatalog!).sort()).toEqual([
+        "files", "fingerprintsByPath", "information", "validatedIdsByPath",
+      ]);
+      for (const receipt of internals.validatedSessionReceipts.values()) {
+        expect(Object.keys(receipt as object).sort()).toEqual([
+          "conversationId", "fingerprint",
+        ]);
+      }
+    },
+  );
+
+  it.each(["omission", "mismatch", "duplicate", "corrupt"] as const)(
+    "rejects a requested subset when the complete batch proof has an unrelated %s",
+    async (fault) => {
+      const cwd = await createTemporaryDirectory("piweb-batch-proof-fail-closed-");
+      const store = await ProjectStore.open(cwd);
+      const target = await store.createConversation(randomUUID(), discoveryMeta(), {
+        updateRecent: false, refreshIndex: false,
+      });
+      const unrelated = await store.createConversation(randomUUID(), discoveryMeta(), {
+        updateRecent: false, refreshIndex: false,
+      });
+      const originalListAll = SessionManager.listAll.bind(SessionManager);
+      const extraPath = join(store.sessionDir, "duplicate.jsonl");
+      const unrelatedPath = unrelated.getSessionFile()!;
+      const unrelatedRaw = await readFile(unrelatedPath, "utf8");
+      if (fault === "omission" || fault === "mismatch") {
+        vi.spyOn(SessionManager, "listAll").mockImplementationOnce(async (dir) => {
+          const information = await originalListAll(dir);
+          return fault === "omission"
+            ? information.filter(({ id }) => id !== unrelated.getSessionId())
+            : information.map((entry) => entry.id === unrelated.getSessionId()
+              ? { ...entry, id: randomUUID() } : entry);
+        });
+      } else if (fault === "duplicate") {
+        await writeSessionHeader(extraPath, target.getSessionId(), store.cwd);
+      } else {
+        await writeFile(unrelatedPath, `${unrelatedRaw}{"type":"message"\n`);
+      }
+
+      await expect(store.inspectConversations([target.getSessionId()])).rejects.toThrow(
+        fault === "omission" ? "Pi omitted"
+          : fault === "mismatch" ? "mismatched file identity"
+          : fault === "duplicate" ? "Duplicate conversation identity"
+          : "invalid JSON",
+      );
+
+      if (fault === "duplicate") await unlink(extraPath);
+      if (fault === "corrupt") await writeFile(unrelatedPath, unrelatedRaw);
+      const settlement = createRunSettlementEntry({
+        runId: randomUUID(), outcome: "completed", finalText: "after failed proof",
+        settledAt: "2026-01-01T00:00:00.000Z",
+      });
+      target.appendCustomEntry(settlement.customType, settlement.data);
+      const inspections = await store.inspectConversations([target.getSessionId()]);
+      expect(inspections.get(target.getSessionId())?.runSettlements).toEqual([
+        settlement.data,
+      ]);
+    },
+  );
+
+  it.each(["target", "unrelated", "namespace", "collision"] as const)(
+    "reproves batch metadata after %s mutation during catalog publication",
+    async (mutation) => {
+      const cwd = await createTemporaryDirectory("piweb-batch-publish-race-");
+      const store = await ProjectStore.open(cwd);
+      const target = await store.createConversation(randomUUID(), discoveryMeta(), {
+        updateRecent: false, refreshIndex: false,
+      });
+      const unrelated = await store.createConversation(randomUUID(), discoveryMeta(), {
+        updateRecent: false, refreshIndex: false,
+      });
+      const internals = store as unknown as ProjectStoreIntegrityInternals;
+      const originalPublish = internals.publishVerifiedConversationCatalog.bind(store);
+      const published = createDeferred<void>();
+      const releasePublication = createDeferred<void>();
+      vi.spyOn(internals, "publishVerifiedConversationCatalog")
+        .mockImplementationOnce(async (catalog) => {
+          await originalPublish(catalog);
+          published.resolve(undefined);
+          await releasePublication.promise;
+        });
+      const listAll = vi.spyOn(SessionManager, "listAll");
+      const stableRead = vi.spyOn(internals, "readStableExpectedSessionFile");
+      const settlement = createRunSettlementEntry({
+        runId: randomUUID(), outcome: "completed", finalText: "published final version",
+        settledAt: "2026-01-01T00:00:00.000Z",
+      });
+      const inspectionsPromise = store.inspectConversations([target.getSessionId()]);
+      await published.promise;
+      const addedId = randomUUID();
+      const addedPath = join(store.sessionDir, "added.jsonl");
+      try {
+        if (mutation === "target" || mutation === "unrelated") {
+          const changed = mutation === "target" ? target : unrelated;
+          changed.appendCustomEntry(settlement.customType, settlement.data);
+        } else {
+          await writeSessionHeader(
+            addedPath,
+            mutation === "collision" ? target.getSessionId() : addedId,
+            store.cwd,
+          );
+        }
+      } finally {
+        releasePublication.resolve(undefined);
+      }
+      if (mutation === "collision") {
+        await expect(inspectionsPromise).rejects.toThrow("Duplicate conversation identity");
+        expect(listAll).toHaveBeenCalledTimes(2);
+        await unlink(addedPath);
+        const repaired = await store.inspectConversations([target.getSessionId()]);
+        expect(repaired.get(target.getSessionId())).toMatchObject({
+          conversationMeta: discoveryMeta(), runSettlements: [],
+        });
+        expect(stableRead).toHaveBeenCalledTimes(1);
+        return;
+      }
+      const inspections = await inspectionsPromise;
+
+      expect(inspections.get(target.getSessionId())?.runSettlements).toEqual(
+        mutation === "target" ? [settlement.data] : [],
+      );
+      expect(listAll).toHaveBeenCalledTimes(2);
+      // A retry with only an ID receipt must discard the failed attempt's
+      // inspection and take the existing fresh read.
+      expect(stableRead).toHaveBeenCalledTimes(mutation === "target" ? 0 : 1);
+      if (mutation === "namespace") {
+        expect((internals.verifiedCatalog!.information as SessionInfo[])
+          .map(({ id }) => id)).toContain(addedId);
+      }
+    },
+  );
 
   it("deep-copies SDK catalog values before unchanged reuse", async () => {
     const cwd = await createTemporaryDirectory("piweb-catalog-copy-");
