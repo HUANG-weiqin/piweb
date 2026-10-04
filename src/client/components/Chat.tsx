@@ -1043,7 +1043,7 @@ function ChatView({
             className="pending-admission-item"
             role="status"
           >
-            <span className="pending-admission-text">{admission.text}</span>
+            <span className="pending-admission-text" title={admission.text}>{admission.text}</span>
             <span className="pending-admission-status">等待中</span>
           </div>
         ))}

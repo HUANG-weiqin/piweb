@@ -1517,6 +1517,7 @@
   display: flex;
   align-items: flex-start;
   gap: 10px;
+  min-width: 0;
   max-width: min(80%, 640px);
   margin-left: auto;
   padding: 9px 12px 9px 14px;
@@ -1530,8 +1531,9 @@
 .pending-admission-text {
   flex: 1;
   min-width: 0;
-  overflow-wrap: anywhere;
-  white-space: pre-wrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: color-mix(in srgb, currentColor 90%, var(--muted));
 }
 

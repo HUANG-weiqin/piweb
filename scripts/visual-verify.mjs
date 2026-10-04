@@ -813,8 +813,39 @@ async function exerciseComposerStates(client, evidencePath = null, evidenceName 
     }
     throw new Error(`composer-states interaction failed: ${resized.issues.join(", ")}; geometry=${JSON.stringify(resized.geometry)}${evidence}`);
   }
+  const pendingPreview = await inspectPendingPreview(client);
   const pointerJump = await clickJumpLatest(client);
-  return { detached, resized, pointerJump, tasksExpanded: true };
+  return { detached, resized, pendingPreview, pointerJump, tasksExpanded: true };
+}
+
+async function inspectPendingPreview(client) {
+  const result = await client.evaluate(`(() => {
+    const preview = document.querySelector(".pending-admission-text");
+    const row = preview?.closest(".pending-admission-item");
+    const queue = row?.closest(".pending-admissions");
+    if (!preview || !row || !queue) return { issues: ["missing pending preview"] };
+    const style = getComputedStyle(preview);
+    const rect = preview.getBoundingClientRect();
+    const rowRect = row.getBoundingClientRect();
+    const queueRect = queue.getBoundingClientRect();
+    const issues = [];
+    if (style.whiteSpace !== "nowrap" || style.overflowX !== "hidden"
+      || style.textOverflow !== "ellipsis") issues.push("pending preview is not single-line ellipsis");
+    if (rect.height <= 0 || rect.height > Number.parseFloat(style.lineHeight) + 1) {
+      issues.push("pending preview exceeds one visible line");
+    }
+    if (preview.scrollWidth <= preview.clientWidth) issues.push("long pending preview is not clipped");
+    if (rowRect.width > queueRect.width + 1 || rowRect.right > queueRect.right + 1) {
+      issues.push("pending row exceeds its container");
+    }
+    if (preview.title !== preview.textContent) issues.push("pending tooltip lost the full text");
+    return { issues, height: rect.height, lineHeight: style.lineHeight,
+      width: preview.clientWidth, scrollWidth: preview.scrollWidth };
+  })()`);
+  if (result.issues.length > 0) {
+    throw new Error(`Pending preview failed: ${result.issues.join(", ")}; geometry=${JSON.stringify(result)}`);
+  }
+  return result;
 }
 
 async function inspectSecondarySurface(client, surface) {
@@ -1362,6 +1393,7 @@ async function inspectMobileSheet(client, kind) {
   if (result.issues.length > 0) {
     throw new Error(`Mobile ${kind} sheet failed: ${result.issues.join(", ")}; dialog=${JSON.stringify(result.dialog)}; sheet=${JSON.stringify(result.sheet)}; header=${JSON.stringify(result.header)}; backdrop=${JSON.stringify(result.backdrop)}; close=${JSON.stringify(result.close)}`);
   }
+  if (kind === "pending") result.pendingPreview = await inspectPendingPreview(client);
   return result;
 }
 

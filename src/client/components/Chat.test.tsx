@@ -1201,6 +1201,21 @@ describe("Chat", () => {
     expect(queue.nextElementSibling).toBe(loopList);
   });
 
+  it.each([false, true])("preserves full pending prompt text in a preview tooltip (mobile: %s)", (mobile) => {
+    const text = `${"请继续检查长消息的展示。".repeat(100)}\n第二行也必须完整保留。`;
+    render(view(emptyChat, "", undefined, {
+      busy: true,
+      pendingAdmissions: [{ promptId: "queued-long", text }],
+      mobile: mobile ? { title: "会话 A", onBack: vi.fn() } : undefined,
+    }));
+    if (mobile) fireEvent.click(screen.getByRole("button", { name: "打开等待中" }));
+
+    const preview = screen.getByTitle(text, { normalizer: (value) => value });
+    expect(preview).toHaveClass("pending-admission-text");
+    expect(preview.textContent).toBe(text);
+    expect(preview).toBeVisible();
+  });
+
   it("lets streamed output grow inside the follow comfort zone", () => {
     const rendered = render(view(emptyChat));
     const transcript = document.querySelector<HTMLElement>(".transcript");

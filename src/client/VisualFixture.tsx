@@ -554,7 +554,7 @@ export function VisualFixture({
         pendingAdmissions={showComposerStates
           ? [{
             promptId: "prompt-visual-fixture",
-            text: "先核对长路径与失败状态，再继续生成窄屏证据。",
+            text: `${"先核对长路径与失败状态，再继续生成窄屏证据。".repeat(30)}\n消息即使包含换行，也只能显示单行预览。`,
           }]
           : []}
         promptNotice={showComposerStates
