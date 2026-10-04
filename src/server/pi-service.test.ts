@@ -573,9 +573,9 @@ async function pauseCommittedCatalogFailure(
   const handle = await harness.coordinator.acquireProject(harness.cwd, "read_only");
   const project = handle.project;
   const internals = project as unknown as {
-    scanConversations(): Promise<unknown>;
+    scanConversationDiscovery(): Promise<unknown>;
   };
-  vi.spyOn(internals, "scanConversations").mockRejectedValueOnce(
+  vi.spyOn(internals, "scanConversationDiscovery").mockRejectedValueOnce(
     new Error("catalog refresh failed"),
   );
   const openConversation = project.openConversation.bind(project);
@@ -4824,9 +4824,9 @@ describe("PiConnection coordinated project view", () => {
         "read_only",
       );
       const projectInternals = handle.project as unknown as {
-        scanConversations(): Promise<unknown>;
+        scanConversationDiscovery(): Promise<unknown>;
       };
-      vi.spyOn(projectInternals, "scanConversations").mockRejectedValueOnce(
+      vi.spyOn(projectInternals, "scanConversationDiscovery").mockRejectedValueOnce(
         new Error("catalog refresh failed"),
       );
       handle.release();

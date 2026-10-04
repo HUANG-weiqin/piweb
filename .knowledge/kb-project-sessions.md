@@ -92,8 +92,9 @@ focus 切换先 exact open：warm actor 直接复用；cold actor 在取得 writ
 
 - snapshot 的 user ID 直接对应 Pi message entry，assistant 聚合 ID 的 `assistant:` 后缀对应该聚合首个物理 message entry；所选 entry 及其后 context-bearing branch entry 会删除，更早行保持字节不变。唯一 ledger 例外是 suffix 中的 `piweb.message_delivery_receipt.v1` 及其引用的 `piweb.run_settlement.v1`：它们必须原子保留并重挂到 retained parent，避免 rewind 令已投递消息或已结算 run 复活；这种只为 receipt 保留的已剪枝 settlement 必须剥离 output metrics，不能把已删除 run 的 UI 速率复活。
 - 只允许 idle actor 执行；目标还有 queued/processing inbox 时拒绝，避免截断恢复账本后重复投递。已经送达其它 conversation 的外部效果不回滚。
-- store 在项目会话串行边界内完整验证原文件与候选前缀，复验路径及扫描期间文件身份，写临时文件后原子替换；候选不是 message、文件变化、链接、损坏或身份错配都不覆盖原文件。
-- durable 替换后，同一 actor 必须 reload SessionManager，并从其 active context 重建 Agent 内存 messages、runId 集合和压缩阈值。若原子替换已提交但随后 catalog refresh 或内存同步失败，store 必须明确报告已提交，actor 进入 fatal 状态，禁止用旧 parent 继续追加。
+- store 在项目会话串行边界内用既有 exact-target proof 重新证明唯一合法 header claim 与目标完整正文；一次 inspection 的物理 entries 与非空原始行配对，复用解析结果并保留 retained 行原字节。候选仍须完整验证，临时文件写完后复验规范路径及完整 fingerprint（dev/ino/size/mtimeNs/ctimeNs），再原子替换；非 message、inactive branch、已观察到的身份冲突、文件变化、链接或损坏都拒绝覆盖。此边界不提供跨进程目录锁，proof 结束后的外部 namespace 变化仍可能在提交后的发现阶段才被检测。
+- 目标 rewrite 不以所有无关正文或 SDK 全量索引为授权前提；提交后复用目录 discovery 更新展示与成员观察，不把发现缓存升格为 writer/open 授权或完整正文证明。Agent 全量列表、audit 与 cascade delete 仍走独立的 full proof。
+- durable 替换后，同一 actor 必须 reload SessionManager，并从 retained active context 重建 runtime、永久 runId 集合和压缩阈值。提交后的 discovery 失败须明确报告 `ConversationTruncateCommittedError`；actor 用 fresh exact open 恢复 retained runtime，并将项目目录覆盖标为 unknown。只有精确证明或 runtime 重建失败才进入 fatal，禁止用旧 parent 继续追加。
 
 Project store handle 按 canonical cwd 引用计数；ProjectSessionCoordinator 在项目 actor 生命周期内保留一个共享 handle，socket server 关闭时统一释放。`project-store-registry.ts` 整体拥有 handle 复用/refcount 与 conversation writer/deletion lease 的 FIFO 状态机；磁盘 namespace、catalog 和 proof 仍只归 `ProjectStore`。registry 末次 release 后逐出 store；相同路径随后代表一个新项目时必须重新读取磁盘身份，不能让缓存反向覆盖项目生命周期。
 

@@ -2139,37 +2139,24 @@ export class ProjectStore {
     assertSessionId(conversationId, "conversationId");
     assertSessionId(entryId, "entryId");
     return this.enqueueConversationOperation(async () => {
-      const information = await this.listSafeSessionInformation();
-      const match = information.find(({ id }) => id === conversationId);
-      if (match === undefined) {
-        throw new Error(`Conversation not found: ${conversationId}`);
-      }
-      const safePath = await this.resolveSafeSessionPath(match.path);
-      const before = await stat(safePath, { bigint: true });
-      const raw = await readFile(safePath, "utf8");
-      validatePiSessionFile(raw, safePath, conversationId);
-      const lines = raw.split("\n");
-      const entryLine = lines.findIndex((line, index) => {
-        if (index === 0 || line.trim().length === 0) return false;
-        const entry = JSON.parse(line) as { id?: unknown };
-        return entry.id === entryId;
-      });
-      if (entryLine < 1) {
+      const { target } = await this.readVerifiedTargetSessionFile(
+        conversationId,
+        true,
+      );
+      const safePath = target.path;
+      const before = target.fingerprint;
+      const lines = target.raw.split("\n").filter((line) => line.trim().length > 0);
+      const parsedEntries = target.inspection.entries;
+      const anchor = parsedEntries.find(({ id }) => id === entryId);
+      if (anchor === undefined) {
         throw new Error(`Conversation message not found: ${entryId}`);
       }
-      const anchor = JSON.parse(lines[entryLine]!) as {
-        type?: unknown;
-      };
       if (anchor.type !== "message") {
         throw new Error(`Truncation anchor is not a message: ${entryId}`);
       }
 
-      const parsedEntries = lines
-        .slice(1)
-        .filter((line) => line.trim().length > 0)
-        .map((line) => JSON.parse(line) as Record<string, unknown>);
       const activeBranch = createReadonlySessionEntriesAdapter(
-        inspectPiSessionFilePresentation(raw, safePath, conversationId).entries,
+        parsedEntries,
       ).getBranch();
       const anchorIndex = activeBranch.findIndex(({ id }) => id === entryId);
       if (anchorIndex < 0) {
@@ -2187,15 +2174,14 @@ export class ProjectStore {
       }
 
       const retainedLines = [lines[0]!];
-      for (let index = 1; index < lines.length; index += 1) {
-        const line = lines[index]!;
-        if (line.trim().length === 0) continue;
-        const entry = JSON.parse(line) as { id: string };
-        if (retainedEntryIds.has(entry.id)) retainedLines.push(line);
+      for (let index = 0; index < parsedEntries.length; index += 1) {
+        if (retainedEntryIds.has(parsedEntries[index]!.id)) {
+          retainedLines.push(lines[index + 1]!);
+        }
       }
       let retainedParentId = activeBranch[anchorIndex - 1]?.id ?? null;
       for (const entry of parsedEntries) {
-        const entryId = entry.id as string;
+        const entryId = entry.id;
         if (retainedEntryIds.has(entryId)) continue;
         const reserved = parseReservedConversationEntry(entry);
         if (
@@ -2240,13 +2226,8 @@ export class ProjectStore {
           encoding: "utf8",
           flag: "wx",
         });
-        const current = await stat(safePath, { bigint: true });
-        if (
-          before.dev !== current.dev
-          || before.ino !== current.ino
-          || before.size !== current.size
-          || before.mtimeNs !== current.mtimeNs
-        ) {
+        const current = await this.fingerprintSafeSessionPath(safePath);
+        if (!fingerprintsEqual(before, current)) {
           throw new Error(
             `Conversation changed while it was being truncated: ${conversationId}`,
           );
@@ -2263,7 +2244,7 @@ export class ProjectStore {
         await unlink(temporaryPath).catch(() => undefined);
       }
       try {
-        await this.scanConversations();
+        await this.scanConversationDiscovery();
       } catch (error) {
         throw new ConversationTruncateCommittedError(safePath, error);
       }

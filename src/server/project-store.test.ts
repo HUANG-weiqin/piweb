@@ -11,6 +11,7 @@ import {
   rm,
   symlink,
   unlink,
+  utimes,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -64,6 +65,7 @@ interface ProjectStoreIntegrityInternals {
   readStableExpectedSessionFile(
     expectedFile: { path: string },
     conversationId: string,
+    includeEntries?: boolean,
   ): Promise<unknown>;
   clearLastConversationsIf(conversationIds: ReadonlySet<string>): Promise<void>;
   renameSessionFile(source: string, destination: string): Promise<void>;
@@ -1232,10 +1234,127 @@ describe("ProjectStore", () => {
     );
   });
 
+  it("truncates one inspected target and reuses unrelated discovery observations without a full SDK list", async () => {
+    const cwd = await createTemporaryDirectory("piweb-truncate-target-proof-");
+    const store = await ProjectStore.open(cwd);
+    const target = await store.createConversation(undefined, discoveryMeta());
+    target.appendMessage({ role: "user", content: "retained whitespace ", timestamp: 1 });
+    const selectedId = target.appendMessage({ role: "user", content: "selected", timestamp: 2 });
+    const other = await store.createConversation(undefined, discoveryMeta());
+    other.appendMessage({ role: "user", content: "unrelated", timestamp: 3 });
+    const targetPath = target.getSessionFile()!;
+    const original = (await readFile(targetPath, "utf8")).replace(/\n/g, "\r\n\r\n");
+    await writeFile(targetPath, original);
+    await store.discoverConversations();
+    const listAll = vi.spyOn(SessionManager, "listAll");
+    const reads = vi.spyOn(store as unknown as ProjectStoreIntegrityInternals, "readStableExpectedSessionFile");
+    aggregateReservedConversationEntriesMock.mockClear();
+
+    await store.truncateConversation(target.getSessionId(), selectedId);
+
+    expect(listAll).not.toHaveBeenCalled();
+    expect(reads.mock.calls.map(([file]) => file.path)).toEqual([targetPath, targetPath]);
+    const originalInspections = aggregateReservedConversationEntriesMock.mock.calls.filter(([entries]) =>
+      (entries as Array<{ id: string }>).some(({ id }) => id === selectedId)
+    );
+    expect(originalInspections).toHaveLength(1);
+    expect(await readFile(targetPath, "utf8")).toBe(
+      `${original.split("\n").filter((line) => line.trim()).slice(0, 3).join("\n")}\n`,
+    );
+    expect(store.listConversations().find(({ id }) => id === target.getSessionId())?.messageCount).toBe(1);
+  });
+
+  it("commits the exact target before reporting unrelated body corruption in discovery, while full audit still rejects", async () => {
+    const cwd = await createTemporaryDirectory("piweb-truncate-unrelated-body-");
+    const store = await ProjectStore.open(cwd);
+    const target = await store.createConversation(undefined, discoveryMeta());
+    target.appendMessage({ role: "user", content: "retained", timestamp: 1 });
+    const selectedId = target.appendMessage({ role: "user", content: "selected", timestamp: 2 });
+    const other = await store.createConversation(undefined, discoveryMeta());
+    await store.discoverConversations();
+    const targetPath = target.getSessionFile()!;
+    const otherPath = other.getSessionFile()!;
+    await writeFile(otherPath, `${(await readFile(otherPath, "utf8")).split("\n")[0]}\n{invalid body}\n`);
+    const internals = store as unknown as ProjectStoreIntegrityInternals;
+    const read = internals.readStableExpectedSessionFile.bind(internals);
+    vi.spyOn(internals, "readStableExpectedSessionFile").mockImplementation(async (file, id, includeEntries) => {
+      if (file.path === otherPath) expect(await readFile(targetPath, "utf8")).not.toContain(selectedId);
+      return read(file, id, includeEntries);
+    });
+    const listAll = vi.spyOn(SessionManager, "listAll");
+
+    await expect(store.truncateConversation(target.getSessionId(), selectedId))
+      .rejects.toBeInstanceOf(ConversationTruncateCommittedError);
+    expect(await readFile(targetPath, "utf8")).not.toContain(selectedId);
+    expect(listAll).not.toHaveBeenCalled();
+    await expect(store.refreshConversations()).rejects.toThrow(/invalid JSON/i);
+    expect(listAll).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects a second legal header claim for the target before truncating", async () => {
+    const cwd = await createTemporaryDirectory("piweb-truncate-identity-collision-");
+    const store = await ProjectStore.open(cwd);
+    const target = await store.createConversation(undefined, discoveryMeta());
+    const selectedId = target.appendMessage({ role: "user", content: "selected", timestamp: 1 });
+    const targetPath = target.getSessionFile()!;
+    const original = await readFile(targetPath, "utf8");
+    await writeFile(join(store.sessionDir, "duplicate.jsonl"), original.split("\n")[0] + "\n");
+
+    await expect(store.truncateConversation(target.getSessionId(), selectedId)).rejects.toThrow(/duplicate/i);
+    expect(await readFile(targetPath, "utf8")).toBe(original);
+  });
+
+  it.each(["directory", "replacement", "tamper"] as const)(
+    "rejects target %s after candidate validation without replacing the changed authority",
+    async (change) => {
+      const cwd = await createTemporaryDirectory("piweb-truncate-race-");
+      const store = await ProjectStore.open(cwd);
+      const target = await store.createConversation(undefined, discoveryMeta());
+      target.appendMessage({ role: "user", content: "retained", timestamp: 1 });
+      const selectedId = target.appendMessage({ role: "user", content: "selected", timestamp: 2 });
+      const targetPath = target.getSessionFile()!;
+      // A supported same-size external write can restore mtime; ctime still
+      // distinguishes it from the file version that authorized this rewrite.
+      const modifiedAt = new Date("2026-01-01T00:00:00.000Z");
+      await utimes(targetPath, modifiedAt, modifiedAt);
+      const original = await readFile(targetPath, "utf8");
+      const external = original.replace("retained", "tampered");
+      const internals = store as unknown as {
+        fingerprintSafeSessionPath(path: string): Promise<unknown>;
+      };
+      const fingerprint = internals.fingerprintSafeSessionPath.bind(internals);
+      let changed = false;
+      vi.spyOn(internals, "fingerprintSafeSessionPath").mockImplementation(async (path) => {
+        if (!changed && path === targetPath && (await readdir(store.sessionDir)).some((name) => name.endsWith(".truncate.tmp"))) {
+          changed = true;
+          if (change === "directory") {
+            await rename(targetPath, join(store.sessionDir, "original.backup"));
+            await mkdir(targetPath);
+          } else if (change === "replacement") {
+            const replacement = join(store.sessionDir, "replacement.tmp");
+            await writeFile(replacement, external);
+            await rename(replacement, targetPath);
+          } else {
+            await writeFile(targetPath, external);
+            await utimes(targetPath, modifiedAt, modifiedAt);
+          }
+        }
+        return fingerprint(path);
+      });
+
+      await expect(store.truncateConversation(target.getSessionId(), selectedId)).rejects.toThrow(/changed|regular project-owned/i);
+      expect(changed).toBe(true);
+      if (change === "directory") expect(await readdir(targetPath)).toEqual([]);
+      else expect(await readFile(targetPath, "utf8")).toBe(external);
+      expect((await readdir(store.sessionDir)).some((name) => name.endsWith(".truncate.tmp"))).toBe(false);
+    },
+  );
+
   it("physically truncates the selected message and every later entry", async () => {
     const cwd = await createTemporaryDirectory("piweb-truncate-conversation-");
     const store = await ProjectStore.open(cwd);
-    const conversation = await store.createConversation();
+    const conversation = await store.createConversation(undefined, discoveryMeta());
+    const metaId = conversation.getEntries()[0]!.id;
     const retainedId = conversation.appendMessage({
       role: "user",
       content: "retained",
@@ -1264,19 +1383,20 @@ describe("ProjectStore", () => {
       .map((line) => JSON.parse(line) as { id?: string });
     expect(persisted.map(({ id }) => id)).toEqual([
       conversation.getHeader()?.id,
+      metaId,
       retainedId,
     ]);
     const reopened = await store.openConversation(
       conversation.getSessionId(),
       { updateRecent: false },
     );
-    expect(reopened.getEntries().map(({ id }) => id)).toEqual([retainedId]);
+    expect(reopened.getEntries().map(({ id }) => id)).toEqual([metaId, retainedId]);
   });
 
   it("reports a committed truncate when its post-commit catalog refresh fails", async () => {
     const cwd = await createTemporaryDirectory("piweb-truncate-post-commit-");
     const store = await ProjectStore.open(cwd);
-    const conversation = await store.createConversation();
+    const conversation = await store.createConversation(undefined, discoveryMeta());
     const retainedId = conversation.appendMessage({
       role: "user",
       content: "retained",
@@ -1289,9 +1409,9 @@ describe("ProjectStore", () => {
     });
     const sessionFile = conversation.getSessionFile()!;
     const internals = store as unknown as {
-      scanConversations(): Promise<unknown>;
+      scanConversationDiscovery(): Promise<unknown>;
     };
-    vi.spyOn(internals, "scanConversations").mockRejectedValueOnce(
+    vi.spyOn(internals, "scanConversationDiscovery").mockRejectedValueOnce(
       new Error("catalog refresh failed"),
     );
 
@@ -1342,7 +1462,8 @@ describe("ProjectStore", () => {
   it("retains the active branch prefix instead of an earlier abandoned physical leaf", async () => {
     const cwd = await createTemporaryDirectory("piweb-truncate-active-prefix-");
     const store = await ProjectStore.open(cwd);
-    const conversation = await store.createConversation();
+    const conversation = await store.createConversation(undefined, discoveryMeta());
+    const metaId = conversation.getEntries()[0]!.id;
     const rootId = conversation.appendMessage({
       role: "user",
       content: "branch root",
@@ -1379,6 +1500,7 @@ describe("ProjectStore", () => {
       .map((line) => JSON.parse(line) as { id?: string });
     expect(persisted.map(({ id }) => id)).toEqual([
       conversation.getHeader()?.id,
+      metaId,
       rootId,
       activeParentId,
     ]);
@@ -1395,7 +1517,8 @@ describe("ProjectStore", () => {
   it("rewinds context while preserving receipt settlements without pruned output metrics", async () => {
     const cwd = await createTemporaryDirectory("piweb-truncate-receipt-");
     const store = await ProjectStore.open(cwd);
-    const conversation = await store.createConversation();
+    const conversation = await store.createConversation(undefined, discoveryMeta());
+    const metaId = conversation.getEntries()[0]!.id;
     const conversationId = conversation.getSessionId();
     const retainedId = conversation.appendMessage({
       role: "user",
@@ -1489,6 +1612,7 @@ describe("ProjectStore", () => {
       .map((line) => JSON.parse(line) as Record<string, unknown>);
     expect(persisted.map(({ id }) => id)).toEqual([
       conversation.getHeader()?.id,
+      metaId,
       retainedId,
       receiptId,
       referencedSettlementId,

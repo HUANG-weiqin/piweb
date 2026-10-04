@@ -3166,9 +3166,9 @@ describe("ProjectSessionCoordinator", () => {
     const sessionFile = previousManager.getSessionFile()!;
     const previousRuntime = fixture.runtime.control(actor.conversationId);
     const projectInternals = fixture.handle.project as unknown as {
-      scanConversations(): Promise<unknown>;
+      scanConversationDiscovery(): Promise<unknown>;
     };
-    vi.spyOn(projectInternals, "scanConversations").mockRejectedValueOnce(
+    vi.spyOn(projectInternals, "scanConversationDiscovery").mockRejectedValueOnce(
       new Error("catalog refresh failed"),
     );
     const openConversation = fixture.handle.project.openConversation.bind(
@@ -3238,9 +3238,9 @@ describe("ProjectSessionCoordinator", () => {
     const sessionFile = actor.sessionManager.getSessionFile()!;
     const previousRuntime = fixture.runtime.control(actor.conversationId);
     const projectInternals = fixture.handle.project as unknown as {
-      scanConversations(): Promise<unknown>;
+      scanConversationDiscovery(): Promise<unknown>;
     };
-    vi.spyOn(projectInternals, "scanConversations").mockRejectedValueOnce(
+    vi.spyOn(projectInternals, "scanConversationDiscovery").mockRejectedValueOnce(
       new Error("catalog refresh failed"),
     );
     vi.spyOn(fixture.handle.project, "openConversation").mockRejectedValueOnce(
