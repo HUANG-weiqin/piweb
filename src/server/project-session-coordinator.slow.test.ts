@@ -5375,7 +5375,7 @@ describe("ProjectSessionCoordinator", () => {
       expect(fixture.runtime.control(actor.conversationId).steeringAgentMessages).toEqual([]);
       expect(actor.getActivity()).toEqual({ kind: "running", runId });
       expect(events).toContainEqual({
-        type: "prompt_withdrawn", conversationId: actor.conversationId, promptId, runId,
+        type: "prompt_withdrawn", conversationId: actor.conversationId, promptId, runId, reason: "manual",
       });
       expect(() => fixture.coordinator.withdrawPrompt(
         fixture.handle, actor.conversationId, runId, promptId,
@@ -5391,6 +5391,36 @@ describe("ProjectSessionCoordinator", () => {
       await running;
       fixture.runtime.beforeCreateSession = undefined;
     }
+  });
+
+  it("broadcasts one abort proof per exact queued browser prompt through the live abort control path", async () => {
+    const fixture = await createFixture();
+    const actor = await fixture.coordinator.createUserConversation(fixture.handle, { roleId: "default" });
+    const started = deferred();
+    const release = deferred();
+    fixture.runtime.control(actor.conversationId).enqueue(blocksUntil(started, release, "cancelled work"));
+    const events: ConversationActorEvent[] = [];
+    const unsubscribe = actor.subscribe((event) => events.push(event));
+    const runId = randomUUID();
+    const running = fixture.coordinator.prompt(fixture.handle, actor.conversationId, runId, "busy work");
+    await started.promise;
+    const promptIds = [randomUUID(), randomUUID()];
+    for (const promptId of promptIds) {
+      await fixture.coordinator.prompt(fixture.handle, actor.conversationId, randomUUID(), "same text", promptId);
+    }
+    await fixture.coordinator.abort(fixture.handle, actor.conversationId, randomUUID());
+    expect(events.filter((event) => event.type === "prompt_withdrawn")).toEqual([]);
+    const aborting = fixture.coordinator.abort(fixture.handle, actor.conversationId, runId);
+    const repeated = fixture.coordinator.abort(fixture.handle, actor.conversationId, runId);
+    await aborting;
+    await repeated;
+    await running;
+    expect(events.filter((event) => event.type === "prompt_withdrawn")).toEqual(promptIds.map((promptId) => ({
+      type: "prompt_withdrawn", conversationId: actor.conversationId, promptId, runId, reason: "abort",
+    })));
+    expect(actor.pendingPromptAdmissions()).toEqual([]);
+    expect(actor.getActivity()).toEqual({ kind: "idle" });
+    unsubscribe();
   });
 
   it("rejects start_session replays that change role or title under the same idempotency key", async () => {

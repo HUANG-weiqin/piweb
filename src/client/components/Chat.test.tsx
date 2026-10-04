@@ -25,6 +25,7 @@ import {
   type ChatState,
 } from "../chat/reducer";
 import { Chat } from "./Chat";
+import type { RetainedPromptInput } from "./RetainedInputs";
 
 const mermaidMock = vi.hoisted(() => ({
   initialize: vi.fn(),
@@ -106,6 +107,10 @@ function view(
     draftEditable
     submitting={false}
     pendingAdmissions={[]}
+    retainedInputs={[]}
+    canRestoreRetainedInput={false}
+    onRestoreRetainedInput={() => undefined}
+    onDiscardRetainedInput={() => undefined}
     onWithdrawPrompt={() => undefined}
     onDraftChange={() => undefined}
     onImagesChange={() => undefined}
@@ -132,6 +137,64 @@ afterEach(() => {
 });
 
 describe("Chat", () => {
+  const recoveryInputs: RetainedPromptInput[] = [{
+    key: "original-current", scopeKey: "current", workspaceKey: "E:\\work", projectId: "project",
+    conversationId: "conversation-a", sessionId: "session-a", focusId: "focus-a",
+    runId: "candidate", actualRunId: "actual", promptId: "original-current", bytes: 200,
+    text: "original text\nsecond line", images: [{ mimeType: "image/png", data: "b3JpZ2luYWw=" }], status: "cancelled",
+  }, {
+    key: "original-other", scopeKey: "other", workspaceKey: "E:\\other", projectId: "other-project",
+    conversationId: "conversation-b", sessionId: "session-b", focusId: "focus-b",
+    runId: "candidate-b", promptId: "original-other", bytes: 100,
+    text: "other conversation original", images: [], status: "unknown",
+  }];
+
+  it.each([false, true])("manages exact originals separately from the draft with folded read-only other scopes (mobile: %s)", async (mobile) => {
+    const restore = vi.fn();
+    const discard = vi.fn();
+    const send = vi.fn(() => true);
+    render(view(emptyChat, "", undefined, {
+      retainedInputs: recoveryInputs, retainedInputScopeKey: "current", canRestoreRetainedInput: true,
+      onRestoreRetainedInput: restore, onDiscardRetainedInput: discard, onSend: send,
+      mobile: mobile ? { title: "会话 A", onBack: vi.fn() } : undefined,
+    }));
+    if (mobile) fireEvent.click(screen.getByRole("button", { name: "打开保留的原输入" }));
+    const panel = screen.getByRole("region", { name: "保留的原输入" });
+    const original = within(panel).getByText("original text second line");
+    expect(original).toHaveAttribute("title", "original text\nsecond line");
+    expect(original).toHaveClass("retained-input-text");
+    const current = original.closest("article")!;
+    expect(within(current).getByRole("button", { name: "恢复到输入框" })).toBeEnabled();
+    const details = within(current).getByText("查看原输入").closest("details")!;
+    details.setAttribute("open", "");
+    fireEvent(details, new Event("toggle"));
+    await waitFor(() => expect(within(panel).getByRole("img", { name: "保留的原图 1" })).toHaveAttribute("src", "data:image/png;base64,b3JpZ2luYWw="));
+    fireEvent.click(within(current).getByRole("button", { name: "恢复到输入框" }));
+    expect(restore).toHaveBeenCalledWith("original-current");
+    expect(send).not.toHaveBeenCalled();
+    fireEvent.click(within(panel).getByText("其他会话的副本（1）"));
+    const other = within(panel).getByText("other conversation original").closest("article")!;
+    expect(within(other).getByRole("button", { name: "恢复到输入框" })).toBeDisabled();
+    fireEvent.click(within(other).getByRole("button", { name: "丢弃副本" }));
+    expect(discard).toHaveBeenCalledWith("original-other");
+  });
+
+  it("allows the local recovery sheet while history is unready without exposing stale pending authority", () => {
+    render(view(emptyChat, "", undefined, {
+      retainedInputs: recoveryInputs, retainedInputScopeKey: "current", canRestoreRetainedInput: false,
+      conversationReady: false, online: false,
+      pendingAdmissions: [{ promptId: "old", text: "old pending authority" }],
+      mobile: { title: "会话 A", onBack: vi.fn() },
+    }));
+    fireEvent.click(screen.getByRole("button", { name: "打开保留的原输入" }));
+    expect(screen.getByRole("dialog", { name: "保留的原输入" })).toBeVisible();
+    expect(screen.getByRole("region", { name: "保留的原输入" })).toBeVisible();
+    for (const button of screen.getAllByRole("button", { name: "恢复到输入框" })) expect(button).toBeDisabled();
+    expect(screen.queryByRole("region", { name: "等待处理的消息" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "撤回" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "关闭保留的原输入" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
   it("hides cached Bash activity until the focused history snapshot is ready", () => {
     const focus = {
       sessionId: "11111111-1111-4111-8111-111111111111",

@@ -77,6 +77,125 @@
   background: var(--rebel-black);
 }
 
+.retained-inputs-surface {
+  margin: 0 8px 8px;
+}
+
+.retained-inputs {
+  max-height: 240px;
+  overflow: auto;
+  padding: 10px;
+  border: 1px solid var(--rebel-line);
+  background: var(--rebel-black);
+  color: var(--rebel-paper);
+  font-size: 12px;
+}
+
+.retained-inputs h2 {
+  margin: 0 0 6px;
+  font-size: 13px;
+}
+
+.retained-inputs p {
+  margin: 4px 0 8px;
+  color: var(--rebel-paper-muted);
+}
+
+.retained-input {
+  min-width: 0;
+  margin-top: 8px;
+  padding: 8px 0;
+  border-top: 1px solid var(--rebel-line);
+}
+
+.retained-input-summary {
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+}
+
+.retained-input-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.retained-input-summary > span:last-child {
+  flex: 0 0 auto;
+  font-size: 11px;
+}
+
+.retained-input-scope {
+  overflow-wrap: anywhere;
+}
+
+.retained-input-actions {
+  display: flex;
+  gap: 8px;
+  margin: 6px 0;
+}
+
+.retained-input-actions button {
+  min-height: 32px;
+  padding: 4px 8px;
+  border: 1px solid var(--rebel-line);
+  border-radius: 0;
+  color: inherit;
+  background: var(--rebel-black);
+}
+
+.retained-input-original summary,
+.retained-inputs-other > summary {
+  cursor: pointer;
+  padding: 6px 0;
+}
+
+.retained-input-original pre {
+  margin: 8px 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: inherit;
+}
+
+.retained-input-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.retained-input-images img {
+  max-width: 100%;
+  max-height: 360px;
+  object-fit: contain;
+}
+
+.retained-inputs-fallback {
+  position: fixed;
+  z-index: 20;
+  right: 16px;
+  bottom: 16px;
+  width: min(520px, calc(100vw - 32px));
+}
+
+@media (max-width: 600px) {
+  .retained-inputs-surface .retained-inputs {
+    max-height: none;
+  }
+
+  .retained-input-actions button,
+  .retained-input-original summary,
+  .retained-inputs-other > summary {
+    min-height: 44px;
+  }
+
+  .retained-input-summary {
+    flex-direction: column;
+    gap: 4px;
+  }
+}
+
 .app-shell .pending-admission-item {
   max-width: none;
   margin: 0;

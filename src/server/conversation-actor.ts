@@ -238,6 +238,7 @@ export type ConversationActorEvent =
       type: "prompt_admitted";
       conversationId: string;
       promptId: string;
+      runId: string;
       text: string;
     }
   | {
@@ -245,6 +246,7 @@ export type ConversationActorEvent =
       conversationId: string;
       promptId: string;
       runId: string;
+      reason: "manual" | "abort";
     }
   | {
       type: "prompt_delivered";
@@ -2322,17 +2324,27 @@ export class ConversationActor {
       }
       this.onRunInputAccepted(ticket);
     } catch (error) {
-      if (observation !== undefined) {
-        const index = ticket.pendingGuidanceObservations.indexOf(observation);
-        if (index >= 0) ticket.pendingGuidanceObservations.splice(index, 1);
+      // Abort may have won after core enqueue but before the admission ack.
+      // Only exact queue removal or a later raw end/settlement can retire its
+      // identity: a drained object can still deliver while Pi is cancelling.
+      if (
+        observation === undefined
+        || this.activeRun !== ticket
+        || ticket.state.phase !== "cancelling"
+      ) {
+        if (observation !== undefined) {
+          const index = ticket.pendingGuidanceObservations.indexOf(observation);
+          if (index >= 0) ticket.pendingGuidanceObservations.splice(index, 1);
+        }
+        this.removePendingAdmission(input.promptId);
       }
-      this.removePendingAdmission(input.promptId);
       throw error;
     }
     this.emit({
       type: "prompt_admitted",
       conversationId: this.conversationId,
       promptId: input.promptId,
+      runId: ticket.id,
       text: admission.text,
     });
     return { outcome: "admitted" };
@@ -2370,6 +2382,7 @@ export class ConversationActor {
       conversationId: this.conversationId,
       promptId,
       runId: ticket.id,
+      reason: "manual",
     });
   }
 
@@ -4112,9 +4125,27 @@ export class ConversationActor {
     ticket.state = { phase: "cancelling" };
     this.emitActivity();
     ticket.abortPromise = Promise.resolve().then(() => {
+      for (const observation of [...ticket.pendingGuidanceObservations]) {
+        const admission = observation.admission;
+        if (admission === undefined) continue;
+        const admissionIndex = this.pendingAdmissions.indexOf(admission);
+        if (admissionIndex < 0) continue;
+        if (!this.requireCreated().withdrawSteeringMessage(observation.queuedMessage)) continue;
+        this.pendingAdmissions.splice(admissionIndex, 1);
+        ticket.pendingGuidanceObservations.splice(
+          ticket.pendingGuidanceObservations.indexOf(observation), 1,
+        );
+        this.emit({
+          type: "prompt_withdrawn",
+          conversationId: this.conversationId,
+          promptId: admission.promptId,
+          runId: ticket.id,
+          reason: "abort",
+        });
+      }
+      // Bulk cleanup is not a cancellation receipt. Keep unproved browser and
+      // explicit guidance identities for raw message_end while Pi aborts.
       this.session.clearQueue();
-      this.clearPendingAdmissions();
-      ticket.pendingGuidanceObservations.splice(0);
       ticket.acceptedCustomMessageObservations.splice(0);
       return this.session.abort();
     });

@@ -42,7 +42,7 @@ const transitionDiagnostics = {
 
 describe("parseClientCommand", () => {
   it("uses the run-correlated protocol version", () => {
-    expect(PROTOCOL_VERSION).toBe(67);
+    expect(PROTOCOL_VERSION).toBe(68);
   });
 
   it("correlates withdrawal commands, broadcasts, and receipts by exact identity", () => {
@@ -71,9 +71,16 @@ describe("parseClientCommand", () => {
       focusId,
       runId,
       promptId,
+      reason: "manual",
     };
     expect(parseServerEvent(withdrawn)).toEqual(withdrawn);
-    for (const field of ["sessionId", "conversationId", "focusId", "runId", "promptId"]) {
+    expect(parseServerEvent({ ...withdrawn, reason: "abort" })).toEqual({
+      ...withdrawn, reason: "abort",
+    });
+    for (const reason of ["stopped", "unknown", "", null]) {
+      expect(() => parseServerEvent({ ...withdrawn, reason })).toThrow();
+    }
+    for (const field of ["sessionId", "conversationId", "focusId", "runId", "promptId", "reason"]) {
       const incomplete: Record<string, unknown> = { ...withdrawn };
       delete incomplete[field];
       expect(() => parseServerEvent(incomplete)).toThrow();
@@ -85,6 +92,26 @@ describe("parseClientCommand", () => {
       sessionId,
       commandId,
     })).toMatchObject({ operation: "withdraw_prompt", commandId });
+  });
+
+  it("requires the actual accepting run on prompt admissions", () => {
+    const admitted = {
+      type: "prompt_admitted",
+      sessionId,
+      conversationId,
+      focusId,
+      promptId,
+      runId,
+      text: "[图片]",
+    };
+    expect(parseServerEvent(admitted)).toEqual(admitted);
+    for (const field of ["sessionId", "conversationId", "focusId", "promptId", "runId"]) {
+      const incomplete: Record<string, unknown> = { ...admitted };
+      delete incomplete[field];
+      expect(() => parseServerEvent(incomplete)).toThrow();
+      expect(() => parseServerEvent({ ...admitted, [field]: "invalid id" })).toThrow();
+    }
+    expect(() => parseServerEvent({ ...admitted, images: [] })).toThrow();
   });
 
   it("requires complete command and run focus identity on withdrawal errors", () => {

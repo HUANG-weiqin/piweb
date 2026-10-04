@@ -2368,6 +2368,7 @@ describe("ConversationActor", () => {
           type: "prompt_admitted",
           conversationId: CONVERSATION_ID,
           promptId: PROMPT_ID,
+          runId: RUN_A,
           text: "follow up",
         });
       });
@@ -2407,7 +2408,7 @@ describe("ConversationActor", () => {
       expect(fixture.actor.pendingPromptAdmissions().map(({ promptId }) => promptId))
         .toEqual(["first", "second", "third"].filter((id) => id !== withdrawnId));
       expect(fixture.events).toContainEqual({
-        type: "prompt_withdrawn", conversationId: CONVERSATION_ID, promptId: withdrawnId, runId: RUN_A,
+        type: "prompt_withdrawn", conversationId: CONVERSATION_ID, promptId: withdrawnId, runId: RUN_A, reason: "manual",
       });
       expect(() => fixture.actor.withdrawBrowserPrompt(RUN_A, withdrawnId)).toThrow("not pending");
       expect(fixture.runtime.session.clearQueueCalls).toBe(0);
@@ -2502,9 +2503,118 @@ describe("ConversationActor", () => {
       await running;
       await aborting;
       expect(fixture.actor.pendingPromptAdmissions()).toEqual([]);
-      expect(fixture.events.filter((event) => event.type === "prompt_withdrawn")).toEqual([]);
+      expect(fixture.events.filter((event) => event.type === "prompt_withdrawn")).toEqual([{
+        type: "prompt_withdrawn", conversationId: CONVERSATION_ID,
+        promptId: PROMPT_ID, runId: RUN_A, reason: "abort",
+      }]);
       await fixture.actor.dispose();
     });
+
+    it.each(["none", "clearQueue", "abort"] as const)("proves only exact queued cancellation and delivers the drained prefix (cleanup error: %s)", async (failure) => {
+      const fixture = await openActor();
+      const { runStarted, finishRun, running } = busyRun(fixture);
+      await runStarted.promise;
+      const deliver = async (message: AgentMessage) => {
+        fixture.manager.appendMessage(message);
+        fixture.runtime.session.eventListener?.(nativeEvent({ type: "message_end", message }));
+        await Promise.resolve();
+      };
+      await deliver(agentMessage({ role: "user", content: "long task", timestamp: 1 }));
+      const explicit = fixture.actor.steer(RUN_A, "follow up");
+      for (const promptId of ["drained", "queued-first", "queued-second"]) {
+        await fixture.actor.admitBrowserPrompt({ promptId, runId: RUN_B, text: "follow up" });
+      }
+      const drained = fixture.runtime.session.steeringAgentMessages.splice(0, 2);
+      const cleanupError = new Error("SDK abort cleanup failed");
+      if (failure === "clearQueue") {
+        const clear = fixture.runtime.session.clearQueue.bind(fixture.runtime.session);
+        fixture.runtime.session.clearQueue = () => { clear(); throw cleanupError; };
+      } else if (failure === "abort") {
+        const abort = fixture.runtime.session.abort.bind(fixture.runtime.session);
+        fixture.runtime.session.abort = async () => { await abort(); throw cleanupError; };
+      }
+      const aborting = fixture.actor.abort(RUN_A);
+      const repeated = fixture.actor.abort(RUN_A);
+      if (failure === "none") {
+        await aborting;
+        await repeated;
+      } else {
+        await expect(aborting).rejects.toBe(cleanupError);
+        await expect(repeated).rejects.toBe(cleanupError);
+      }
+      const proofs = fixture.events.filter((event) => event.type === "prompt_withdrawn");
+      expect(proofs).toEqual(["queued-first", "queued-second"].map((promptId) => ({
+        type: "prompt_withdrawn", conversationId: CONVERSATION_ID,
+        promptId, runId: RUN_A, reason: "abort",
+      })));
+      expect(fixture.runtime.session.clearQueueCalls).toBe(1);
+      expect(fixture.runtime.session.steeringAgentMessages).toEqual([]);
+      expect(fixture.actor.pendingPromptAdmissions()).toEqual([{ promptId: "drained", text: "follow up" }]);
+      await deliver(drained[0]!);
+      await expect(explicit).resolves.toBeUndefined();
+      await deliver(drained[1]!);
+      expect(fixture.events).toContainEqual({
+        type: "prompt_delivered", conversationId: CONVERSATION_ID, promptId: "drained", runId: RUN_A,
+      });
+      expect(fixture.actor.pendingPromptAdmissions()).toEqual([]);
+      if (failure === "none") await fixture.actor.abort(RUN_A);
+      else await expect(fixture.actor.abort(RUN_A)).rejects.toBe(cleanupError);
+      expect(fixture.events.filter((event) => event.type === "prompt_withdrawn")).toEqual(proofs);
+      finishRun.resolve();
+      await running;
+      await fixture.actor.dispose();
+    });
+
+    it.each(["queued", "drained", "uncaptured"] as const)(
+      "does not confuse %s pre-ack input with a proven cancellation",
+      async (stage) => {
+        const fixture = await openActor();
+        const { runStarted, finishRun, running } = busyRun(fixture);
+        await runStarted.promise;
+        const initial = agentMessage({ role: "user", content: "long task", timestamp: 1 });
+        fixture.manager.appendMessage(initial);
+        fixture.runtime.session.eventListener?.(nativeEvent({ type: "message_end", message: initial }));
+        await Promise.resolve();
+        const reachedCore = deferred<void>();
+        const releaseAdmission = deferred<void>();
+        let raw: AgentMessage | undefined;
+        fixture.runtime.session.promptImplementation = async (text, options) => {
+          if (stage === "uncaptured") await releaseAdmission.promise;
+          raw = fixture.runtime.session.queueSteeringMessage(text);
+          if (stage === "drained") fixture.runtime.session.steeringAgentMessages.splice(0);
+          reachedCore.resolve();
+          if (stage !== "uncaptured") await releaseAdmission.promise;
+          options?.preflightResult?.("queued");
+        };
+        const admission = fixture.actor.admitBrowserPrompt({ promptId: PROMPT_ID, runId: RUN_B, text: "follow up" });
+        void admission.catch(() => undefined);
+        if (stage !== "uncaptured") await reachedCore.promise;
+        await fixture.actor.abort(RUN_A);
+        expect(fixture.events.filter((event) => event.type === "prompt_admitted")).toEqual([]);
+        expect(fixture.events.filter((event) => event.type === "prompt_withdrawn")).toEqual(stage === "queued" ? [{
+          type: "prompt_withdrawn", conversationId: CONVERSATION_ID,
+          promptId: PROMPT_ID, runId: RUN_A, reason: "abort",
+        }] : []);
+        releaseAdmission.resolve();
+        await expect(admission).rejects.toThrow(stage === "uncaptured"
+          ? "stopped accepting messages before enqueue"
+          : "stopped accepting messages before admission completed");
+        expect(fixture.runtime.session.steeringAgentMessages).toEqual([]);
+        if (stage === "drained") {
+          expect(fixture.actor.pendingPromptAdmissions()).toHaveLength(1);
+          fixture.manager.appendMessage(raw!);
+          fixture.runtime.session.eventListener?.(nativeEvent({ type: "message_end", message: raw! }));
+          await Promise.resolve();
+          expect(fixture.events).toContainEqual({
+            type: "prompt_delivered", conversationId: CONVERSATION_ID, promptId: PROMPT_ID, runId: RUN_A,
+          });
+        }
+        finishRun.resolve();
+        await running;
+        expect(fixture.actor.pendingPromptAdmissions()).toEqual([]);
+        await fixture.actor.dispose();
+      },
+    );
 
     it("fails closed when a busy prompt becomes an idle prompt before Pi preflight", async () => {
       const fixture = await openActor();
@@ -4568,8 +4678,14 @@ describe("ConversationActor", () => {
       ({ name }) => name === "todo_write",
     );
     expect(todoWrite).toBeDefined();
-    fixture.runtime.session.promptImplementation = async () => {
+    fixture.runtime.session.promptImplementation = async (text, options) => {
+      if (options?.streamingBehavior === "steer") {
+        fixture.runtime.session.queueSteeringMessage(text);
+        options.preflightResult?.("queued");
+        return;
+      }
       emit()?.(nativeEvent({ type: "agent_start" }));
+      fixture.runtime.session.isStreaming = true;
       await todoWrite?.execute("todo-call", {
         items: [{ id: "reload", text: "Continue after reload", status: "active" }],
       });
@@ -4585,6 +4701,8 @@ describe("ConversationActor", () => {
     });
     await runStarted.promise;
 
+    await fixture.actor.admitBrowserPrompt({ promptId: "reload-pending", runId: RUN_B, text: "pending across checkpoint" });
+    const queued = fixture.runtime.session.steeringAgentMessages[0];
     let reloadReady = false;
     const stopping = fixture.actor.stopForReload(false).then(() => {
       reloadReady = true;
@@ -4596,6 +4714,18 @@ describe("ConversationActor", () => {
     expect(turnBoundaryCheck).toBeDefined();
     expect(turnBoundaryCheck?.({
       contextUsage: fixture.runtime.session.getContextUsage(),
+    })).toBe(false);
+    // Safe reload waits for accepted guidance to deliver; a checkpoint is
+    // neither SDK abort cleanup nor proof that the pending input was cancelled.
+    const initial = agentMessage({ role: "user", content: "reload at a safe boundary", timestamp: 1 });
+    fixture.manager.appendMessage(initial);
+    emit()?.(nativeEvent({ type: "message_end", message: initial }));
+    fixture.runtime.session.steeringAgentMessages.shift();
+    fixture.manager.appendMessage(queued!);
+    emit()?.(nativeEvent({ type: "message_end", message: queued }));
+    await Promise.resolve();
+    expect(turnBoundaryCheck?.({
+      contextUsage: fixture.runtime.session.getContextUsage(),
     })).toBe(true);
 
     releaseRun.resolve();
@@ -4605,6 +4735,12 @@ describe("ConversationActor", () => {
       outcome: "aborted",
     });
     expect(fixture.runtime.session.resumeCalls).toBe(0);
+    expect(fixture.runtime.session.clearQueueCalls).toBe(0);
+    expect(fixture.runtime.session.steeringAgentMessages).toEqual([]);
+    expect(fixture.events.filter((event) => event.type === "prompt_withdrawn")).toEqual([]);
+    expect(fixture.events).toContainEqual({
+      type: "prompt_delivered", conversationId: CONVERSATION_ID, promptId: "reload-pending", runId: RUN_A,
+    });
     expect(fixture.events.some((event) => (
       event.type === "session_event" && event.event.type === "run_finished"
     ))).toBe(false);

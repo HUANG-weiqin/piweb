@@ -3869,7 +3869,7 @@ describe("PiConnection coordinated project view", () => {
     }
   });
 
-  it("withdraws synchronously under exact focus and broadcasts only the removed prompt", async () => {
+  it("broadcasts manual withdrawal and proven abort cancellation under each observer's exact focus", async () => {
     const harness = await coordinatedConnectionHarness();
     const started = deferred();
     const finish = deferred();
@@ -3957,6 +3957,7 @@ describe("PiConnection coordinated project view", () => {
         focusId: focused.focusId!,
         runId: RUN_A,
         promptId: promptIds[1]!,
+        reason: "manual",
       });
       expect(observerEvents).toContainEqual({
         type: "prompt_withdrawn",
@@ -3965,6 +3966,7 @@ describe("PiConnection coordinated project view", () => {
         focusId: observerFocus.focusId!,
         runId: RUN_A,
         promptId: promptIds[1]!,
+        reason: "manual",
       });
       expect(harness.events).toContainEqual({
         type: "command_complete", operation: "withdraw_prompt",
@@ -3986,6 +3988,31 @@ describe("PiConnection coordinated project view", () => {
         type: "prompt_delivered", promptId: promptIds[2]!, runId: RUN_A,
       })));
       expect(harness.events.filter((event) => event.type === "prompt_withdrawn")).toHaveLength(2);
+      const cancelledPromptId = randomUUID();
+      await harness.connection.handle({
+        type: "prompt", sessionId: SESSION_A, conversationId: focused.conversationId!,
+        focusId: focused.focusId!, runId: RUN_B, promptId: cancelledPromptId, text: "cancel on Stop",
+      });
+      expect(harness.events).toContainEqual({
+        type: "prompt_admitted", sessionId: SESSION_A, conversationId: focused.conversationId!,
+        focusId: focused.focusId!, promptId: cancelledPromptId, runId: RUN_A, text: "cancel on Stop",
+      });
+      const abortCommand = {
+        type: "abort" as const, sessionId: SESSION_A, conversationId: focused.conversationId!,
+        focusId: focused.focusId!, runId: RUN_A,
+      };
+      await harness.connection.handle(abortCommand);
+      await harness.connection.handle(abortCommand);
+      for (const [events, sessionId, focusId] of [
+        [harness.events, SESSION_A, focused.focusId!],
+        [observerEvents, SESSION_B, observerFocus.focusId!],
+      ] as const) {
+        expect(events.filter((event) => event.type === "prompt_withdrawn" && event.reason === "abort"))
+          .toEqual([{
+            type: "prompt_withdrawn", sessionId, conversationId: focused.conversationId!,
+            focusId, promptId: cancelledPromptId, runId: RUN_A, reason: "abort",
+          }]);
+      }
       finish.resolve();
       await running;
     } finally {

@@ -38,6 +38,8 @@ export const DEFAULT_COMPACTION_THRESHOLD_PERCENT = 70;
 export const MIN_COMPACTION_THRESHOLD_PERCENT = 20;
 export const MAX_COMPACTION_THRESHOLD_PERCENT = 90;
 export const MAX_TRANSITION_DIAGNOSTIC_PHASE_MS = 60 * 60 * 1_000;
+// v68: admissions carry their actual runId; exact queue removals distinguish
+// manual withdrawal from abort so browsers can retain original input for recovery.
 // v67: admitted browser prompts may be withdrawn by exact run/prompt identity;
 // successful withdrawals broadcast an exact-focus prompt_withdrawn event.
 // v65: Bash task completion notifications are bounded durable history items;
@@ -106,7 +108,7 @@ export const MAX_TRANSITION_DIAGNOSTIC_PHASE_MS = 60 * 60 * 1_000;
 // their OpenAI-compatible model list before saving.
 // v59: idle current-leaf fork copies LLM-effective context into a fresh host
 // lifecycle via `fork_conversation`; history anchors stay unsupported.
-export const PROTOCOL_VERSION = 67;
+export const PROTOCOL_VERSION = 68;
 export const OBSERVATION_FATAL_CLOSE_CODE = 4002;
 export const COLOR_SCHEMES = ["quiet-rebel", "classic-rebel"] as const;
 export type ColorScheme = typeof COLOR_SCHEMES[number];
@@ -1360,6 +1362,8 @@ export type ServerEvent =
       conversationId: string;
       focusId: string;
       promptId: string;
+      /** The actual accepting run, not the prompt command's disposable runId. */
+      runId: string;
       text: string;
     }
   | {
@@ -1379,6 +1383,7 @@ export type ServerEvent =
       focusId: string;
       promptId: string;
       runId: string;
+      reason: "manual" | "abort";
     }
   | {
       type: "conversation_image";
@@ -2155,6 +2160,7 @@ const serverEventUnionSchema = z.discriminatedUnion("type", [
     conversationId: conversationIdSchema,
     focusId: focusIdSchema,
     promptId: z.string().uuid(),
+    runId: runIdSchema,
     text: required.max(MAX_PROMPT_CHARACTERS),
   }).strict(),
   z.object({
@@ -2172,6 +2178,7 @@ const serverEventUnionSchema = z.discriminatedUnion("type", [
     focusId: focusIdSchema,
     promptId: z.string().uuid(),
     runId: runIdSchema,
+    reason: z.enum(["manual", "abort"]),
   }).strict(),
   conversationImageSchema.extend({
     type: z.literal("conversation_image"),

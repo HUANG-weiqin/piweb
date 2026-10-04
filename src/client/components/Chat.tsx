@@ -43,6 +43,7 @@ import { BashTaskNotificationCard } from "./BashTaskNotificationCard";
 import { editBudgetRemainingFiles } from "./CommitmentCard";
 import { ConversationRoleDialog } from "./ConversationRoleDialog";
 import { Message } from "./Message";
+import { RetainedInputs, type RetainedPromptInput } from "./RetainedInputs";
 import {
   MissionCommandSurface,
   type MissionCommandStatus,
@@ -173,6 +174,11 @@ interface ChatProps {
   submitting: boolean;
   /** busy 时已接受、尚未投递的浏览器 prompt（显示为对话流中的等待中消息）。 */
   pendingAdmissions: PendingAdmission[];
+  retainedInputs: RetainedPromptInput[];
+  retainedInputScopeKey?: string;
+  canRestoreRetainedInput: boolean;
+  onRestoreRetainedInput(key: string): void;
+  onDiscardRetainedInput(key: string): void;
   withdrawingPromptId?: string;
   onWithdrawPrompt(promptId: string): void;
   promptNotice?: string;
@@ -330,6 +336,11 @@ function ChatView({
   draftScopeKey,
   submitting,
   pendingAdmissions,
+  retainedInputs,
+  retainedInputScopeKey,
+  canRestoreRetainedInput,
+  onRestoreRetainedInput,
+  onDiscardRetainedInput,
   withdrawingPromptId,
   onWithdrawPrompt,
   promptNotice,
@@ -400,8 +411,9 @@ function ChatView({
   const [loopListExpanded, setLoopListExpanded] = useState(false);
   const [roleDetailsOpen, setRoleDetailsOpen] = useState(false);
   const [compactionThresholdOpen, setCompactionThresholdOpen] = useState(false);
-  const [mobileSheet, setMobileSheet] = useState<"tasks" | "pending" | "controls">();
-  const visibleMobileSheet = mobileActive && conversationReady
+  const [mobileSheet, setMobileSheet] = useState<"tasks" | "pending" | "controls" | "retained">();
+  const visibleMobileSheet = mobileActive
+    && (conversationReady || (mobileSheet === "retained" && retainedInputs.length > 0))
     ? mobileSheet
     : undefined;
   const closeMobileSheet = useCallback(() => setMobileSheet(undefined), []);
@@ -509,9 +521,9 @@ function ChatView({
     closeMobileSheet();
   }, [closeMobileSheet, observationSessionId, transcriptFocusKey]);
   useEffect(() => {
-    if (!conversationReady || !mobileActive) closeMobileSheet();
+    if ((!conversationReady && mobileSheet !== "retained") || !mobileActive) closeMobileSheet();
     if (!mobileActive) setRoleDetailsOpen(false);
-  }, [closeMobileSheet, conversationReady, mobileActive]);
+  }, [closeMobileSheet, conversationReady, mobileActive, mobileSheet]);
   useEffect(() => {
     onBlockingModalChange?.(roleDetailsOpen);
     return () => onBlockingModalChange?.(false);
@@ -520,8 +532,9 @@ function ChatView({
     if (
       (mobileSheet === "tasks" && loopListEmpty)
       || (mobileSheet === "pending" && pendingAdmissions.length === 0)
+      || (mobileSheet === "retained" && retainedInputs.length === 0)
     ) closeMobileSheet();
-  }, [closeMobileSheet, loopListEmpty, mobileSheet, pendingAdmissions.length]);
+  }, [closeMobileSheet, loopListEmpty, mobileSheet, pendingAdmissions.length, retainedInputs.length]);
   const activeRunId = activeRun?.id;
   const expandedAssistantMessageIds = useMemo(() => {
     const assistantMessages = blocks.flatMap((block) => (
@@ -995,6 +1008,8 @@ function ChatView({
         ? "任务"
         : visibleMobileSheet === "pending"
           ? "等待中"
+          : visibleMobileSheet === "retained"
+          ? "保留的原输入"
           : visibleMobileSheet === "controls"
             ? "控制"
             : undefined}
@@ -1059,6 +1074,18 @@ function ChatView({
           </div>
         ))}
       </section>}
+      {retainedInputs.length > 0 && <div
+        className={mobile ? "mobile-sheet-surface retained-inputs-surface" : "retained-inputs-surface"}
+        hidden={Boolean(mobile && visibleMobileSheet !== "retained")}
+      >
+        {visibleMobileSheet === "retained" && <header className="mobile-sheet-header">
+          <h2>保留的原输入</h2>
+          <button type="button" data-modal-autofocus aria-label="关闭保留的原输入" onClick={closeMobileSheet}>×</button>
+        </header>}
+        <RetainedInputs inputs={retainedInputs} currentScopeKey={retainedInputScopeKey}
+          canRestore={canRestoreRetainedInput && draft === "" && draftImages.length === 0 && !submitting}
+          onRestore={onRestoreRetainedInput} onDiscard={onDiscardRetainedInput} />
+      </div>}
       {loopListItems.length > 0 && <section
         className={`loop-list${mobile ? " mobile-sheet-surface" : ""}`}
         aria-label={visibleMobileSheet === "tasks" ? "任务" : "Tasks"}
@@ -1147,6 +1174,9 @@ function ChatView({
         </div>
       </div>
       {mobile && <div className="mobile-composer-launchers" aria-label="会话辅助面板">
+        {retainedInputs.length > 0 && <button type="button" aria-label="打开保留的原输入"
+          aria-expanded={visibleMobileSheet === "retained"} onClick={() => setMobileSheet("retained")}
+        >保留输入 <span>{retainedInputs.length}</span></button>}
         {loopListItems.length > 0 && <button
           type="button"
           aria-label="打开任务"

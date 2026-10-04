@@ -1591,11 +1591,22 @@ case "set_thinking":
             conversationId: event.conversationId,
             focusId: view.focusId,
             promptId: event.promptId,
+            runId: event.runId,
             text: event.text,
+          });
+        } else if (event.type === "prompt_withdrawn") {
+          this.emit({
+            type: "prompt_withdrawn",
+            sessionId: view.sessionId,
+            conversationId: event.conversationId,
+            focusId: view.focusId,
+            promptId: event.promptId,
+            runId: event.runId,
+            reason: event.reason,
           });
         } else {
           this.emit({
-            type: event.type,
+            type: "prompt_delivered",
             sessionId: view.sessionId,
             conversationId: event.conversationId,
             focusId: view.focusId,

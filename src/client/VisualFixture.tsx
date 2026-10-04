@@ -4,9 +4,11 @@ import type {
   ConversationSummary,
   ProjectActivitySummary,
   PublicState,
+  PromptImage,
 } from "../shared/protocol";
 import type { ChatState } from "./chat/reducer";
 import { Chat } from "./components/Chat";
+import type { RetainedPromptInput } from "./components/RetainedInputs";
 import { ConversationSidebar } from "./components/ConversationSidebar";
 import { SettingsDrawer } from "./components/SettingsDrawer";
 import { WorkspaceRail, workspaceKey } from "./components/WorkspaceRail";
@@ -440,6 +442,18 @@ export function VisualFixture({
     "conversations",
   );
   const fixtureChat = chat;
+  const [fixtureDraft, setFixtureDraft] = useState("检查两张截图中的层级、密度与状态辨识度。");
+  const [fixtureImages, setFixtureImages] = useState<PromptImage[]>([{
+    mimeType: "image/png",
+    data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLh+QAAAABJRU5ErkJggg==",
+  }]);
+  const [retainedInputs, setRetainedInputs] = useState<RetainedPromptInput[]>(showComposerStates ? [{
+    key: "fixture-retained", scopeKey: "fixture-scope", workspaceKey: ACTIVE_CWD,
+    projectId: "fixture-project", conversationId: ACTIVE_CONVERSATION_ID,
+    sessionId: "session-visual-fixture", focusId: "focus-visual-fixture",
+    promptId: "fixture-retained", runId: "fixture-run", text: "停止后保留的原输入。请先清空当前草稿，再手动恢复。",
+    images: [], bytes: 100, status: "cancelled",
+  }] : []);
   // Local visual interaction only; this fixture has no service admission semantics.
   const [pendingAdmissions, setPendingAdmissions] = useState(() => showComposerStates
     ? [{
@@ -554,21 +568,29 @@ export function VisualFixture({
         online
         interactive
         conversationReady
-        draft="检查两张截图中的层级、密度与状态辨识度。"
-        draftImages={[{
-          mimeType: "image/png",
-          data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLh+QAAAABJRU5ErkJggg==",
-        }]}
+        draft={fixtureDraft}
+        draftImages={fixtureImages}
         draftEditable
         submitting={false}
+        retainedInputs={retainedInputs}
+        retainedInputScopeKey="fixture-scope"
+        canRestoreRetainedInput
+        onRestoreRetainedInput={(key) => {
+          const input = retainedInputs.find((input) => input.key === key);
+          if (!input || fixtureDraft !== "" || fixtureImages.length > 0) return;
+          setFixtureDraft(input.text);
+          setFixtureImages(input.images);
+          setRetainedInputs((inputs) => inputs.filter((input) => input.key !== key));
+        }}
+        onDiscardRetainedInput={(key) => setRetainedInputs((inputs) => inputs.filter((input) => input.key !== key))}
         pendingAdmissions={pendingAdmissions}
         onWithdrawPrompt={(promptId) => setPendingAdmissions((admissions) =>
           admissions.filter((admission) => admission.promptId !== promptId))}
         promptNotice={showComposerStates
           ? "当前运行仍在处理；新指令会进入现有 steering 顺序。"
           : undefined}
-        onDraftChange={noOp}
-        onImagesChange={noOp}
+        onDraftChange={setFixtureDraft}
+        onImagesChange={setFixtureImages}
         onSend={noOp}
         onAbort={noOp}
         onSettings={(resolveReturnFocus) => {
