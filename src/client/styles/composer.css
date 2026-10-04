@@ -111,6 +111,28 @@
   transform: rotate(45deg);
 }
 
+.app-shell .pending-admission-withdraw {
+  padding: 3px 6px;
+  border: 1px solid var(--rebel-line);
+  border-radius: 0;
+  color: var(--rebel-paper-muted);
+  background: transparent;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+}
+
+.app-shell .pending-admission-withdraw:not(:disabled):hover {
+  border-color: var(--rebel-paper-muted);
+  color: var(--rebel-paper);
+  background: var(--rebel-black);
+}
+
+.app-shell .pending-admission-withdraw:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
 .app-shell > .composer-wrap > .loop-list {
   margin: 0 8px 8px;
   border: 1px solid var(--rebel-line);
