@@ -5317,7 +5317,7 @@ describe("ProjectSessionCoordinator", () => {
     await completion;
   });
 
-  it("admits a live busy browser prompt before an unrelated activation releases the lifecycle", async () => {
+  it("admits and withdraws a live busy browser prompt before an unrelated activation releases the lifecycle", async () => {
     const fixture = await createFixture();
     const actor = await fixture.coordinator.createUserConversation(
       fixture.handle,
@@ -5328,10 +5328,11 @@ describe("ProjectSessionCoordinator", () => {
     fixture.runtime.control(actor.conversationId).enqueue(
       blocksUntil(runningStarted, releaseRunning, "busy work completed"),
     );
+    const runId = randomUUID();
     const running = fixture.coordinator.prompt(
       fixture.handle,
       actor.conversationId,
-      randomUUID(),
+      runId,
       "keep A live while B activates",
     );
     await runningStarted.promise;
@@ -5365,6 +5366,24 @@ describe("ProjectSessionCoordinator", () => {
         500,
       );
       await expect(admitted).resolves.toEqual({ outcome: "admitted" });
+      const events: ConversationActorEvent[] = [];
+      const unsubscribe = actor.subscribe((event) => events.push(event));
+      fixture.coordinator.withdrawPrompt(fixture.handle, actor.conversationId, runId, promptId);
+      // This is the focused snapshot's pendingPrompts source, including on
+      // reconnect while both the run and unrelated lifecycle task stay live.
+      expect(actor.pendingPromptAdmissions()).toEqual([]);
+      expect(fixture.runtime.control(actor.conversationId).steeringAgentMessages).toEqual([]);
+      expect(actor.getActivity()).toEqual({ kind: "running", runId });
+      expect(events).toContainEqual({
+        type: "prompt_withdrawn", conversationId: actor.conversationId, promptId, runId,
+      });
+      expect(() => fixture.coordinator.withdrawPrompt(
+        fixture.handle, actor.conversationId, runId, promptId,
+      )).toThrow("not pending");
+      expect(() => fixture.coordinator.withdrawPrompt(
+        fixture.handle, randomUUID(), runId, promptId,
+      )).toThrow("not active");
+      unsubscribe();
     } finally {
       releaseActivation.resolve();
       await activating;

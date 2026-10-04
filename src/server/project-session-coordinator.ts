@@ -1660,6 +1660,23 @@ export class ProjectSessionCoordinator {
     return admitted;
   }
 
+  withdrawPrompt(
+    handle: ProjectSessionHandle,
+    conversationId: string,
+    runId: string,
+    promptId: string,
+  ): void {
+    const context = this.requireContext(handle);
+    if (context.deleting.has(conversationId)) {
+      throw new Error(`Conversation is being deleted: ${conversationId}`);
+    }
+    const actor = this.requireActor(context, conversationId);
+    if (!this.isContextConversationActive(context, actor)) {
+      throw new Error(`Conversation is not active: ${conversationId}`);
+    }
+    actor.withdrawBrowserPrompt(runId, promptId);
+  }
+
   steer(
     handle: ProjectSessionHandle,
     conversationId: string,

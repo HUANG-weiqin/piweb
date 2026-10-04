@@ -42,7 +42,69 @@ const transitionDiagnostics = {
 
 describe("parseClientCommand", () => {
   it("uses the run-correlated protocol version", () => {
-    expect(PROTOCOL_VERSION).toBe(65);
+    expect(PROTOCOL_VERSION).toBe(67);
+  });
+
+  it("correlates withdrawal commands, broadcasts, and receipts by exact identity", () => {
+    const command = {
+      type: "withdraw_prompt",
+      commandId,
+      sessionId,
+      conversationId,
+      focusId,
+      runId,
+      promptId,
+    };
+    expect(parseClientCommand(command)).toEqual(command);
+    for (const field of ["commandId", "sessionId", "conversationId", "focusId", "runId", "promptId"]) {
+      const incomplete: Record<string, unknown> = { ...command };
+      delete incomplete[field];
+      expect(() => parseClientCommand(incomplete)).toThrow();
+      expect(() => parseClientCommand({ ...command, [field]: "invalid id" })).toThrow();
+    }
+    expect(() => parseClientCommand({ ...command, text: "not a replay" })).toThrow();
+
+    const withdrawn = {
+      type: "prompt_withdrawn",
+      sessionId,
+      conversationId,
+      focusId,
+      runId,
+      promptId,
+    };
+    expect(parseServerEvent(withdrawn)).toEqual(withdrawn);
+    for (const field of ["sessionId", "conversationId", "focusId", "runId", "promptId"]) {
+      const incomplete: Record<string, unknown> = { ...withdrawn };
+      delete incomplete[field];
+      expect(() => parseServerEvent(incomplete)).toThrow();
+    }
+    expect(() => parseServerEvent({ ...withdrawn, text: "not transcript" })).toThrow();
+    expect(parseServerEvent({
+      type: "command_complete",
+      operation: "withdraw_prompt",
+      sessionId,
+      commandId,
+    })).toMatchObject({ operation: "withdraw_prompt", commandId });
+  });
+
+  it("requires complete command and run focus identity on withdrawal errors", () => {
+    const error = {
+      type: "error",
+      scope: "command",
+      operation: "withdraw_prompt",
+      sessionId,
+      conversationId,
+      focusId,
+      runId,
+      commandId,
+      message: "Message delivery has already started",
+    };
+    expect(parseServerEvent(error)).toEqual(error);
+    for (const field of ["sessionId", "conversationId", "focusId", "runId", "commandId"]) {
+      const incomplete: Record<string, unknown> = { ...error };
+      delete incomplete[field];
+      expect(() => parseServerEvent(incomplete)).toThrow();
+    }
   });
 
   it("accepts supported commands", () => {

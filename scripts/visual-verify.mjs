@@ -823,12 +823,23 @@ async function inspectPendingPreview(client) {
     const preview = document.querySelector(".pending-admission-text");
     const row = preview?.closest(".pending-admission-item");
     const queue = row?.closest(".pending-admissions");
-    if (!preview || !row || !queue) return { issues: ["missing pending preview"] };
+    const withdraw = row?.querySelector(".pending-admission-withdraw");
+    if (!preview || !row || !queue || !withdraw) return { issues: ["missing pending preview or withdrawal"] };
     const style = getComputedStyle(preview);
     const rect = preview.getBoundingClientRect();
     const rowRect = row.getBoundingClientRect();
     const queueRect = queue.getBoundingClientRect();
+    const withdrawRect = withdraw.getBoundingClientRect();
     const issues = [];
+    if (withdrawRect.top >= rect.bottom || withdrawRect.bottom <= rect.top) {
+      issues.push("withdrawal button wrapped below the single-line preview");
+    }
+    if (withdrawRect.right > rowRect.right + 1 || withdraw.disabled) {
+      issues.push("withdrawal button is clipped or unexpectedly disabled");
+    }
+    if (innerWidth <= 600 && (withdrawRect.width < 44 || withdrawRect.height < 44)) {
+      issues.push("mobile withdrawal target is smaller than 44px");
+    }
     if (style.whiteSpace !== "nowrap" || style.overflowX !== "hidden"
       || style.textOverflow !== "ellipsis") issues.push("pending preview is not single-line ellipsis");
     if (rect.height <= 0 || rect.height > Number.parseFloat(style.lineHeight) + 1) {
@@ -840,7 +851,8 @@ async function inspectPendingPreview(client) {
     }
     if (preview.title !== preview.textContent) issues.push("pending tooltip lost the full text");
     return { issues, height: rect.height, lineHeight: style.lineHeight,
-      width: preview.clientWidth, scrollWidth: preview.scrollWidth };
+      width: preview.clientWidth, scrollWidth: preview.scrollWidth,
+      withdrawalWidth: withdrawRect.width, withdrawalHeight: withdrawRect.height };
   })()`);
   if (result.issues.length > 0) {
     throw new Error(`Pending preview failed: ${result.issues.join(", ")}; geometry=${JSON.stringify(result)}`);
@@ -1237,7 +1249,7 @@ async function inspectMobileSheet(client, kind) {
         label: "等待中",
         surface: '.pending-admissions.mobile-sheet-surface:not([hidden])',
         item: ".pending-admission-item",
-        count: 1,
+        count: 2,
         close: 'button[aria-label="关闭等待中"]',
       },
       controls: {

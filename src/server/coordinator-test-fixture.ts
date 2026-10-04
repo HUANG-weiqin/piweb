@@ -18,6 +18,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  contentText,
   InMemoryCredentialStore,
   type AssistantMessage,
 } from "@earendil-works/pi-ai";
@@ -645,6 +646,15 @@ class FakeRuntime implements PiRuntimeLike {
       settings: fakeSettings(),
       modelRuntime: this.modelRuntime,
       modelRegistry: this.sessionModelRegistry ?? this.modelRegistry,
+      withdrawSteeringMessage: (message) => {
+        const index = control.steeringAgentMessages.indexOf(message);
+        if (index < 0) return false;
+        control.steeringAgentMessages.splice(index, 1);
+        const text = message.role === "user" ? contentText(message.content, "") : "";
+        const mirrorIndex = control.steeringMessages.indexOf(text);
+        if (mirrorIndex >= 0) control.steeringMessages.splice(mirrorIndex, 1);
+        return true;
+      },
       captureSteeringMessage: async (onMessage, operation) => {
         let count = 0;
         return captureStorage.run((message) => {

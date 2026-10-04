@@ -440,6 +440,16 @@ export function VisualFixture({
     "conversations",
   );
   const fixtureChat = chat;
+  // Local visual interaction only; this fixture has no service admission semantics.
+  const [pendingAdmissions, setPendingAdmissions] = useState(() => showComposerStates
+    ? [{
+        promptId: "prompt-visual-fixture",
+        text: `${"先核对长路径与失败状态，再继续生成窄屏证据。".repeat(30)}\n消息即使包含换行，也只能显示单行预览。`,
+      }, {
+        promptId: "prompt-visual-fixture-short",
+        text: "保留这条短消息，继续核对手机等待中面板。",
+      }]
+    : []);
 
   return <div className="workbench" data-visual-fixture="populated-workbench">
     <WorkspaceRail
@@ -551,12 +561,9 @@ export function VisualFixture({
         }]}
         draftEditable
         submitting={false}
-        pendingAdmissions={showComposerStates
-          ? [{
-            promptId: "prompt-visual-fixture",
-            text: `${"先核对长路径与失败状态，再继续生成窄屏证据。".repeat(30)}\n消息即使包含换行，也只能显示单行预览。`,
-          }]
-          : []}
+        pendingAdmissions={pendingAdmissions}
+        onWithdrawPrompt={(promptId) => setPendingAdmissions((admissions) =>
+          admissions.filter((admission) => admission.promptId !== promptId))}
         promptNotice={showComposerStates
           ? "当前运行仍在处理；新指令会进入现有 steering 顺序。"
           : undefined}

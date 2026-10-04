@@ -11,6 +11,7 @@
 `PiRuntime` 是进程级对象：
 
 - 唯一持有共享 `CredentialStore` 与基线 `ModelRuntime` / `ModelRegistry`；认证和模型缓存由 Pi 1.0.0 runtime 统一读取；`@earendil-works/pi-ai`、`@earendil-works/pi-coding-agent` 及 SDK 内部 `pi-agent-core` 精确锁定 `1.0.0`。文件凭据按文件 identity/size/高精度时间戳复用已验证快照，同一 revision 的 provider 扇出读取不得重复取得跨进程排他锁；revision 变化时只允许一轮可取消的共享 reload 在锁内重新解析，写入仍锁定并让下一次读取重新验证磁盘。
+- 会话级 steering capture adapter 同时提供 `CreatedPiSession.withdrawSteeringMessage(message)` 同步撤回：Pi 1.0.0 无官方单条删除入口，只在私有 `agent.steeringQueue.messages` 按严格对象引用删除唯一 slot，已 drain 到 loop 局部数组返回 false。成功后才按 SDK `contentText(content, "")` 同步一个 `_steeringMessages` 文本投影项并发 `_emitQueueUpdate`；文本 mirror 不参与 core 身份认领或 stale capture 回滚。私有 shape 变化必须 fail closed；queue_update 观察者在 mutation 提交后抛错只能报告，不能把实际撤回谎报为失败。无需修改 SDK、clear/replay 或第二队列。
 - 持有 Pi 用户级 `ProjectTrustStore`；受保护的项目资源在 trust resolution 前不能进入最终 resource loader。这条检查不适用于本机 LSP：用户级配置中已启用的语言服务直接可用，不读写项目 trust store，也不弹信任询问。
 - 为每个 session 或 project model catalog 创建独立 `ModelRuntime` / `ModelRegistry`，隔离 cwd 扩展的静态模型、base URL 和 headers；owner 必须在 AgentSession 创建后确认其 `modelRuntime` 身份。
 - 服务层级要区分请求适配器能力与账号/模型资格：`src/server/service-tier.ts` 只在 `model.api` 为 Pi 官方 `openai-codex-responses` 请求路由时投影 `priority`，不按 provider 或 model ID 维护清单；因此同一路由的未来模型自动获得选项。角色目录用同一请求路由能力验证非空默认层级；ConversationActor 没有会话覆盖记录时读取冻结角色默认，有记录时连显式 `null` 也必须优先，并在角色切换时重置到新默认。账号与具体模型是否接受 priority 仍由供应商在 dispatch 时裁决，错误不得被捕获后降级。Pi Web 固定使用未修改的官方 Pi 1.0.0 包；由于官方 `streamSimple()` 尚不传播 tier，这个唯一依赖适配边界先用官方 `normalizeContext()` 规范化请求，再复用 `buildBaseOptions` / `clampThinkingLevel` 调用 session 自己的 `ModelRuntime.stream()` 并传入 tier，让认证、transport、响应解析和计费继续由官方低层适配器拥有。
@@ -82,7 +83,7 @@
 
 - 原子持有 `sessionId + project handle + focused conversationId/focusId + project observer + focused extension UI route`。
 - 普通命令进入 `SerialTaskQueue`。
-- `abort`、raw `steer`、`auth_response`、`cancel_auth`、`close_session` 走控制通道；steer 必须在当前 run 尚占用 actor operation queue 时即可注入。
+- `abort`、raw `steer`、`withdraw_prompt`、`auth_response`、`cancel_auth`、`close_session` 走控制通道；steer 与撤回必须在当前 run 尚占用 actor operation queue 时即可执行。撤回的来源 focus 校验与 native queue 删除同在无 await 的控制 turn，不等待 connection/actor/project lifecycle 串行队列。
 - generation 使创建中的 project observation 变成 stale；detach 只释放观察 handle，不 dispose 后台 actor。不同 cwd 的 project context 与 conversation actor 各自持有运行状态，单个浏览器连接切换项目只替换观察投影，不能 abort 或 dispose 其它项目仍在执行的 run。
 - 每次 attach 分配新 focusId；PiConnection 只向浏览器转发匹配当前 focus 的 transcript/run event，项目级 activity 仍通过 snapshot 更新。
 - `initialize` 与 `focus_conversation` 可各自创建 invocation-local v1 phase recorder；它只累计 validation、context/catalog、presentation/target read、actor activation/lease envelope 与 snapshot build 五段单调时长，不进入 coordinator、`PublicState` 或持久状态。只有成功 transition 才把有界整数结果附于同 command 的首个 authority envelope：非空 focus 在 `focus_attached → state`（initialize 还先安排 project/role 投影）之后构建并附于 `conversation_snapshot`，不能为了观测提前阻塞 attach；空 initialize 不构建 snapshot，直接在空 `focus_attached` 上给出 `snapshotProjectionMs=null`。snapshot 阶段不含 send/delivery 或异步 project refresh；构建失败仍保持 attach/state 先行并走既有 session error，不发送半成品 diagnostics。

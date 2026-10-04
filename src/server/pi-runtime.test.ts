@@ -637,6 +637,95 @@ describe("PiRuntime session ownership", () => {
     await created.dispose();
   });
 
+  it("withdraws one exact SDK steering slot and synchronizes only its text mirror", async () => {
+    const cwd = await temporaryDirectory("piweb-runtime-withdraw-");
+    const runtime = await testRuntime(() => []);
+    const created = await runtime.createSession(cwd);
+    type Message = Parameters<typeof created.session.agent.steer>[0];
+    const core = created.session.agent as unknown as {
+      steeringQueue: { messages: Message[]; drain(): Message[] };
+    };
+    const captured: Message[] = [];
+    const updates: unknown[] = [];
+    const unsubscribe = created.session.subscribe((event) => {
+      if (event.type === "queue_update") updates.push(event);
+    });
+    const enqueue = (text: string) => created.captureSteeringMessage(
+      (message) => captured.push(message),
+      () => created.session.steer(text),
+    );
+    await enqueue("expanded text");
+    await enqueue("expanded text");
+    const explicit: Message = {
+      role: "user",
+      content: [{ type: "text", text: "expanded text" }, {
+        type: "image", data: "image bytes", mimeType: "image/png",
+      }],
+      timestamp: 3,
+    };
+    const custom = {
+      role: "custom", customType: "test.peer", content: "peer body", display: false, timestamp: 4,
+    } as Message;
+    created.session.agent.steer(explicit);
+    created.session.agent.steer(custom);
+    await created.session.followUp("follow up stays");
+    const before = core.steeringQueue.messages.slice();
+    const updatesBeforeWithdrawal = updates.length;
+    expect(created.withdrawSteeringMessage({ ...captured[1]! })).toBe(false);
+    expect(core.steeringQueue.messages).toEqual(before);
+    expect(created.session.getSteeringMessages()).toEqual(["expanded text", "expanded text"]);
+    expect(updates).toHaveLength(updatesBeforeWithdrawal);
+
+    expect(created.withdrawSteeringMessage(captured[1]!)).toBe(true);
+    expect(core.steeringQueue.messages).toHaveLength(3);
+    expect(core.steeringQueue.messages[0]).toBe(before[0]);
+    expect(core.steeringQueue.messages[1]).toBe(explicit);
+    expect(core.steeringQueue.messages[2]).toBe(custom);
+    expect(created.session.getSteeringMessages()).toEqual(["expanded text"]);
+    expect(created.session.getFollowUpMessages()).toEqual(["follow up stays"]);
+    expect(updates.at(-1)).toMatchObject({
+      type: "queue_update", steering: ["expanded text"], followUp: ["follow up stays"],
+    });
+
+    const updatesAfterSuccess = updates.length;
+    expect(created.withdrawSteeringMessage(captured[1]!)).toBe(false);
+    const drained = core.steeringQueue.drain();
+    expect(drained[0]).toBe(captured[0]);
+    expect(created.withdrawSteeringMessage(captured[0]!)).toBe(false);
+    expect(created.session.getSteeringMessages()).toEqual(["expanded text"]);
+    expect(updates).toHaveLength(updatesAfterSuccess);
+    unsubscribe();
+    await created.dispose();
+  });
+
+  it("reports withdrawal success even when a post-commit SDK queue observer throws", async () => {
+    const cwd = await temporaryDirectory("piweb-runtime-withdraw-observer-");
+    const runtime = await testRuntime(() => []);
+    const created = await runtime.createSession(cwd);
+    let captured!: Parameters<typeof created.session.agent.steer>[0];
+    await created.captureSteeringMessage(
+      (message) => { captured = message; },
+      () => created.session.steer("withdraw me"),
+    );
+    const failure = new Error("queue observer failed");
+    const unsubscribe = created.session.subscribe((event) => {
+      if (event.type === "queue_update") throw failure;
+    });
+    const report = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      expect(created.withdrawSteeringMessage(captured)).toBe(true);
+      expect(created.session.agent.hasQueuedMessages()).toBe(false);
+      expect(created.session.getSteeringMessages()).toEqual([]);
+      expect(report).toHaveBeenCalledWith(
+        "Pi steering withdrawal committed; queue_update observer failed", failure,
+      );
+    } finally {
+      report.mockRestore();
+      unsubscribe();
+      await created.dispose();
+    }
+  });
+
   it("disables session cache warming without changing the configured user preference", async () => {
     const cwd = await temporaryDirectory("piweb-runtime-cache-warming-");
     const runtime = await testRuntime(

@@ -106,6 +106,7 @@ function view(
     draftEditable
     submitting={false}
     pendingAdmissions={[]}
+    onWithdrawPrompt={() => undefined}
     onDraftChange={() => undefined}
     onImagesChange={() => undefined}
     onSend={() => true}
@@ -1196,16 +1197,19 @@ describe("Chat", () => {
     expect(queue).toHaveTextContent("Review the test failure after the current run.");
     expect(queue).toHaveTextContent("This delivery is in progress.");
     expect(queue).toHaveTextContent("等待中");
-    expect(queue.textContent).not.toContain("撤回");
+    expect(screen.getAllByRole("button", { name: "撤回" })).toHaveLength(2);
     expect(queue.textContent).not.toContain("Steer");
     expect(queue.nextElementSibling).toBe(loopList);
   });
 
-  it.each([false, true])("preserves full pending prompt text in a preview tooltip (mobile: %s)", (mobile) => {
+  it.each([false, true])("preserves full pending prompt text and withdraws by ID (mobile: %s)", (mobile) => {
     const text = `${"请继续检查长消息的展示。".repeat(100)}\n第二行也必须完整保留。`;
+    const onWithdrawPrompt = vi.fn();
     render(view(emptyChat, "", undefined, {
       busy: true,
-      pendingAdmissions: [{ promptId: "queued-long", text }],
+      activeRun: { id: "run-1", phase: "running" },
+      onWithdrawPrompt,
+      pendingAdmissions: [{ promptId: "queued-long", text }, { promptId: "queued-short", text: "short" }],
       mobile: mobile ? { title: "会话 A", onBack: vi.fn() } : undefined,
     }));
     if (mobile) fireEvent.click(screen.getByRole("button", { name: "打开等待中" }));
@@ -1214,6 +1218,38 @@ describe("Chat", () => {
     expect(preview).toHaveClass("pending-admission-text");
     expect(preview.textContent).toBe(text);
     expect(preview).toBeVisible();
+    const buttons = screen.getAllByRole("button", { name: "撤回" });
+    buttons[0]!.focus();
+    expect(buttons[0]).toHaveFocus();
+    fireEvent.click(buttons[0]!);
+    fireEvent.click(buttons[1]!);
+    expect(onWithdrawPrompt.mock.calls).toEqual([["queued-long"], ["queued-short"]]);
+  });
+
+  it("gates only withdrawal while a request is pending and at every authority boundary", () => {
+    const base: Partial<ComponentProps<typeof Chat>> = {
+      busy: true,
+      activeRun: { id: "run-1", phase: "running" },
+      pendingAdmissions: [{ promptId: "first", text: "first" }, { promptId: "second", text: "second" }],
+    };
+    const rendered = render(view(emptyChat, "current draft", undefined, base));
+    for (const gate of [
+      { online: false }, { interactive: false }, { conversationReady: false },
+      { activeRun: undefined }, { activeRun: { id: "run-1", phase: "queued" as const } },
+      { activeRun: { id: "run-1", phase: "cancelling" as const } }, { stopping: true },
+    ]) {
+      rendered.rerender(view(emptyChat, "current draft", undefined, { ...base, ...gate }));
+      for (const button of screen.getAllByRole("button", { name: "撤回" })) expect(button).toBeDisabled();
+    }
+    rendered.rerender(view(emptyChat, "current draft", undefined, {
+      ...base, activeRun: { id: "run-1", phase: "waiting" },
+    }));
+    for (const button of screen.getAllByRole("button", { name: "撤回" })) expect(button).toBeEnabled();
+    rendered.rerender(view(emptyChat, "current draft", undefined, { ...base, withdrawingPromptId: "first" }));
+    expect(screen.getByRole("button", { name: "撤回中…" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "撤回" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "发送" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "停止" })).toBeEnabled();
   });
 
   it("lets streamed output grow inside the follow comfort zone", () => {

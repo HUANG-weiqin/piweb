@@ -19,6 +19,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
 import {
+  contentText,
   InMemoryCredentialStore,
   type AssistantMessage,
 } from "@earendil-works/pi-ai";
@@ -430,6 +431,15 @@ class FakeRuntime implements PiRuntimeLike {
         this.session.turnBoundaryPaused = false;
         this.session.turnBoundaryPauseReleases++;
       },
+      withdrawSteeringMessage: (message) => {
+        const index = this.session.steeringAgentMessages.indexOf(message);
+        if (index < 0) return false;
+        this.session.steeringAgentMessages.splice(index, 1);
+        const text = message.role === "user" ? contentText(message.content, "") : "";
+        const mirrorIndex = this.session.steeringMessages.indexOf(text);
+        if (mirrorIndex >= 0) this.session.steeringMessages.splice(mirrorIndex, 1);
+        return true;
+      },
       captureSteeringMessage: (onMessage, operation) => {
         if (this.captureSteeringMessageImplementation) {
           return this.captureSteeringMessageImplementation(onMessage, operation);
@@ -794,6 +804,9 @@ describe("ConversationActor Bash lifecycle", () => {
       text: "accepted browser message",
     });
     expect(promote).toHaveBeenNthCalledWith(1, owner);
+    fixture.actor.withdrawBrowserPrompt(RUN_A, RUN_B);
+    expect(promote).toHaveBeenCalledTimes(1);
+    expect(fixture.actor.pendingPromptAdmissions()).toEqual([]);
 
     const explicitSteer = fixture.actor.steer(RUN_A, "accepted explicit steer");
     void explicitSteer.catch(() => undefined);
@@ -2366,6 +2379,130 @@ describe("ConversationActor", () => {
       finishRun.resolve();
       await running;
       await expect(admit).resolves.toEqual({ outcome: "admitted" });
+      await fixture.actor.dispose();
+    });
+
+    it.each([0, 1, 2])("withdraws browser FIFO slot %i without changing other identities or delivery", async (withdrawIndex) => {
+      const fixture = await openActor();
+      const { runStarted, finishRun, running } = busyRun(fixture);
+      await runStarted.promise;
+      const emit = (message: AgentMessage) => {
+        fixture.manager.appendMessage(message);
+        fixture.runtime.session.eventListener?.(nativeEvent({ type: "message_end", message }));
+      };
+      emit(agentMessage({ role: "user", content: [{ type: "text", text: "long task" }], timestamp: 1 }));
+      const explicitDelivery = fixture.actor.steer(RUN_A, "follow up");
+      const explicit = fixture.runtime.takeSteeringCapture("follow up");
+      for (const promptId of ["first", "second", "third"]) {
+        await fixture.actor.admitBrowserPrompt({ promptId, runId: RUN_B, text: "follow up" });
+      }
+      const originals = fixture.runtime.session.steeringAgentMessages.slice();
+      const withdrawnId = ["first", "second", "third"][withdrawIndex]!;
+      fixture.actor.withdrawBrowserPrompt(RUN_A, withdrawnId);
+      const remaining = originals.filter((_, index) => index !== withdrawIndex + 1);
+      expect(fixture.runtime.session.steeringAgentMessages).toHaveLength(remaining.length);
+      remaining.forEach((message, index) => {
+        expect(fixture.runtime.session.steeringAgentMessages[index]).toBe(message);
+      });
+      expect(fixture.actor.pendingPromptAdmissions().map(({ promptId }) => promptId))
+        .toEqual(["first", "second", "third"].filter((id) => id !== withdrawnId));
+      expect(fixture.events).toContainEqual({
+        type: "prompt_withdrawn", conversationId: CONVERSATION_ID, promptId: withdrawnId, runId: RUN_A,
+      });
+      expect(() => fixture.actor.withdrawBrowserPrompt(RUN_A, withdrawnId)).toThrow("not pending");
+      expect(fixture.runtime.session.clearQueueCalls).toBe(0);
+      fixture.runtime.session.steeringAgentMessages.splice(0);
+      emit(explicit);
+      await expect(explicitDelivery).resolves.toBeUndefined();
+      for (const message of remaining.slice(1)) {
+        emit(message);
+        await Promise.resolve();
+      }
+      expect(fixture.events.filter((event) => event.type === "prompt_delivered").map((event) => event.promptId))
+        .toEqual(["first", "second", "third"].filter((id) => id !== withdrawnId));
+      expect(fixture.actor.pendingPromptAdmissions()).toEqual([]);
+      finishRun.resolve();
+      await running;
+      await fixture.actor.dispose();
+    });
+
+    it("rejects stale controls and core-drained prompts without changing host state or later delivery", async () => {
+      const fixture = await openActor();
+      const { runStarted, finishRun, running } = busyRun(fixture);
+      await runStarted.promise;
+      const initial = agentMessage({ role: "user", content: [{ type: "text", text: "long task" }], timestamp: 1 });
+      fixture.manager.appendMessage(initial);
+      fixture.runtime.session.eventListener?.(nativeEvent({ type: "message_end", message: initial }));
+      await fixture.actor.admitBrowserPrompt({ promptId: PROMPT_ID, runId: RUN_B, text: "follow up" });
+      const pending = fixture.actor.pendingPromptAdmissions();
+      expect(() => fixture.actor.withdrawBrowserPrompt(RUN_B, PROMPT_ID)).toThrow("exact agent run");
+      expect(() => fixture.actor.withdrawBrowserPrompt(RUN_A, "missing")).toThrow("not pending");
+      // Pi drain transfers ownership into the loop's local pendingMessages,
+      // before either message_start or the durable message_end proof.
+      const drained = fixture.runtime.session.steeringAgentMessages.splice(0)[0]!;
+      expect(() => fixture.actor.withdrawBrowserPrompt(RUN_A, PROMPT_ID)).toThrow("already left");
+      expect(fixture.actor.pendingPromptAdmissions()).toEqual(pending);
+      expect(fixture.runtime.session.steeringMessages).toEqual(["follow up"]);
+      expect(fixture.events.filter((event) => event.type === "prompt_withdrawn")).toEqual([]);
+      fixture.manager.appendMessage(drained);
+      fixture.runtime.session.eventListener?.(nativeEvent({ type: "message_end", message: drained }));
+      await Promise.resolve();
+      expect(fixture.events).toContainEqual({
+        type: "prompt_delivered", conversationId: CONVERSATION_ID, promptId: PROMPT_ID, runId: RUN_A,
+      });
+      expect(() => fixture.actor.withdrawBrowserPrompt(RUN_A, PROMPT_ID)).toThrow("not pending");
+      finishRun.resolve();
+      await running;
+      expect(() => fixture.actor.withdrawBrowserPrompt(RUN_A, PROMPT_ID)).toThrow("exact agent run");
+      await fixture.actor.dispose();
+    });
+
+    it("withdraws in waiting phase without undoing a wait already woken by accepted guidance", async () => {
+      const fixture = await openActor();
+      const { runStarted, finishRun, running } = busyRun(fixture);
+      await runStarted.promise;
+      const ownership = fixture.actor.currentRunOwnership(RUN_A)!;
+      const targets = [{ conversationId: CONVERSATION_ID, runId: RUN_B }];
+      await fixture.actor.admitBrowserPrompt({ promptId: "before-wait", runId: RUN_B, text: "follow up" });
+      const waitingAttempt = fixture.actor.installWaitAttempt(ownership, { targets });
+      expect(fixture.actor.getActivity().kind).toBe("waiting");
+      fixture.actor.withdrawBrowserPrompt(RUN_A, "before-wait");
+      expect(fixture.actor.getActivity().kind).toBe("waiting");
+      fixture.actor.cancelWaitAttempt(ownership, waitingAttempt);
+
+      const causes: unknown[] = [];
+      const wokenAttempt = fixture.actor.installWaitAttempt(ownership, {
+        targets, onTerminal: (cause) => causes.push(cause),
+      });
+      fixture.actor.onWaitingSteerAdmitted(ownership, wokenAttempt, () => true);
+      await fixture.actor.admitBrowserPrompt({ promptId: "wakes-wait", runId: RUN_B, text: "follow up" });
+      expect(causes).toEqual([{ kind: "guidance" }]);
+      expect(fixture.actor.getActivity().kind).toBe("running");
+      fixture.actor.withdrawBrowserPrompt(RUN_A, "wakes-wait");
+      expect(causes).toEqual([{ kind: "guidance" }]);
+      expect(fixture.actor.getActivity().kind).toBe("running");
+      const nextAttempt = fixture.actor.installWaitAttempt(ownership, { targets });
+      const onGuidance = vi.fn(() => true);
+      fixture.actor.onWaitingSteerAdmitted(ownership, nextAttempt, onGuidance);
+      expect(onGuidance).not.toHaveBeenCalled();
+      fixture.actor.cancelWaitAttempt(ownership, nextAttempt);
+      finishRun.resolve();
+      await running;
+      await fixture.actor.dispose();
+    });
+
+    it("rejects withdrawal once abort wins even while the SDK run is still closing", async () => {
+      const fixture = await openActor();
+      const { runStarted, finishRun, running } = busyRun(fixture);
+      await runStarted.promise;
+      await fixture.actor.admitBrowserPrompt({ promptId: PROMPT_ID, runId: RUN_B, text: "follow up" });
+      const aborting = fixture.actor.abort(RUN_A);
+      expect(() => fixture.actor.withdrawBrowserPrompt(RUN_A, PROMPT_ID)).toThrow("exact agent run");
+      finishRun.resolve();
+      await running;
+      await aborting;
+      expect(fixture.actor.pendingPromptAdmissions()).toEqual([]);
+      expect(fixture.events.filter((event) => event.type === "prompt_withdrawn")).toEqual([]);
       await fixture.actor.dispose();
     });
 

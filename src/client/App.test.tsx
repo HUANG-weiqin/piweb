@@ -11049,6 +11049,203 @@ describe("App", () => {
   });
 });
 
+describe("pending prompt withdrawal", () => {
+  const promptIds = [
+    "15111111-1111-4111-8111-111111111111",
+    "15222222-2222-4222-8222-222222222222",
+    "15333333-3333-4333-8333-333333333333",
+  ];
+  const admissions = promptIds.map((promptId) => ({ promptId, text: "identical waiting text" }));
+  function busyState(sessionId: string) {
+    return {
+      sessionId, cwd: "E:\\work", busy: true,
+      activeRun: { id: RUN_ID, phase: "running" as const },
+      thinkingLevel: "off" as const, toolMode: "full_access" as const,
+      availableThinkingLevels: ["off" as const],
+      selectedModel: { provider: "provider", id: "model" }, providers: [],
+    };
+  }
+  function start() {
+    const sessionId = startFocusReplacementProject();
+    act(() => {
+      socketMock.emit?.({ type: "state", state: busyState(sessionId) });
+      for (const admission of admissions) socketMock.emit?.({
+        type: "prompt_admitted", sessionId, conversationId: CONVERSATION_ID,
+        focusId: FOCUS_A, ...admission,
+      });
+    });
+    fireEvent.change(screen.getByRole("textbox", { name: "给 Pi 发送消息" }), {
+      target: { value: "keep current draft" },
+    });
+    socketMock.autoFocus = true;
+    return sessionId;
+  }
+  function withdrawMiddle() {
+    fireEvent.click(screen.getAllByRole("button", { name: "撤回" })[1]!);
+    return latestCommand("withdraw_prompt");
+  }
+  function complete(command: Extract<ClientCommand, { type: "withdraw_prompt" }>) {
+    socketMock.rawEmit?.({ type: "command_complete", operation: "withdraw_prompt",
+      sessionId: command.sessionId, commandId: command.commandId });
+  }
+  function withdrawn(command: Extract<ClientCommand, { type: "withdraw_prompt" }>) {
+    socketMock.rawEmit?.({ type: "prompt_withdrawn", sessionId: command.sessionId,
+      conversationId: command.conversationId, focusId: command.focusId,
+      promptId: command.promptId, runId: command.runId });
+  }
+
+  it.each(["broadcast", "complete"])("removes only the admitted ID after exact %s, not transport acceptance", (receipt) => {
+    const sessionId = start();
+    const command = withdrawMiddle();
+    expect(command).toEqual({ type: "withdraw_prompt", sessionId,
+      conversationId: CONVERSATION_ID, focusId: FOCUS_A, runId: RUN_ID,
+      promptId: promptIds[1], commandId: expect.any(String) });
+    expect(screen.getAllByText("identical waiting text")).toHaveLength(3);
+    expect(screen.getByRole("button", { name: "撤回中…" })).toBeDisabled();
+    for (const button of screen.getAllByRole("button", { name: "撤回" })) expect(button).toBeDisabled();
+    expect(screen.getByRole("button", { name: "发送" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "停止" })).toBeEnabled();
+    act(() => receipt === "broadcast" ? withdrawn(command) : complete(command));
+    expect(screen.getAllByText("identical waiting text")).toHaveLength(2);
+    expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" })).toHaveValue("keep current draft");
+    fireEvent.click(screen.getAllByRole("button", { name: "撤回" })[1]!);
+    expect(latestCommand("withdraw_prompt").promptId).toBe(promptIds[2]);
+  });
+
+  it.each(["false", "error"])("keeps admissions and draft on %s failure", (failure) => {
+    start();
+    if (failure === "false") socketMock.send.mockReturnValueOnce(false);
+    const command = withdrawMiddle();
+    if (failure === "error") act(() => socketMock.rawEmit?.({
+      type: "error", scope: "command", operation: "withdraw_prompt",
+      sessionId: command.sessionId, conversationId: command.conversationId,
+      focusId: command.focusId, runId: command.runId, commandId: command.commandId,
+      message: "消息已被 SDK 取用",
+    }));
+    expect(screen.getAllByText("identical waiting text")).toHaveLength(3);
+    for (const button of screen.getAllByRole("button", { name: "撤回" })) expect(button).toBeEnabled();
+    expect(screen.getByText(failure === "error" ? "撤回失败：消息已被 SDK 取用" : "撤回请求未发送，等待中消息已保留，请重试。")).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" })).toHaveValue("keep current draft");
+  });
+
+  it.each(["broadcast", "complete"])("registers the owner before synchronous %s", (receipt) => {
+    start();
+    socketMock.send.mockImplementationOnce((command) => {
+      if (command.type !== "withdraw_prompt") throw new Error("expected withdrawal");
+      if (receipt === "broadcast") withdrawn(command); else complete(command);
+      return true;
+    });
+    withdrawMiddle();
+    expect(screen.getAllByText("identical waiting text")).toHaveLength(2);
+    expect(screen.queryByRole("button", { name: "撤回中…" })).not.toBeInTheDocument();
+    for (const button of screen.getAllByRole("button", { name: "撤回" })) expect(button).toBeEnabled();
+  });
+
+  it("does not claim withdrawal success when delivery wins, or let its late completion settle another request", () => {
+    start();
+    const first = withdrawMiddle();
+    act(() => socketMock.rawEmit?.({ type: "prompt_delivered", sessionId: first.sessionId,
+      conversationId: first.conversationId, focusId: first.focusId,
+      runId: first.runId, promptId: first.promptId }));
+    expect(screen.getAllByText("identical waiting text")).toHaveLength(2);
+    expect(screen.getByText("消息已投递，无法撤回。")).toBeInTheDocument();
+    for (const button of screen.getAllByRole("button", { name: "撤回" })) expect(button).toBeDisabled();
+    act(() => socketMock.rawEmit?.({ type: "error", scope: "command", operation: "withdraw_prompt",
+      sessionId: first.sessionId, conversationId: first.conversationId, focusId: first.focusId,
+      runId: first.runId, commandId: first.commandId, message: "消息已投递" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "撤回" })[0]!);
+    const second = latestCommand("withdraw_prompt");
+    act(() => complete(first));
+    expect(screen.getByRole("button", { name: "撤回中…" })).toBeDisabled();
+    expect(screen.getAllByText("identical waiting text")).toHaveLength(2);
+    act(() => complete(second));
+    expect(screen.getAllByText("identical waiting text")).toHaveLength(1);
+  });
+
+  it("ignores stale session, command and focus events; accepts another window's full-focus broadcast", () => {
+    start();
+    const command = withdrawMiddle();
+    act(() => {
+      socketMock.rawEmit?.({ type: "command_complete", operation: "withdraw_prompt", sessionId: RUN_B, commandId: command.commandId });
+      socketMock.rawEmit?.({ type: "command_complete", operation: "withdraw_prompt", sessionId: command.sessionId, commandId: RUN_B });
+      socketMock.rawEmit?.({ type: "prompt_withdrawn", sessionId: command.sessionId,
+        conversationId: CONVERSATION_B, focusId: command.focusId, promptId: command.promptId, runId: command.runId });
+      socketMock.rawEmit?.({ type: "prompt_withdrawn", sessionId: command.sessionId,
+        conversationId: command.conversationId, focusId: FOCUS_A_SECOND, promptId: command.promptId, runId: command.runId });
+      socketMock.rawEmit?.({ type: "error", scope: "command", operation: "withdraw_prompt",
+        sessionId: command.sessionId, conversationId: command.conversationId, focusId: FOCUS_A_SECOND,
+        runId: command.runId, commandId: command.commandId, message: "stale failure" });
+    });
+    expect(screen.getAllByText("identical waiting text")).toHaveLength(3);
+    expect(screen.getByRole("button", { name: "撤回中…" })).toBeDisabled();
+    expect(screen.queryByText(/stale failure/)).not.toBeInTheDocument();
+    act(() => withdrawn({ ...command, promptId: promptIds[0]! }));
+    expect(screen.getAllByText("identical waiting text")).toHaveLength(2);
+    expect(screen.getByRole("button", { name: "撤回中…" })).toBeDisabled();
+    act(() => withdrawn(command));
+    expect(screen.getAllByText("identical waiting text")).toHaveLength(1);
+  });
+
+  it("clears temporary ownership on disconnect and restores only the reconnect snapshot without resending", () => {
+    start();
+    const command = withdrawMiddle();
+    const count = () => socketMock.send.mock.calls.filter(([sent]) => sent.type === "withdraw_prompt").length;
+    act(() => socketMock.status?.(false));
+    expect(screen.queryByRole("button", { name: "撤回中…" })).not.toBeInTheDocument();
+    expect(screen.getByText(/撤回结果未确认/)).toBeInTheDocument();
+    act(() => {
+      socketMock.status?.(true);
+      socketMock.emit?.({ type: "hello", protocolVersion: PROTOCOL_VERSION, startupCwd: "E:\\work" });
+    });
+    const reconnect = latestCommand("initialize");
+    act(() => {
+      socketMock.emit?.({ type: "state", state: busyState(reconnect.sessionId) });
+      socketMock.emit?.({ type: "conversation_snapshot", sessionId: reconnect.sessionId,
+        conversationId: CONVERSATION_ID, items: [], pendingPrompts: admissions,
+        window: completeConversationWindow });
+      complete(command);
+      withdrawn(command);
+    });
+    expect(count()).toBe(1);
+    expect(screen.getAllByText("identical waiting text")).toHaveLength(3);
+    for (const button of screen.getAllByRole("button", { name: "撤回" })) expect(button).toBeEnabled();
+  });
+
+  it("does not let the first A withdrawal settle the new A focus after A → B → A", () => {
+    const sessionId = start();
+    const first = withdrawMiddle();
+    fireEvent.click(screen.getByRole("button", { name: "打开会话 B" }));
+    act(() => socketMock.emit?.({ type: "state", state: busyState(sessionId) }));
+    fireEvent.click(screen.getByRole("button", { name: "打开会话 A" }));
+    act(() => {
+      socketMock.emit?.({ type: "state", state: busyState(sessionId) });
+      socketMock.emit?.({ type: "conversation_snapshot", sessionId,
+        conversationId: CONVERSATION_ID, items: [], pendingPrompts: admissions,
+        window: completeConversationWindow });
+    });
+    const second = withdrawMiddle();
+    expect(second.focusId).not.toBe(first.focusId);
+    act(() => { complete(first); withdrawn(first); });
+    expect(screen.getAllByText("identical waiting text")).toHaveLength(3);
+    expect(screen.getByRole("button", { name: "撤回中…" })).toBeDisabled();
+    act(() => complete(second));
+    expect(screen.getAllByText("identical waiting text")).toHaveLength(2);
+  });
+
+  it("keeps send and STOP operable during a withdrawal and clears the temporary owner on abort", () => {
+    const sessionId = start();
+    withdrawMiddle();
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    expect(latestCommand("prompt").text).toBe("keep current draft");
+    fireEvent.click(screen.getByRole("button", { name: "停止" }));
+    expect(latestCommand("abort").runId).toBe(RUN_ID);
+    expect(screen.queryByRole("button", { name: "撤回中…" })).not.toBeInTheDocument();
+    act(() => socketMock.emit?.({ type: "session_event", sessionId, runId: RUN_ID,
+      event: { type: "run_finished", outcome: "aborted" } }));
+    expect(screen.queryByRole("region", { name: "等待处理的消息" })).not.toBeInTheDocument();
+  });
+});
+
 function customProviderSnapshot(
   overrides: Partial<CustomProviderSnapshot> = {},
 ): CustomProviderSnapshot {

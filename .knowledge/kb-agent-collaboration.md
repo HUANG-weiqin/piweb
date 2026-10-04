@@ -36,6 +36,7 @@ Pi Web 把同一项目中的每个持久 conversation 运行成平级 Agent。�
 - actor 原子拥有角色快照（含冻结的 primary/compaction identity）、`SessionManager`、writer lease、隔离的 settings/model registry、`AgentSession`、唯一 `activeRun`、串行队列和观察者；coordinator 将该完整 frozen identity 传入每次 runtime create/reopen/switch/rollback/peer 路径；
 - `activeRun` 的 `queued / running / waiting / cancelling` 是侧栏 activity 与 busy 的唯一来源；
 - Pi 1 prompt disposition 必须精确匹配：initial 为 `started`，busy browser prompt/显式 steer 为 `queued`，`handled` 不能作为宿主启动或入队证明。input handler 可异步等待，故 PiRuntime 用 invocation-scoped `AsyncLocalStorage` 包住整次 SDK 调用，在 native `agent.steer` enqueue 前同步复核 exact active ticket 并捕获恰好一个原始 user message identity，调用返回后再检查 disposition 与 admission/投递结算；不能按正文/队列长度推断，也不能只靠同步调用栈捕获。browser 与 explicit guidance 共用 accepted-but-unobserved FIFO，raw user `message_end` 的同对象持久证明才结算 delivery；
+- 浏览器 `withdraw_prompt` 只取消当前 live actor 中仍在 core steering queue 的 admitted prompt：coordinator 与 actor 同步复核 exact run/prompt identity，仅 runtime 精确移除成功后删除对应 admission 与统一 guidance FIFO 的同对象记录。其它 browser、explicit steer、inbox 和 Bash notification 的对象与顺序保持不变；已接受 guidance 的 wait 唤醒或前台 Bash 迁移不会被倒回。不激活新 actor，不清全队，不重放，不写另一套持久队列。
 - 浏览器切换焦点只更换观察者，不 abort、dispose 或暂停后台 actor；
 - coordinator close 会同步封闭新 lifecycle 入队并结算全部 extension UI/waiter，排空关闭前已接收的 lifecycle task 后再释放资源；尚未开始的 task 在任何持久写前失败，不能让 close 返回后继续追加卡片。迟到 actor/catalog 会立即 dispose，随后清理包括无浏览器观察者在内的全部 actor、后台恢复任务与项目 handle。
 

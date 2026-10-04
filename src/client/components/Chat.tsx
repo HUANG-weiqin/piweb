@@ -173,6 +173,8 @@ interface ChatProps {
   submitting: boolean;
   /** busy 时已接受、尚未投递的浏览器 prompt（显示为对话流中的等待中消息）。 */
   pendingAdmissions: PendingAdmission[];
+  withdrawingPromptId?: string;
+  onWithdrawPrompt(promptId: string): void;
   promptNotice?: string;
   onDraftChange(text: string): void;
   onImagesChange(images: PromptImage[]): void;
@@ -328,6 +330,8 @@ function ChatView({
   draftScopeKey,
   submitting,
   pendingAdmissions,
+  withdrawingPromptId,
+  onWithdrawPrompt,
   promptNotice,
   onDraftChange,
   onImagesChange,
@@ -1045,6 +1049,13 @@ function ChatView({
           >
             <span className="pending-admission-text" title={admission.text}>{admission.text}</span>
             <span className="pending-admission-status">等待中</span>
+            <button
+              type="button"
+              className="pending-admission-withdraw"
+              disabled={!controlsEnabled || !conversationReady || Boolean(withdrawingPromptId)
+                || stopping || (activeRun?.phase !== "running" && activeRun?.phase !== "waiting")}
+              onClick={() => onWithdrawPrompt(admission.promptId)}
+            >{withdrawingPromptId === admission.promptId ? "撤回中…" : "撤回"}</button>
           </div>
         ))}
       </section>}

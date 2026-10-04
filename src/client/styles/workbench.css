@@ -1515,7 +1515,7 @@
 
 .pending-admission-item {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   gap: 10px;
   min-width: 0;
   max-width: min(80%, 640px);
@@ -1551,6 +1551,28 @@
   font-weight: 620;
   letter-spacing: 0.04em;
   white-space: nowrap;
+}
+
+.pending-admission-withdraw {
+  flex: 0 0 auto;
+  align-self: center;
+  min-width: 44px;
+  min-height: 24px;
+  padding: 3px 5px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.pending-admission-withdraw:hover:not(:disabled) {
+  color: var(--warning);
+}
+
+.pending-admission-withdraw:focus-visible {
+  outline: 2px solid var(--warning);
+  outline-offset: 2px;
 }
 
 .pending-admission-status::before {

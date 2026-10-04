@@ -391,6 +391,31 @@ export class PiConnection {
         return Promise.reject(error);
       }
     }
+    if (command.type === "withdraw_prompt") {
+      try {
+        if (this.usedCommandIds.has(command.commandId)) {
+          throw new Error("Command ID was already used on this connection");
+        }
+        this.usedCommandIds.add(command.commandId);
+        const view = this.requireCoordinatedFocus(
+          command.sessionId,
+          command.conversationId,
+          command.focusId,
+        );
+        // Keep focus validation and native queue removal in one synchronous
+        // control turn; neither the running actor nor lifecycle queue may delay it.
+        view.coordinator.withdrawPrompt(
+          view.handle,
+          command.conversationId,
+          command.runId,
+          command.promptId,
+        );
+        this.emitCommandComplete(command);
+        return Promise.resolve();
+      } catch (error) {
+        return Promise.reject(error);
+      }
+    }
     if (command.type === "steer") {
       try {
         if (this.usedCommandIds.has(command.commandId)) {
@@ -955,6 +980,7 @@ export class PiConnection {
       | { type: "refresh_models" }
       | { type: "refresh_view" }
       | { type: "steer" }
+      | { type: "withdraw_prompt" }
       | { type: "switch_conversation_role" }
     >,
     transitionAbort?: AbortController,
@@ -1552,7 +1578,11 @@ case "set_thinking":
       return;
     }
 
-    if (event.type === "prompt_admitted" || event.type === "prompt_delivered") {
+    if (
+      event.type === "prompt_admitted"
+      || event.type === "prompt_delivered"
+      || event.type === "prompt_withdrawn"
+    ) {
       if (event.conversationId === view.conversationId && view.focusId !== undefined) {
         if (event.type === "prompt_admitted") {
           this.emit({
@@ -1565,7 +1595,7 @@ case "set_thinking":
           });
         } else {
           this.emit({
-            type: "prompt_delivered",
+            type: event.type,
             sessionId: view.sessionId,
             conversationId: event.conversationId,
             focusId: view.focusId,

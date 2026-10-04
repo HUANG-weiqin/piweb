@@ -241,6 +241,12 @@ export type ConversationActorEvent =
       text: string;
     }
   | {
+      type: "prompt_withdrawn";
+      conversationId: string;
+      promptId: string;
+      runId: string;
+    }
+  | {
       type: "prompt_delivered";
       conversationId: string;
       promptId: string;
@@ -2330,6 +2336,41 @@ export class ConversationActor {
       text: admission.text,
     });
     return { outcome: "admitted" };
+  }
+
+  /** Control path: executeRun owns operations while the SDK queue is live. */
+  withdrawBrowserPrompt(runId: string, promptId: string): void {
+    this.assertUsable();
+    const ticket = this.activeRun;
+    if (
+      ticket === undefined
+      || ticket.id !== runId
+      || (ticket.state.phase !== "running" && ticket.state.phase !== "waiting")
+    ) {
+      throw new Error("The exact agent run is not accepting prompt withdrawals");
+    }
+    const admissionIndex = this.pendingAdmissions.findIndex(
+      (admission) => admission.promptId === promptId,
+    );
+    const admission = this.pendingAdmissions[admissionIndex];
+    const observationIndex = ticket.pendingGuidanceObservations.findIndex(
+      (observation) => admission !== undefined && observation.admission === admission,
+    );
+    const observation = ticket.pendingGuidanceObservations[observationIndex];
+    if (admission === undefined || observation === undefined) {
+      throw new Error(`Prompt is not pending in this run: ${promptId}`);
+    }
+    if (!this.requireCreated().withdrawSteeringMessage(observation.queuedMessage)) {
+      throw new Error(`Prompt has already left the SDK steering queue: ${promptId}`);
+    }
+    this.pendingAdmissions.splice(admissionIndex, 1);
+    ticket.pendingGuidanceObservations.splice(observationIndex, 1);
+    this.emit({
+      type: "prompt_withdrawn",
+      conversationId: this.conversationId,
+      promptId,
+      runId: ticket.id,
+    });
   }
 
   /** 当前等待投递的浏览器 prompt（快照/恢复用）。 */

@@ -310,6 +310,14 @@ class FakeRuntime implements PiRuntimeLike {
           return result;
         });
       },
+      withdrawSteeringMessage: (message) => {
+        const queue = created.session.steeringAgentMessages;
+        const index = queue.indexOf(message);
+        if (index < 0) return false;
+        queue.splice(index, 1);
+        (created.session.getSteeringMessages() as string[]).splice(index, 1);
+        return true;
+      },
       activateExtensions: () => this.activate(options),
       activateExtensionErrors: (handler) => {
         activatedHandler = handler;
@@ -3857,6 +3865,132 @@ describe("PiConnection coordinated project view", () => {
     } finally {
       refreshGate.resolve();
       warmHandle.release();
+      await harness.cleanup();
+    }
+  });
+
+  it("withdraws synchronously under exact focus and broadcasts only the removed prompt", async () => {
+    const harness = await coordinatedConnectionHarness();
+    const started = deferred();
+    const finish = deferred();
+    const observerEvents: ServerEvent[] = [];
+    const observer = new PiConnection(
+      (event) => observerEvents.push(event),
+      harness.runtime,
+      async () => ({ coordinator: harness.coordinator, roles: harness.roles }),
+    );
+    try {
+      const focused = await initializeNewConversation(harness);
+      await observer.handle({
+        type: "initialize",
+        commandId: randomUUID(),
+        sessionId: SESSION_B,
+        cwd: harness.cwd,
+        conversation: { kind: "open", conversationId: focused.conversationId! },
+      });
+      const observerFocus = latestState(observerEvents);
+      const session = harness.runtime.created[0]!;
+      const nativePrompt = session.prompt.bind(session);
+      session.prompt = async (text, options) => {
+        if (options?.streamingBehavior === "steer") return nativePrompt(text, options);
+        options?.preflightResult?.("started");
+        session.isStreaming = true;
+        session.eventListener?.(nativeEvent({ type: "agent_start" }));
+        const initialMessage = agentMessage({ role: "user", content: text, timestamp: 1 });
+        session.persistentManager?.appendMessage(initialMessage);
+        session.eventListener?.(nativeEvent({ type: "message_end", message: initialMessage }));
+        started.resolve();
+        await finish.promise;
+        session.isStreaming = false;
+      };
+      const running = harness.connection.handle({
+        type: "prompt",
+        sessionId: SESSION_A,
+        conversationId: focused.conversationId!,
+        focusId: focused.focusId!,
+        runId: RUN_A,
+        text: "initial",
+      });
+      await started.promise;
+      const promptIds = [randomUUID(), randomUUID(), randomUUID()];
+      for (const promptId of promptIds) {
+        await harness.connection.handle({
+          type: "prompt",
+          sessionId: SESSION_A,
+          conversationId: focused.conversationId!,
+          focusId: focused.focusId!,
+          runId: randomUUID(),
+          promptId,
+          text: "same text",
+        });
+      }
+      const [first, , last] = session.steeringAgentMessages;
+      const command = {
+        type: "withdraw_prompt" as const,
+        sessionId: SESSION_A,
+        conversationId: focused.conversationId!,
+        focusId: focused.focusId!,
+        runId: RUN_A,
+        promptId: promptIds[1]!,
+        commandId: randomUUID(),
+      };
+      await expect(harness.connection.handle({
+        ...command, commandId: randomUUID(), focusId: observerFocus.focusId!,
+      })).rejects.toThrow("Conversation focus is stale");
+      await expect(harness.connection.handle({
+        ...command, commandId: randomUUID(), sessionId: SESSION_B,
+      })).rejects.toThrow("Session was not initialized");
+      await expect(harness.connection.handle({
+        ...command, commandId: randomUUID(), runId: RUN_B,
+      })).rejects.toThrow("exact agent run");
+      expect(session.steeringAgentMessages).toHaveLength(3);
+
+      const withdrawing = harness.connection.handle(command);
+      // No await: the active run still owns its operations queue.
+      expect(session.isStreaming).toBe(true);
+      expect(session.steeringAgentMessages).toEqual([first, last]);
+      await withdrawing;
+      expect(harness.events).toContainEqual({
+        type: "prompt_withdrawn",
+        sessionId: SESSION_A,
+        conversationId: focused.conversationId!,
+        focusId: focused.focusId!,
+        runId: RUN_A,
+        promptId: promptIds[1]!,
+      });
+      expect(observerEvents).toContainEqual({
+        type: "prompt_withdrawn",
+        sessionId: SESSION_B,
+        conversationId: focused.conversationId!,
+        focusId: observerFocus.focusId!,
+        runId: RUN_A,
+        promptId: promptIds[1]!,
+      });
+      expect(harness.events).toContainEqual({
+        type: "command_complete", operation: "withdraw_prompt",
+        sessionId: SESSION_A, commandId: command.commandId,
+      });
+      expect(observerEvents).not.toContainEqual(expect.objectContaining({
+        type: "command_complete", operation: "withdraw_prompt",
+      }));
+      await expect(harness.connection.handle(command)).rejects.toThrow("Command ID was already used");
+
+      await harness.connection.handle({ ...command, commandId: randomUUID(), promptId: promptIds[0]! });
+      const drainedMessage = session.steeringAgentMessages.shift()!;
+      await expect(harness.connection.handle({
+        ...command, commandId: randomUUID(), promptId: promptIds[2]!,
+      })).rejects.toThrow("already left the SDK steering queue");
+      session.persistentManager?.appendMessage(drainedMessage);
+      session.eventListener?.(nativeEvent({ type: "message_end", message: drainedMessage }));
+      await vi.waitFor(() => expect(harness.events).toContainEqual(expect.objectContaining({
+        type: "prompt_delivered", promptId: promptIds[2]!, runId: RUN_A,
+      })));
+      expect(harness.events.filter((event) => event.type === "prompt_withdrawn")).toHaveLength(2);
+      finish.resolve();
+      await running;
+    } finally {
+      finish.resolve();
+      await observer.dispose();
       await harness.cleanup();
     }
   });

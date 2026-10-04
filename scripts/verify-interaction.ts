@@ -198,7 +198,7 @@ async function main(): Promise<void> {
     await client.call("Page.navigate", { url: fixture.url });
     const ui = client;
     const received = (predicate: (payload: any) => boolean) => ui.frames.find((frame) => frame.direction === "received" && predicate(frame.payload))?.payload;
-    const sent = (text: string) => ui.frames.find((frame) => frame.direction === "sent" && frame.payload.type === "prompt" && frame.payload.text === text)?.payload;
+    const sent = (text: string, startIndex: number) => ui.frames.slice(startIndex).find((frame) => frame.direction === "sent" && frame.payload.type === "prompt" && frame.payload.text === text)?.payload;
     const click = async (selector: string) => {
       await waitFor(`enabled UI ${selector}`, () => ui.evaluate(`Boolean(document.querySelector(${JSON.stringify(selector)}) && !document.querySelector(${JSON.stringify(selector)}).disabled)`));
       await ui.evaluate(`document.querySelector(${JSON.stringify(selector)}).click()`);
@@ -210,10 +210,11 @@ async function main(): Promise<void> {
       await ui.call("Input.insertText", { text: value });
     };
     const send = async (text: string) => {
+      const startIndex = ui.frames.length;
       await waitFor("editable composer", () => ui.evaluate('Boolean(document.querySelector("textarea") && !document.querySelector("textarea").disabled)'));
       await input('textarea[aria-label="给 Pi 发送消息"]', text);
       await click('button[aria-label="发送"]');
-      return waitFor(`browser transport ${text}`, () => sent(text));
+      return waitFor(`browser transport ${text}`, () => sent(text, startIndex));
     };
 
     await waitFor("workbench hello", () => received((event) => event.type === "hello"));
@@ -260,11 +261,29 @@ async function main(): Promise<void> {
     await waitFor("pending UI feedback", () => ui.evaluate('document.body.innerText.includes("等待中") || document.body.innerText.includes("等待处理")'));
     evidence.admittedWasNotDelivered = true;
 
+    // Same text is not identity: withdraw the later slot, preserving the first
+    // slot (and any original images) through reconnect and durable delivery.
+    const duplicateCommand = await send(STEER_PROMPT);
+    assert.notEqual(duplicateCommand.promptId, steerCommand.promptId);
+    await waitFor("duplicate admission", () => received((event) => event.type === "prompt_admitted" && event.promptId === duplicateCommand.promptId));
+    await waitFor("two pending rows", () => ui.evaluate('document.querySelectorAll(".pending-admission-item").length === 2'));
+    await click(".pending-admission-item:last-child .pending-admission-withdraw");
+    const withdrawal = await waitFor("exact withdrawal command", () => ui.frames.find((frame) => frame.direction === "sent"
+      && frame.payload.type === "withdraw_prompt" && frame.payload.promptId === duplicateCommand.promptId)?.payload);
+    assert.equal(withdrawal.runId, busyCommand.runId);
+    await waitFor("authoritative withdrawal broadcast", () => received((event) => event.type === "prompt_withdrawn" && event.promptId === duplicateCommand.promptId && event.runId === busyCommand.runId));
+    await waitFor("source withdrawal receipt", () => received((event) => event.type === "command_complete" && event.operation === "withdraw_prompt" && event.commandId === withdrawal.commandId));
+    await waitFor("one retained pending row", () => ui.evaluate('document.querySelectorAll(".pending-admission-item").length === 1'));
+    assert(!received((event) => event.type === "prompt_delivered" && event.promptId === duplicateCommand.promptId));
+    evidence.withdrawal = { retainedPromptId: steerCommand.promptId, withdrawnPromptId: duplicateCommand.promptId, runId: withdrawal.runId, commandId: withdrawal.commandId };
+    console.log("E2E: exact same-text duplicate withdrawn while original slot remains queued");
+
     await fixture.disconnectBrowsers();
     const recovered = await waitFor("new exact reconnect snapshot with pending admission", () => received((event) => event.type === "conversation_snapshot"
       && event.conversationId === conversationId && event.sessionId !== admission.sessionId
       && event.pendingPrompts.some((pending: any) => pending.promptId === steerCommand.promptId)));
     assert.notEqual(recovered.focusId, admission.focusId);
+    assert.deepEqual(recovered.pendingPrompts.map((pending: any) => pending.promptId), [steerCommand.promptId]);
     await waitFor("reconnected history rendered", () => ui.evaluate('document.body.innerText.includes("FIRST RESPONSE")'));
     evidence.reconnect = {
       conversationId, oldSessionId: admission.sessionId, newSessionId: recovered.sessionId,
@@ -294,7 +313,8 @@ async function main(): Promise<void> {
     assert.equal(settlements.length, 2, "title must not start another host run");
     assert.deepEqual(new Set(settlements.map((entry) => entry.data.runId)), new Set([firstCommand.runId, busyCommand.runId]));
     evidence.titleDidNotStartAgentTurn = true;
-    assert.equal(ui.frames.filter((frame) => frame.direction === "sent" && frame.payload.type === "prompt").length, 3, "reconnect must not resend prompts");
+    assert.equal(ui.frames.filter((frame) => frame.direction === "sent" && frame.payload.type === "prompt").length, 4, "reconnect must not resend prompts");
+    assert(!received((event) => event.type === "prompt_delivered" && event.promptId === duplicateCommand.promptId), "withdrawn duplicate must never deliver");
     assert.deepEqual(ui.browserErrors, []);
     evidence.transitionMeasures = await ui.evaluate('performance.getEntriesByName("piweb.transition", "measure").map((entry) => ({ duration: entry.duration, detail: entry.detail }))');
     await writeFile(join(artifactDir, "conversation.jsonl"), finalDisk.raw);

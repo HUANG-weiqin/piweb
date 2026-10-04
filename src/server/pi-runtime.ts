@@ -26,6 +26,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import {
+  contentText,
   InMemoryModelsStore,
   type CredentialStore,
   type ModelsRefreshOptions,
@@ -250,6 +251,7 @@ function installSessionCacheWarmingOff(
 }
 
 interface SteeringCaptureAdapter extends SessionBoundaryAdapter {
+  withdraw(message: AgentMessage): boolean;
   capture<T>(
     onMessage: (message: AgentMessage) => void,
     operation: () => Promise<T>,
@@ -331,6 +333,26 @@ function installExtensionSessionManagerFacade(
 function installSteeringCaptureBoundary(
   session: AgentSession,
 ): SteeringCaptureAdapter {
+  // Pi 1.0.0 has no public single-message withdrawal API. Only this core
+  // queue still owns retractable messages; drain replaces its messages array.
+  const privateAgent = session.agent as unknown as {
+    steeringQueue: { messages: AgentMessage[] };
+  };
+  const privateSession = session as unknown as {
+    _steeringMessages: string[];
+    _emitQueueUpdate(): void;
+  };
+  const assertWithdrawalShape = (): void => {
+    if (
+      !Array.isArray(privateAgent.steeringQueue?.messages)
+      || !Array.isArray(privateSession._steeringMessages)
+      || !privateSession._steeringMessages.every((text) => typeof text === "string")
+      || typeof privateSession._emitQueueUpdate !== "function"
+    ) {
+      throw new Error("Unsupported Pi 1.0.0 steering withdrawal boundary");
+    }
+  };
+  assertWithdrawalShape();
   const nativeSteer = session.agent.steer;
   const captures = new AsyncLocalStorage<{
     active: boolean;
@@ -354,6 +376,28 @@ function installSteeringCaptureBoundary(
   }
 
   return {
+    withdraw(message): boolean {
+      assertWithdrawalShape();
+      const messages = privateAgent.steeringQueue.messages;
+      const index = messages.indexOf(message);
+      if (index < 0) return false;
+      if (messages.lastIndexOf(message) !== index) {
+        throw new Error("Pi steering identity occupies more than one queue slot");
+      }
+      const mirrorIndex = message.role === "user"
+        ? privateSession._steeringMessages.indexOf(contentText(message.content, ""))
+        : -1;
+      messages.splice(index, 1);
+      if (mirrorIndex >= 0) privateSession._steeringMessages.splice(mirrorIndex, 1);
+      try {
+        privateSession._emitQueueUpdate();
+      } catch (error) {
+        // The synchronous queue mutation has committed. Observer failure must
+        // not make the actor retain an admission that can no longer deliver.
+        console.error("Pi steering withdrawal committed; queue_update observer failed", error);
+      }
+      return true;
+    },
     async capture<T>(
       onMessage: (message: AgentMessage) => void,
       operation: () => Promise<T>,
@@ -478,6 +522,7 @@ export interface CreatedPiSession {
   modelRuntime: ModelRuntime;
   modelRegistry: ModelRegistry;
   releaseTurnBoundaryPause?(): void;
+  withdrawSteeringMessage(message: AgentMessage): boolean;
   captureSteeringMessage<T>(
     onMessage: (message: AgentMessage) => void,
     operation: () => Promise<T>,
@@ -1612,6 +1657,12 @@ export class PiRuntime implements PiRuntimeLike {
       modelRegistry: owner.registry,
       releaseTurnBoundaryPause: () => {
         turnBoundaryController?.releaseQueuePause();
+      },
+      withdrawSteeringMessage: (message) => {
+        if (!steeringCaptureAdapter) {
+          throw new Error("Pi steering identity boundary is not available");
+        }
+        return steeringCaptureAdapter.withdraw(message);
       },
       captureSteeringMessage: (onMessage, operation) => {
         if (!steeringCaptureAdapter) {

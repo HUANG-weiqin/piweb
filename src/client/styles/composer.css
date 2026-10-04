@@ -672,7 +672,7 @@
 
   .app-shell .pending-admission-item {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-columns: minmax(0, 1fr) auto auto;
     gap: 7px;
     padding: 6px 8px;
   }

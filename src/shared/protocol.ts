@@ -38,6 +38,8 @@ export const DEFAULT_COMPACTION_THRESHOLD_PERCENT = 70;
 export const MIN_COMPACTION_THRESHOLD_PERCENT = 20;
 export const MAX_COMPACTION_THRESHOLD_PERCENT = 90;
 export const MAX_TRANSITION_DIAGNOSTIC_PHASE_MS = 60 * 60 * 1_000;
+// v67: admitted browser prompts may be withdrawn by exact run/prompt identity;
+// successful withdrawals broadcast an exact-focus prompt_withdrawn event.
 // v65: Bash task completion notifications are bounded durable history items;
 // focused activity is session-scoped and no longer carries a runId.
 // v64: Bash cleanup notices are no longer written or projected; run-scoped
@@ -104,7 +106,7 @@ export const MAX_TRANSITION_DIAGNOSTIC_PHASE_MS = 60 * 60 * 1_000;
 // their OpenAI-compatible model list before saving.
 // v59: idle current-leaf fork copies LLM-effective context into a fresh host
 // lifecycle via `fork_conversation`; history anchors stay unsupported.
-export const PROTOCOL_VERSION = 65;
+export const PROTOCOL_VERSION = 67;
 export const OBSERVATION_FATAL_CLOSE_CODE = 4002;
 export const COLOR_SCHEMES = ["quiet-rebel", "classic-rebel"] as const;
 export type ColorScheme = typeof COLOR_SCHEMES[number];
@@ -665,6 +667,15 @@ const clientCommandUnionSchema = z.discriminatedUnion("type", [
     images: promptImagesSchema.optional(),
   }),
   z.object({
+    type: z.literal("withdraw_prompt"),
+    commandId: commandIdSchema,
+    sessionId: sessionIdSchema,
+    conversationId: conversationIdSchema,
+    focusId: focusIdSchema,
+    runId: runIdSchema,
+    promptId: z.string().uuid(),
+  }).strict(),
+  z.object({
     type: z.literal("abort"),
     sessionId: sessionIdSchema,
     conversationId: conversationIdSchema,
@@ -825,6 +836,7 @@ const ACKNOWLEDGED_COMMAND_OPERATIONS = [
   "set_api_key",
   "refresh_models",
   "steer",
+  "withdraw_prompt",
   "set_compaction_threshold",
   "set_service_tier",
   "compact_context",
@@ -1360,6 +1372,15 @@ export type ServerEvent =
       runId: string;
     }
   | {
+      /** The exact queued browser prompt was removed before SDK delivery began. */
+      type: "prompt_withdrawn";
+      sessionId: string;
+      conversationId: string;
+      focusId: string;
+      promptId: string;
+      runId: string;
+    }
+  | {
       type: "conversation_image";
       sessionId: string;
       conversationId: string;
@@ -1641,6 +1662,7 @@ const commandTypeSchema = z.enum([
   "fork_conversation",
   "prompt",
   "steer",
+  "withdraw_prompt",
   "abort",
   "extension_ui_response",
   "set_thinking",
@@ -2143,6 +2165,14 @@ const serverEventUnionSchema = z.discriminatedUnion("type", [
     promptId: z.string().uuid(),
     runId: runIdSchema,
   }).strict(),
+  z.object({
+    type: z.literal("prompt_withdrawn"),
+    sessionId: sessionIdSchema,
+    conversationId: conversationIdSchema,
+    focusId: focusIdSchema,
+    promptId: z.string().uuid(),
+    runId: runIdSchema,
+  }).strict(),
   conversationImageSchema.extend({
     type: z.literal("conversation_image"),
     sessionId: sessionIdSchema,
@@ -2416,7 +2446,7 @@ export const serverEventSchema: z.ZodType<ServerEvent> = serverEventUnionSchema.
     if (
       event.type === "error"
       && event.scope === "command"
-      && event.operation === "steer"
+      && (event.operation === "steer" || event.operation === "withdraw_prompt")
       && (
         event.sessionId === undefined
         || event.commandId === undefined
@@ -2427,7 +2457,7 @@ export const serverEventSchema: z.ZodType<ServerEvent> = serverEventUnionSchema.
     ) {
       context.addIssue({
         code: z.ZodIssueCode.custom,
-        message: "steer command errors require the complete command and run focus identity",
+        message: `${event.operation} command errors require the complete command and run focus identity`,
         path: ["focusId"],
       });
     }
@@ -2456,6 +2486,7 @@ export const serverEventSchema: z.ZodType<ServerEvent> = serverEventUnionSchema.
       && event.commandId
       && (
         event.operation === "steer"
+        || event.operation === "withdraw_prompt"
         || event.operation === "set_api_key"
         || event.operation === "refresh_models"
         || event.operation === "rename_conversation"

@@ -236,6 +236,12 @@ interface DirectPendingPrompt extends ActiveFocus {
   images: PromptImage[];
 }
 
+interface PendingPromptWithdrawal extends ActiveFocus {
+  runId: string;
+  promptId: string;
+  commandId: string;
+}
+
 interface PendingImageOpen extends ActiveFocus {
   commandId: string;
   messageId: string;
@@ -665,6 +671,12 @@ export function App() {
   };
   const [pendingPrompt, setPendingPrompt] = useState<DirectPendingPrompt>();
   const pendingPromptRef = useRef<DirectPendingPrompt | undefined>(undefined);
+  const [pendingPromptWithdrawal, setPendingPromptWithdrawal] = useState<PendingPromptWithdrawal>();
+  const pendingPromptWithdrawalRef = useRef<PendingPromptWithdrawal | undefined>(undefined);
+  const updatePendingPromptWithdrawal = (pending: PendingPromptWithdrawal | undefined) => {
+    pendingPromptWithdrawalRef.current = pending;
+    setPendingPromptWithdrawal(pending);
+  };
   const [pendingAbort, setPendingAbortState] = useState<PendingAbort>();
   const pendingAbortRef = useRef<PendingAbort | undefined>(undefined);
   const [pendingAdmissions, setPendingAdmissions] = useState<PendingAdmission[]>([]);
@@ -1347,6 +1359,7 @@ export function App() {
     preserveDraft = false,
   ) => {
     closePendingImageOpens();
+    updatePendingPromptWithdrawal(undefined);
     const pendingAbort = pendingAbortRef.current;
     if (
       pendingAbort
@@ -1443,6 +1456,7 @@ export function App() {
     }
   };
   const updateConversationReady = (ready: boolean) => {
+    if (!ready) updatePendingPromptWithdrawal(undefined);
     conversationReadyRef.current = ready;
     setConversationReady(ready);
   };
@@ -2528,7 +2542,7 @@ export function App() {
         completionSoundRef.current?.play();
       } else if (event.type === "prompt_admitted") {
         if (!matchesFocus(event.sessionId, event.conversationId, event.focusId)) return;
-        // busy 路径回执：消息已进 followUp 队列，清草稿并显示为等待中。
+        // busy 路径回执：消息已进 steering 队列，清草稿并显示为等待中。
         const pending = pendingPromptRef.current;
         if (
           pending
@@ -2548,6 +2562,17 @@ export function App() {
       } else if (event.type === "prompt_delivered") {
         if (!matchesFocus(event.sessionId, event.conversationId, event.focusId)) return;
         removePendingAdmission(event.promptId);
+        const pending = pendingPromptWithdrawalRef.current;
+        if (pending?.promptId === event.promptId && pending.runId === event.runId) {
+          setPromptNotice("消息已投递，无法撤回。");
+        }
+      } else if (event.type === "prompt_withdrawn") {
+        if (!matchesFocus(event.sessionId, event.conversationId, event.focusId)) return;
+        removePendingAdmission(event.promptId);
+        const pending = pendingPromptWithdrawalRef.current;
+        if (pending?.promptId === event.promptId && pending.runId === event.runId) {
+          updatePendingPromptWithdrawal(undefined);
+        }
       } else if (event.type === "conversation_image") {
         const pending = pendingImageOpensRef.current.get(event.commandId);
         if (!pending) return;
@@ -2623,6 +2648,7 @@ export function App() {
         ) {
           // 停止 = 取消未投递的等待中消息（与服务端 clearQueue 一致）
           clearPendingAdmissions();
+          updatePendingPromptWithdrawal(undefined);
         }
         const focus = focusRef.current;
         if (!focus) return;
@@ -2676,6 +2702,17 @@ export function App() {
         setAuth({});
       } else if (event.type === "command_complete") {
         if (event.sessionId !== sessionIdRef.current) return;
+        if (event.operation === "withdraw_prompt") {
+          const pending = pendingPromptWithdrawalRef.current;
+          if (!pending
+            || pending.sessionId !== event.sessionId
+            || pending.commandId !== event.commandId
+            || !matchesFocus(pending.sessionId, pending.conversationId, pending.focusId)
+          ) return;
+          removePendingAdmission(pending.promptId);
+          updatePendingPromptWithdrawal(undefined);
+          return;
+        }
         if (event.operation === "rename_conversation") {
           for (const [key, presentation] of conversationRenamePresentationsRef.current) {
             if (
@@ -2965,6 +3002,21 @@ export function App() {
           return;
         }
         if (event.sessionId && event.sessionId !== sessionIdRef.current) return;
+        if (event.operation === "withdraw_prompt") {
+          const pending = pendingPromptWithdrawalRef.current;
+          if (!pending
+            || event.scope !== "command"
+            || pending.sessionId !== event.sessionId
+            || pending.commandId !== event.commandId
+            || pending.runId !== event.runId
+            || pending.conversationId !== event.conversationId
+            || pending.focusId !== event.focusId
+            || !matchesFocus(pending.sessionId, pending.conversationId, pending.focusId)
+          ) return;
+          updatePendingPromptWithdrawal(undefined);
+          setPromptNotice(`撤回失败：${event.message}`);
+          return;
+        }
         if (
           event.operation === "rename_conversation"
           && event.sessionId
@@ -3355,6 +3407,10 @@ export function App() {
         updateSessionControlReady(undefined);
         markSyncingRenamesUnknown();
         updatePendingAbort(undefined);
+        if (pendingPromptWithdrawalRef.current) {
+          updatePendingPromptWithdrawal(undefined);
+          setPromptNotice("连接已断开，撤回结果未确认；重连后请核对等待中消息。");
+        }
         if (pendingColorSchemeRef.current) {
           updatePendingColorScheme(undefined);
           setColorSchemeSaveError("连接已断开，无法确认配色是否保存；重连后请重试。");
@@ -3936,6 +3992,32 @@ export function App() {
     }
     return sendPrompt(trimmed, images);
   };
+  const withdrawPrompt = (promptId: string) => {
+    const focus = focusRef.current;
+    const activeRun = state?.activeRun;
+    if (!online || !settingsEnabled || !conversationReadyRef.current
+      || pendingFocusRef.current || pendingPromptWithdrawalRef.current
+      || pendingAbortRef.current || !focus || !state || !stateMatchesFocus(state, focus)
+      || !activeRun || (activeRun.phase !== "running" && activeRun.phase !== "waiting")
+      || !pendingAdmissionsRef.current.some((admission) => admission.promptId === promptId)
+    ) return;
+    const pending = { ...focus, runId: activeRun.id, promptId, commandId: crypto.randomUUID() };
+    updatePendingPromptWithdrawal(pending);
+    setPromptNotice("");
+    const sent = send({
+      type: "withdraw_prompt",
+      sessionId: focus.sessionId,
+      conversationId: focus.conversationId,
+      focusId: focus.focusId,
+      runId: pending.runId,
+      promptId,
+      commandId: pending.commandId,
+    });
+    if (!sent && pendingPromptWithdrawalRef.current === pending) {
+      updatePendingPromptWithdrawal(undefined);
+      setPromptNotice("撤回请求未发送，等待中消息已保留，请重试。");
+    }
+  };
   const abortCurrentRun = () => {
     if (!conversationReadyRef.current || pendingFocusRef.current) return;
     const runId = state?.activeRun?.id || outstandingRunIdRef.current;
@@ -3958,7 +4040,10 @@ export function App() {
       conversationId: focus.conversationId,
       focusId: focus.focusId,
       runId,
-    })) updatePendingAbort(pending);
+    })) {
+      updatePendingAbort(pending);
+      updatePendingPromptWithdrawal(undefined);
+    }
   };
   const focusConversation = (conversationId: string) => {
     const sessionId = sessionIdRef.current;
@@ -4778,6 +4863,7 @@ export function App() {
   const handleChatSend = useLatestCallback((text: string, images: PromptImage[]) =>
     submitPrompt(text, images));
   const handleChatAbort = useLatestCallback(abortCurrentRun);
+  const handleChatWithdrawPrompt = useLatestCallback(withdrawPrompt);
   const handleChatSettings = useLatestCallback((
     resolveReturnFocus?: () => HTMLElement | null,
   ) => {
@@ -5491,6 +5577,8 @@ export function App() {
               draftScopeKey={draftScope ? pendingConversationKey(draftScope) : undefined}
               submitting={Boolean(pendingPrompt)}
               pendingAdmissions={pendingAdmissions}
+              withdrawingPromptId={pendingPromptWithdrawal?.promptId}
+              onWithdrawPrompt={handleChatWithdrawPrompt}
               promptNotice={promptNotice || undefined}
               onDraftChange={handleChatDraftChange}
               onImagesChange={handleChatImagesChange}
