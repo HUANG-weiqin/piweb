@@ -739,6 +739,55 @@ describe("isAllowedOrigin", () => {
     await Promise.all([socketServer.close(), httpClosed, socketClosed]);
   });
 
+  it("accepts a 24 MiB image command frame and closes at one byte over the transport limit", async () => {
+    const server = createServer();
+    const socketServer = attachSocketServer(server, "E:\\work", new SocketTestRuntime());
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("server did not bind a TCP port");
+    const socket = new WebSocket(`ws://127.0.0.1:${address.port}/ws`, {
+      origin: `http://127.0.0.1:${address.port}`,
+    });
+    try {
+      await nextEvent(socket);
+      const sessionId = randomUUID();
+      const runId = randomUUID();
+      const data = Buffer.alloc(8 * 1024 * 1024).toString("base64");
+      const payload = JSON.stringify({
+        type: "prompt",
+        sessionId,
+        conversationId: randomUUID(),
+        focusId: randomUUID(),
+        runId,
+        promptId: randomUUID(),
+        text: "",
+        images: Array(2).fill({ mimeType: "image/png", data }),
+      });
+      const maximumBytes = 24 * 1024 * 1024;
+      const response = Promise.race([
+        nextEvent(socket),
+        new Promise<never>((_resolve, reject) => socket.once("close", () => (
+          reject(new Error("A legal image command closed the socket"))
+        ))),
+      ]);
+      socket.send(payload + " ".repeat(maximumBytes - Buffer.byteLength(payload)));
+      // An uninitialized session is rejected by the command handler, not the frame/schema gate.
+      await expect(response).resolves.toMatchObject({
+        type: "error", scope: "command", operation: "prompt", sessionId, runId,
+      });
+      expect(socket.readyState).toBe(WebSocket.OPEN);
+      const closed = new Promise<number>((resolve) => socket.once("close", resolve));
+      socket.send("x".repeat(maximumBytes + 1));
+      await expect(closed).resolves.toBe(1009);
+    } finally {
+      socket.terminate();
+      await socketServer.close();
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => error ? reject(error) : resolve());
+      });
+    }
+  }, 30_000);
+
   it("negotiates the versioned protocol and scopes malformed command errors", async () => {
     const server = createServer();
     const runtime = new SocketTestRuntime();

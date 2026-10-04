@@ -2,7 +2,6 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { MAX_MESSAGE_BYTES } from "../shared/protocol.js";
 import {
   buildDirectoryListing,
   listDirectory,
@@ -82,7 +81,7 @@ describe("listDirectory", () => {
     expect(listing.truncated).toBe(true);
   });
 
-  it("keeps long listings below the socket message limit", () => {
+  it("keeps long listings below 1 MB independently of the image upload frame limit", () => {
     const listing = buildDirectoryListing(
       "E:\\work",
       "E:\\",
@@ -100,6 +99,6 @@ describe("listDirectory", () => {
     expect(listing.truncated).toBe(true);
     expect(listing.directories.length).toBeLessThan(500);
     expect(Buffer.byteLength(JSON.stringify(event), "utf8"))
-      .toBeLessThan(MAX_MESSAGE_BYTES);
+      .toBeLessThan(1_000_000);
   });
 });

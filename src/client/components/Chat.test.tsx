@@ -1119,6 +1119,78 @@ describe("Chat", () => {
     expect(onImagesChange).toHaveBeenCalledWith([]);
   });
 
+  it("keeps duplicate image attachments independently removable without colliding preview keys", () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const image = { mimeType: "image/png" as const, data: "iVBORw0KGgo=" };
+    const onImagesChange = vi.fn();
+    const rendered = render(view(emptyChat, "", undefined, {
+      draftImages: [image, image], onImagesChange,
+    }));
+    expect(screen.getAllByRole("img")).toHaveLength(2);
+    fireEvent.click(screen.getByRole("button", { name: "移除图片 1" }));
+    expect(onImagesChange).toHaveBeenCalledWith([image]);
+    rendered.rerender(view(emptyChat, "", undefined, { draftImages: [image] }));
+    expect(screen.getByRole("img", { name: "待发送图片 1" })).toBeVisible();
+    expect(screen.queryByRole("img", { name: "待发送图片 2" })).not.toBeInTheDocument();
+    expect(consoleError).not.toHaveBeenCalled();
+  });
+
+  it("accepts two original 8 MiB images and rejects one extra byte against the latest draft", async () => {
+    const bytes = new Uint8Array(8 * 1024 * 1024);
+    const data = Buffer.from(bytes).toString("base64");
+    const readAsDataURL = vi.fn();
+    vi.stubGlobal("FileReader", class {
+      result = "";
+      onload?: () => void;
+      readAsDataURL(file: File) {
+        readAsDataURL(file);
+        this.result = `data:image/png;base64,${file.size === 1 ? "AA==" : data}`;
+        this.onload?.();
+      }
+    });
+    const onImagesChange = vi.fn();
+    render(view(emptyChat, "", undefined, { onImagesChange }));
+    const textarea = screen.getByRole("textbox", { name: "给 Pi 发送消息" });
+    fireEvent.paste(textarea, {
+      clipboardData: { files: [
+        new File([bytes], "a.png", { type: "image/png" }),
+        new File([bytes], "b.png", { type: "image/png" }),
+      ] },
+    });
+    await waitFor(() => expect(onImagesChange).toHaveBeenCalledOnce());
+    expect(onImagesChange.mock.calls[0]![0]).toEqual([
+      { mimeType: "image/png", data },
+      { mimeType: "image/png", data },
+    ]);
+    expect(readAsDataURL).toHaveBeenCalledTimes(2);
+
+    fireEvent.paste(textarea, {
+      clipboardData: { files: [new File(["A"], "c.png", { type: "image/png" })] },
+    });
+    await waitFor(() => expect(screen.getByRole("alert"))
+      .toHaveTextContent("图片合计最多 16 MiB。"));
+    expect(onImagesChange).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    { sizes: [8 * 1024 * 1024 + 1], message: "单张图片最多 8 MiB。" },
+    { sizes: [8 * 1024 * 1024, 8 * 1024 * 1024, 1], message: "图片合计最多 16 MiB。" },
+    { sizes: [1, 1, 1, 1, 1], message: "每条消息最多附加 4 张图片。" },
+  ])("rejects oversized attachments before reading files: $message", async ({ sizes, message }) => {
+    const reader = vi.fn();
+    vi.stubGlobal("FileReader", reader);
+    const onImagesChange = vi.fn();
+    render(view(emptyChat, "", undefined, { onImagesChange }));
+    fireEvent.paste(screen.getByRole("textbox", { name: "给 Pi 发送消息" }), {
+      clipboardData: { files: sizes.map((size, index) => (
+        new File([new Uint8Array(size)], `${index}.png`, { type: "image/png" })
+      )) },
+    });
+    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent(message));
+    expect(reader).not.toHaveBeenCalled();
+    expect(onImagesChange).not.toHaveBeenCalled();
+  });
+
   it("serializes concurrent image reads against the latest draft", async () => {
     class ControlledFileReader {
       static pending: ControlledFileReader[] = [];

@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
-import { mkdtemp, realpath, rm } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type {
@@ -464,9 +464,10 @@ function configureOAuth(
 async function coordinatedConnectionHarness(
   runtime = new FakeRuntime(),
   monotonicNow?: () => number,
+  existingCwd?: string,
 ) {
   const cwd = await realpath(
-    await temporaryDirectory("piweb-coordinated-"),
+    existingCwd ?? await temporaryDirectory("piweb-coordinated-"),
   );
   const model = {
     provider: "test",
@@ -8017,6 +8018,101 @@ describe("PiConnection coordinated project view", () => {
       await harness.cleanup();
     }
   });
+
+  it("cold-reopens 16 MiB of durable user images with marker-only history and exact one-shot bytes", async () => {
+    const harness = await coordinatedConnectionHarness();
+    let originalClosed = false;
+    let reopened: CoordinatedHarness | undefined;
+    try {
+      const focused = await initializeNewConversation(harness);
+      const manager = harness.runtime.created[0]!.persistentManager!;
+      const bytes = Buffer.alloc(8 * 1024 * 1024);
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(bytes);
+      const firstData = bytes.toString("base64");
+      bytes[bytes.length - 1] = 1;
+      const secondData = bytes.toString("base64");
+      const images = [firstData, secondData].map((data) => ({
+        type: "image" as const, mimeType: "image/png", data,
+      }));
+      const messageId = manager.appendMessage({ role: "user", content: images, timestamp: 1 });
+      manager.appendMessage(agentMessage({
+        role: "assistant",
+        content: [{ type: "text", text: "Images received." }],
+        api: "openai-responses",
+        provider: "test",
+        model: "model",
+        stopReason: "stop",
+        usage: {
+          input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        },
+        timestamp: 2,
+      }));
+      const file = manager.getSessionFile();
+      if (!file) throw new Error("session was not persisted");
+      await harness.cleanup();
+      originalClosed = true;
+      const raw = await readFile(file, "utf8");
+      expect(Buffer.byteLength(raw)).toBeGreaterThan(16 * 1024 * 1024);
+      expect(raw.includes(firstData)).toBe(true);
+      expect(raw.includes(secondData)).toBe(true);
+
+      // Fresh coordinator/store/runtime owners must reconstruct the session from disk, not memory.
+      reopened = await coordinatedConnectionHarness(new FakeRuntime(), undefined, harness.cwd);
+      await reopened.connection.handle({
+        type: "initialize",
+        commandId: randomUUID(),
+        sessionId: SESSION_B,
+        cwd: harness.cwd,
+        conversation: { kind: "open", conversationId: focused.conversationId! },
+      });
+      const restored = latestState(reopened.events);
+      expect(restored.conversationId).toBe(focused.conversationId);
+      const snapshot = reopened.events.findLast((event) => event.type === "conversation_snapshot");
+      if (!snapshot || snapshot.type !== "conversation_snapshot") throw new Error("history was not restored");
+      const imageMessage = snapshot.items.find((item) => item.kind === "message" && item.id === messageId);
+      if (!imageMessage || imageMessage.kind !== "message") throw new Error("image message was not restored");
+      expect(imageMessage.text).toContain("[图片]");
+      expect(imageMessage.imageRefs?.map(({ source }) => source)).toEqual([
+        { messageId, imageOrdinal: 0 }, { messageId, imageOrdinal: 1 },
+      ]);
+      const serializedSnapshot = JSON.stringify(parseServerEvent(snapshot));
+      expect(Buffer.byteLength(serializedSnapshot)).toBeLessThan(64 * 1024);
+      expect(serializedSnapshot.includes(firstData)).toBe(false);
+      expect(serializedSnapshot.includes(secondData)).toBe(false);
+
+      for (const [imageOrdinal, data] of [firstData, secondData].entries()) {
+        const commandId = randomUUID();
+        await reopened.connection.handle({
+          type: "open_image",
+          commandId,
+          sessionId: SESSION_B,
+          conversationId: restored.conversationId!,
+          focusId: restored.focusId!,
+          messageId,
+          imageOrdinal,
+        });
+        const response = reopened.events.findLast((event) => event.type === "conversation_image");
+        expect(response).toEqual({
+          type: "conversation_image",
+          commandId,
+          sessionId: SESSION_B,
+          conversationId: restored.conversationId,
+          focusId: restored.focusId,
+          messageId,
+          imageOrdinal,
+          mimeType: "image/png",
+          data,
+        });
+        expect(parseServerEvent(JSON.stringify(response))).toMatchObject({
+          type: "conversation_image", imageOrdinal, data,
+        });
+      }
+    } finally {
+      await reopened?.cleanup();
+      if (!originalClosed) await harness.cleanup();
+    }
+  }, 30_000);
 
   it("settles role CRUD with the exact command identity", async () => {
     const harness = await coordinatedConnectionHarness();

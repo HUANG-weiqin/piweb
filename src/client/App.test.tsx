@@ -9796,6 +9796,34 @@ describe("App", () => {
     expect(screen.getByRole("status", { name: "需要处理" })).toBeInTheDocument();
   });
 
+  it("sends 16 MiB of original image-only attachments without the old 1 MB frame rejection", async () => {
+    startFocusReplacementProject();
+    const bytes = new Uint8Array(8 * 1024 * 1024);
+    bytes.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    const data = Buffer.from(bytes).toString("base64");
+    vi.stubGlobal("FileReader", class {
+      result = `data:image/png;base64,${data}`;
+      onload?: () => void;
+      readAsDataURL() { this.onload?.(); }
+    });
+    fireEvent.paste(screen.getByRole("textbox", { name: "给 Pi 发送消息" }), {
+      clipboardData: { files: [
+        new File([bytes], "a.png", { type: "image/png" }),
+        new File([bytes], "b.png", { type: "image/png" }),
+      ] },
+    });
+    await waitFor(() => expect(screen.getByRole("img", { name: "待发送图片 2" })).toBeVisible());
+    expect(screen.getByRole("img", { name: "待发送图片 1" }).getAttribute("src"))
+      .toBe(`data:image/png;base64,${data}`);
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    const prompt = latestCommand("prompt");
+    expect(prompt.text).toBe("");
+    expect(prompt.images?.map((image) => image.data)).toEqual([data, data]);
+    expect(Buffer.byteLength(JSON.stringify(prompt))).toBeGreaterThan(1_000_000);
+    expect(Buffer.byteLength(JSON.stringify(prompt))).toBeLessThan(24 * 1024 * 1024);
+    expect(screen.queryByText(/超过单条传输上限/)).not.toBeInTheDocument();
+  });
+
   it("isolates and restores text-and-image drafts across an A-B-A focus change", async () => {
     const sessionId = startFocusReplacementProject([
       conversationSummary(CONVERSATION_B, "B"),

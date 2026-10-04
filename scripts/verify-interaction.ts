@@ -227,7 +227,35 @@ async function main(): Promise<void> {
     const conversationId = initialSnapshot.conversationId;
     console.log("E2E: browser initialized with authoritative history");
 
+    const imageBytes = Buffer.alloc(8 * 1024 * 1024);
+    // Valid 1x1 PNG plus inert trailing bytes exercises original-file size without lossy resizing.
+    const pngData = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+    Buffer.from(pngData, "base64").copy(imageBytes);
+    const pasteImages = async (sizes: number[]) => {
+      await ui.evaluate(`(() => {
+        const png = Uint8Array.from(atob(${JSON.stringify(pngData)}), (character) => character.charCodeAt(0));
+        const clipboardData = new DataTransfer();
+        ${JSON.stringify(sizes)}.forEach((size, index) => {
+          const bytes = new Uint8Array(size);
+          bytes.set(png);
+          clipboardData.items.add(new File([bytes], index + ".png", { type: "image/png" }));
+        });
+        document.querySelector('textarea[aria-label="给 Pi 发送消息"]').dispatchEvent(
+          new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData }),
+        );
+      })()`);
+    };
+    await waitFor("editable image composer", () => ui.evaluate('Boolean(document.querySelector("textarea") && !document.querySelector("textarea").disabled)'));
+    await pasteImages([imageBytes.length + 1]);
+    await waitFor("8 MiB + 1 rejected without a prompt", () => ui.evaluate('document.body.innerText.includes("单张图片最多 8 MiB。")'));
+    assert.equal(ui.frames.filter((frame) => frame.direction === "sent" && frame.payload.type === "prompt").length, 0);
+    await pasteImages([imageBytes.length, imageBytes.length]);
+    await waitFor("two original images decoded and previewed", () => ui.evaluate('document.querySelectorAll(".composer-attachment img").length === 2 && [...document.querySelectorAll(".composer-attachment img")].every((image) => image.complete && image.naturalWidth === 1)'));
     const firstCommand = await send(FIRST_PROMPT);
+    const originalData = imageBytes.toString("base64");
+    assert.deepEqual(firstCommand.images.map((image: any) => image.data), [originalData, originalData]);
+    const imageFrameBytes = Buffer.byteLength(JSON.stringify(firstCommand));
+    assert(imageFrameBytes > 1_000_000 && imageFrameBytes < 24 * 1024 * 1024);
     assert.equal(firstCommand.conversationId, conversationId);
     await waitFor("host run_queued", () => received((event) => event.type === "session_event" && event.runId === firstCommand.runId && event.event.type === "run_queued"));
     await waitFor("first model call while title gate is closed", () => fixture.log.some((event) => event.kind === "model_requested" && event.text?.includes(FIRST_PROMPT)));
@@ -244,7 +272,10 @@ async function main(): Promise<void> {
     assert.equal(titleRequest.transport, firstModelRequest.transport, "title inherits session transport");
     evidence.titleSessionAttribution = { sessionId: titleRequest.sessionId, transport: titleRequest.transport };
     assert(firstDisk.entries.some((entry) => entry.customType === "piweb.run_settlement.v1" && entry.data.runId === firstCommand.runId && entry.data.outcome === "completed"));
-    assert.equal(firstDisk.entries.filter((entry) => entry.message?.role === "user" && entryText(entry) === FIRST_PROMPT).length, 1);
+    const firstUsers = firstDisk.entries.filter((entry) => entry.message?.role === "user" && entryText(entry) === FIRST_PROMPT);
+    assert.equal(firstUsers.length, 1);
+    const firstUser = firstUsers[0];
+    assert.deepEqual(firstUser.message.content.filter((part: any) => part.type === "image").map((image: any) => image.data), [originalData, originalData], "real SDK persists both original images unchanged");
     assert(firstDisk.entries.some((entry) => entry.message?.role === "assistant" && entryText(entry).includes("FIRST RESPONSE")));
     await waitFor("first response rendered", () => ui.evaluate('document.body.innerText.includes("FIRST RESPONSE")'));
     evidence.titleDidNotGateFirstRun = true;
@@ -252,7 +283,10 @@ async function main(): Promise<void> {
 
     const busyCommand = await send(BUSY_PROMPT);
     await waitFor("held streaming model call", () => fixture.log.some((event) => event.kind === "model_requested" && event.text?.includes(BUSY_PROMPT)));
+    await pasteImages([imageBytes.length]);
+    await waitFor("original image ready for busy steering", () => ui.evaluate('Boolean(document.querySelector(".composer-attachment img")?.naturalWidth === 1)'));
     const steerCommand = await send(STEER_PROMPT);
+    assert.deepEqual(steerCommand.images.map((image: any) => image.data), [originalData]);
     const admission = await waitFor("host steering admission", () => received((event) => event.type === "prompt_admitted" && event.promptId === steerCommand.promptId));
     assert.equal(admission.conversationId, conversationId);
     assert(!received((event) => event.type === "prompt_delivered" && event.promptId === steerCommand.promptId));
@@ -290,6 +324,26 @@ async function main(): Promise<void> {
       oldFocusId: admission.focusId, newFocusId: recovered.focusId, pendingPromptId: steerCommand.promptId,
     };
     console.log("E2E: busy admission recovered in a new exact snapshot, not yet delivered");
+    const restoredImage = recovered.items.find((item: any) => item.kind === "message" && item.id === firstUser.id);
+    assert.deepEqual(restoredImage.imageRefs.map((ref: any) => ref.source), [
+      { messageId: firstUser.id, imageOrdinal: 0 }, { messageId: firstUser.id, imageOrdinal: 1 },
+    ]);
+    assert(!JSON.stringify(recovered).includes(originalData), "history contains markers, never image bytes");
+    await ui.call("Runtime.evaluate", {
+      expression: 'document.querySelector(\'button[aria-label="在新标签页中打开图片 1"]\').click()',
+      userGesture: true,
+    });
+    const imageResponse = await waitFor("exact durable image response after reconnect", () => received((event) => (
+      event.type === "conversation_image" && event.sessionId === recovered.sessionId
+      && event.focusId === recovered.focusId && event.messageId === firstUser.id && event.imageOrdinal === 0
+    )));
+    assert.equal(imageResponse.data, originalData);
+    evidence.imageUpload = {
+      count: 2, bytesEach: imageBytes.length, aggregateBytes: imageBytes.length * 2,
+      frameBytes: imageFrameBytes, oversizedRejected: true, originalSdkBytesPersisted: true,
+      markerOnlyHistoryRestored: true, exactImageReadAfterReconnect: true,
+    };
+    console.log("E2E: two original 8 MiB images persisted, restored as markers and opened byte-exactly");
 
     fixture.releaseBusyTurn();
     const delivered = await waitFor("raw durable user delivery", () => received((event) => event.type === "prompt_delivered" && event.promptId === steerCommand.promptId));
@@ -304,6 +358,9 @@ async function main(): Promise<void> {
     for (const prompt of [FIRST_PROMPT, BUSY_PROMPT, STEER_PROMPT]) {
       assert.equal(finalDisk.entries.filter((entry) => entry.message?.role === "user" && entryText(entry) === prompt).length, 1, `one durable user entry for ${prompt}`);
     }
+    const steeringUser = finalDisk.entries.find((entry) => entry.message?.role === "user" && entryText(entry) === STEER_PROMPT);
+    assert.deepEqual(steeringUser.message.content.filter((part: any) => part.type === "image").map((image: any) => image.data), [originalData], "busy steering persists the accepted image unchanged exactly once");
+    evidence.steeringImageBytesPersisted = imageBytes.length;
     assert(finalDisk.entries.some((entry) => entry.message?.role === "assistant" && entryText(entry).includes("FOLLOW-UP RESPONSE")));
     assert(finalDisk.entries.some((entry) => entry.type === "session_info" && entry.name === TITLE));
     assert.equal(fixture.log.filter((event) => event.kind === "title_requested").length, 1);

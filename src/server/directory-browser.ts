@@ -1,16 +1,14 @@
 import { opendir, stat } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import type { Dirent } from "node:fs";
-import {
-  MAX_MESSAGE_BYTES,
-  type DirectoryListing,
-} from "../shared/protocol.js";
+import type { DirectoryListing } from "../shared/protocol.js";
 import { validateCwd } from "./cwd.js";
 
 const MAX_DIRECTORIES = 500;
 const MAX_DIRECTORY_SCAN_ENTRIES = MAX_DIRECTORIES * 4;
 const MAX_DIRECTORY_STAT_CONCURRENCY = 16;
-const MAX_LISTING_BYTES = MAX_MESSAGE_BYTES - (64 * 1024);
+// Directory observations keep their own small budget, independent of image upload frames.
+const MAX_LISTING_BYTES = 1_000_000 - (64 * 1024);
 const MAX_PATH_LENGTH = 4096;
 
 async function toDirectory(

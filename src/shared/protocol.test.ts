@@ -5,6 +5,7 @@ import {
   MAX_MESSAGE_BYTES,
   MAX_MODEL_REFERENCE_BYTES,
   MAX_PROJECT_CONVERSATION_NAME_CHARACTERS,
+  MAX_PROMPT_CHARACTERS,
   MAX_ROLE_COUNT,
   MAX_ROLE_DESCRIPTION_CHARACTERS,
   MAX_ROLE_NAME_CHARACTERS,
@@ -705,6 +706,66 @@ describe("parseClientCommand", () => {
       text: "",
       images: [{ mimeType: "image/png", data: "not base64" }],
     })).toThrow();
+  });
+
+  it.each(["prompt", "steer"] as const)(
+    "bounds %s images independently at 8 MiB each, 16 MiB total and four images",
+    (type) => {
+      const image = (bytes: number) => ({
+        mimeType: "image/png",
+        data: Buffer.alloc(bytes).toString("base64"),
+      });
+      const command = {
+        type,
+        sessionId,
+        conversationId,
+        focusId,
+        runId,
+        ...(type === "prompt" ? { promptId } : { commandId }),
+        text: "",
+      };
+      const eightMiB = image(8 * 1024 * 1024);
+      expect(parseClientCommand({ ...command, images: [eightMiB] }))
+        .toMatchObject({ images: { length: 1 } });
+      expect(parseClientCommand({ ...command, images: [eightMiB, eightMiB] }))
+        .toMatchObject({ images: { length: 2 } });
+      expect(parseClientCommand({
+        ...command,
+        images: Array(4).fill(image(4 * 1024 * 1024)),
+      })).toMatchObject({ images: { length: 4 } });
+      // 8 MiB + 1 has the same Base64 length as 8 MiB; decoded size must still reject it.
+      expect(() => parseClientCommand({
+        ...command, images: [image(8 * 1024 * 1024 + 1)],
+      })).toThrow("bounded payload");
+      expect(() => parseClientCommand({
+        ...command, images: [eightMiB, eightMiB, image(1)],
+      })).toThrow("bytes in total");
+      expect(() => parseClientCommand({
+        ...command, images: Array(5).fill(image(1)),
+      })).toThrow();
+    },
+  );
+
+  it("fits 16 MiB of original images plus maximally escaped prompt text in 24 MiB", () => {
+    const data = Buffer.alloc(4 * 1024 * 1024).toString("base64");
+    const payload = JSON.stringify({
+      type: "prompt",
+      sessionId,
+      conversationId,
+      focusId,
+      runId,
+      promptId,
+      text: "\u0000".repeat(MAX_PROMPT_CHARACTERS),
+      images: Array(4).fill({ mimeType: "image/png", data }),
+    });
+    expect(MAX_MESSAGE_BYTES).toBe(24 * 1024 * 1024);
+    const bytes = Buffer.byteLength(payload, "utf8");
+    expect(bytes).toBeLessThan(MAX_MESSAGE_BYTES);
+    const exactFrame = payload + " ".repeat(MAX_MESSAGE_BYTES - bytes);
+    expect(parseClientCommand(exactFrame)).toMatchObject({
+      type: "prompt", images: { length: 4 },
+    });
+    expect(() => parseClientCommand(exactFrame + " ")).toThrow("too large");
   });
 
   it("rejects the removed set_tool_mode command", () => {
@@ -1724,8 +1785,8 @@ describe("parseClientCommand", () => {
     })).toThrow();
   });
 
-  it("keeps client frames at 1 MB while accepting a bounded full role catalog", () => {
-    const systemPrompt = "x".repeat(MAX_ROLE_SYSTEM_PROMPT_BYTES);
+  it("uses independent client and server frame budgets for a maximally escaped role catalog", () => {
+    const systemPrompt = "\u0000".repeat(MAX_ROLE_SYSTEM_PROMPT_BYTES);
     const roles = Array.from({ length: MAX_ROLE_COUNT }, (_, index) => ({
       id: index === 0
         ? "default"

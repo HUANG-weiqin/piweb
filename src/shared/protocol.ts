@@ -1,6 +1,7 @@
 import { z } from "zod";
 
-export const MAX_MESSAGE_BYTES = 1_000_000;
+/** Complete client JSON frames, including Base64 images and escaped text. */
+export const MAX_MESSAGE_BYTES = 24 * 1024 * 1024;
 export const MAX_SERVER_EVENT_BYTES = 64 * 1024 * 1024;
 export const MAX_ROLE_COUNT = 64;
 export const MAX_ROLE_NAME_CHARACTERS = 80;
@@ -16,9 +17,10 @@ export const MAX_PROJECT_CONVERSATION_PREVIEW_CHARACTERS = 500;
 export const MAX_SESSION_MESSAGE_SUMMARY_CHARACTERS = 500;
 export const MAX_SESSION_MESSAGE_SUMMARY_BYTES = 2 * 1024;
 export const MAX_PROMPT_CHARACTERS = 200_000;
-/** 每条浏览器 prompt 最多携带四张小型本地图片，合计解码后不超过 512 KiB。 */
+/** 浏览器 prompt/steer 最多四张原图；解码后单张 8 MiB、合计 16 MiB。 */
 export const MAX_PROMPT_IMAGE_COUNT = 4;
-export const MAX_PROMPT_IMAGE_BYTES = 512 * 1024;
+export const MAX_PROMPT_IMAGE_FILE_BYTES = 8 * 1024 * 1024;
+export const MAX_PROMPT_IMAGE_BYTES = 16 * 1024 * 1024;
 /** One-shot durable images cover the full bounded desktop-capture payload. */
 export const MAX_CONVERSATION_IMAGE_BYTES = 16 * 1024 * 1024;
 export const MAX_CONVERSATION_IMAGE_DATA_CHARACTERS =
@@ -42,6 +44,8 @@ export const MAX_TRANSITION_DIAGNOSTIC_PHASE_MS = 60 * 60 * 1_000;
 // manual withdrawal from abort so browsers can retain original input for recovery.
 // v67: admitted browser prompts may be withdrawn by exact run/prompt identity;
 // successful withdrawals broadcast an exact-focus prompt_withdrawn event.
+// v66: original prompt/steer images are bounded at 8 MiB each, 16 MiB total
+// and four images; complete client JSON frames allow 24 MiB for Base64 and text.
 // v65: Bash task completion notifications are bounded durable history items;
 // focused activity is session-scoped and no longer carries a runId.
 // v64: Bash cleanup notices are no longer written or projected; run-scoped
@@ -365,7 +369,7 @@ export function promptImageMimeType(
 }
 const promptImageMimeTypeSchema = z.enum(PROMPT_IMAGE_MIME_TYPES);
 const MAX_PROMPT_IMAGE_DATA_CHARACTERS =
-  Math.ceil(MAX_PROMPT_IMAGE_BYTES / 3) * 4;
+  Math.ceil(MAX_PROMPT_IMAGE_FILE_BYTES / 3) * 4;
 function isCanonicalBase64(data: string): boolean {
   if (data.length % 4 !== 0) return false;
   let paddingLength = 0;
@@ -429,7 +433,7 @@ function imagePayloadSchema(
 
 const promptImageSchema = imagePayloadSchema(
   MAX_PROMPT_IMAGE_DATA_CHARACTERS,
-  MAX_PROMPT_IMAGE_BYTES,
+  MAX_PROMPT_IMAGE_FILE_BYTES,
 );
 const conversationImageSchema = imagePayloadSchema(
   MAX_CONVERSATION_IMAGE_DATA_CHARACTERS,

@@ -268,7 +268,7 @@ export async function startInteractionFixture(
           id: FIXTURE_MODEL,
           name: "Interaction fixture model",
           reasoning: false,
-          input: ["text"],
+          input: ["text", "image"],
           cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
           contextWindow: 128_000,
           maxTokens: 4_096,
@@ -281,7 +281,13 @@ export async function startInteractionFixture(
             sessionId: options?.sessionId,
             transport: options?.transport,
           };
-          if (context.systemPrompt?.includes(AUTO_TITLE_PROMPT)) {
+          const isTitleRequest = context.systemPrompt?.includes(AUTO_TITLE_PROMPT)
+            || context.messages.some((message) => message.role === "system" && (
+              typeof message.content === "string"
+                ? message.content
+                : message.content.map((part) => part.text).join("")
+            ).includes(AUTO_TITLE_PROMPT));
+          if (isTitleRequest) {
             log.push({ kind: "title_requested", text, ...requestIdentity });
             return responseStream(TITLE, titleGate.promise, () => {
               log.push({ kind: "title_returned", text: TITLE });
@@ -313,7 +319,8 @@ export async function startInteractionFixture(
       allowModelNetwork: false,
       createModelsStore: () => new InMemoryModelsStore(),
       createModelRuntime,
-      createSettings: () => SettingsManager.inMemory(),
+      // Keep original image bytes to exercise upload/durable limits; real user settings stay untouched.
+      createSettings: () => SettingsManager.inMemory({ images: { autoResize: false } }),
       createServices: (options) => createAgentSessionServices({
         ...options,
         agentDir,

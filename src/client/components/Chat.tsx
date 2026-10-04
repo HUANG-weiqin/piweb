@@ -15,6 +15,7 @@ import {
   MAX_COMPACTION_THRESHOLD_PERCENT,
   MAX_PROMPT_IMAGE_BYTES,
   MAX_PROMPT_IMAGE_COUNT,
+  MAX_PROMPT_IMAGE_FILE_BYTES,
   MIN_COMPACTION_THRESHOLD_PERCENT,
   promptImageMimeType,
   type ConversationCompactionMarker,
@@ -721,9 +722,13 @@ function ChatView({
         setAttachmentError(`每条消息最多附加 ${MAX_PROMPT_IMAGE_COUNT} 张图片。`);
         return;
       }
+      if (accepted.some(({ file }) => file.size > MAX_PROMPT_IMAGE_FILE_BYTES)) {
+        setAttachmentError(`单张图片最多 ${MAX_PROMPT_IMAGE_FILE_BYTES / (1024 * 1024)} MiB。`);
+        return;
+      }
       const incomingBytes = accepted.reduce((total, { file }) => total + file.size, 0);
       if (incomingBytes > MAX_PROMPT_IMAGE_BYTES) {
-        setAttachmentError(`图片合计最多 ${Math.floor(MAX_PROMPT_IMAGE_BYTES / 1024)} KiB。`);
+        setAttachmentError(`图片合计最多 ${MAX_PROMPT_IMAGE_BYTES / (1024 * 1024)} MiB。`);
         return;
       }
       try {
@@ -740,7 +745,7 @@ function ChatView({
           incomingBytes,
         );
         if (totalBytes > MAX_PROMPT_IMAGE_BYTES) {
-          setAttachmentError(`图片合计最多 ${Math.floor(MAX_PROMPT_IMAGE_BYTES / 1024)} KiB。`);
+          setAttachmentError(`图片合计最多 ${MAX_PROMPT_IMAGE_BYTES / (1024 * 1024)} MiB。`);
           return;
         }
         const nextImages = [...currentImages, ...images];
@@ -1150,7 +1155,7 @@ function ChatView({
       {promptNotice && <div className="composer-notice" role="alert">{promptNotice}</div>}
       {attachmentError && <div className="composer-notice" role="alert">{attachmentError}</div>}
       {draftImages.length > 0 && <div className="composer-attachments" aria-label="待发送图片">
-        {draftImages.map((image, index) => <div className="composer-attachment" key={`${image.mimeType}:${image.data.slice(0, 32)}`}>
+        {draftImages.map((image, index) => <div className="composer-attachment" key={index}>
           <img src={`data:${image.mimeType};base64,${image.data}`} alt={`待发送图片 ${index + 1}`} />
           <button
             type="button"
