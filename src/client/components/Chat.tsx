@@ -1014,7 +1014,7 @@ function ChatView({
         : visibleMobileSheet === "pending"
           ? "等待中"
           : visibleMobileSheet === "retained"
-          ? "保留的原输入"
+          ? "恢复输入"
           : visibleMobileSheet === "controls"
             ? "控制"
             : undefined}
@@ -1084,11 +1084,16 @@ function ChatView({
         hidden={Boolean(mobile && visibleMobileSheet !== "retained")}
       >
         {visibleMobileSheet === "retained" && <header className="mobile-sheet-header">
-          <h2>保留的原输入</h2>
-          <button type="button" data-modal-autofocus aria-label="关闭保留的原输入" onClick={closeMobileSheet}>×</button>
+          <h2>恢复输入</h2>
+          <button type="button" data-modal-autofocus aria-label="关闭恢复输入" onClick={closeMobileSheet}>×</button>
         </header>}
-        <RetainedInputs inputs={retainedInputs} currentScopeKey={retainedInputScopeKey}
+        <RetainedInputs inputs={retainedInputs} currentScopeKey={retainedInputScopeKey} inline={mobileEnabled}
           canRestore={canRestoreRetainedInput && draft === "" && draftImages.length === 0 && !submitting}
+          restoreDisabledReason={draft !== "" || draftImages.length > 0
+            ? "请先清空输入框"
+            : submitting
+              ? "请等待当前消息提交完成"
+              : "请先返回原会话，等待切换完成"}
           onRestore={onRestoreRetainedInput} onDiscard={onDiscardRetainedInput} />
       </div>}
       {loopListItems.length > 0 && <section
@@ -1179,9 +1184,9 @@ function ChatView({
         </div>
       </div>
       {mobile && <div className="mobile-composer-launchers" aria-label="会话辅助面板">
-        {retainedInputs.length > 0 && <button type="button" aria-label="打开保留的原输入"
+        {retainedInputs.length > 0 && <button type="button" aria-label="打开恢复输入"
           aria-expanded={visibleMobileSheet === "retained"} onClick={() => setMobileSheet("retained")}
-        >保留输入 <span>{retainedInputs.length}</span></button>}
+        >恢复输入 <span>{retainedInputs.length}</span></button>}
         {loopListItems.length > 0 && <button
           type="button"
           aria-label="打开任务"

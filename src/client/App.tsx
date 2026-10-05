@@ -704,7 +704,9 @@ export function App() {
   const retainedInputsRef = useRef(new Map<string, RetainedPromptInput>());
   const confirmedInputFocusRef = useRef<ActiveFocus | undefined>(undefined);
   const [retainedInputs, setRetainedInputs] = useState<RetainedPromptInput[]>([]);
-  const publishRetainedInputs = () => setRetainedInputs([...retainedInputsRef.current.values()]);
+  // Keep live originals in the Map for Stop and capacity accounting, not in the recovery UI.
+  const publishRetainedInputs = () => setRetainedInputs([...retainedInputsRef.current.values()]
+    .filter((input) => input.status === "cancelled" || input.status === "unknown"));
   const removeRetainedInput = (key: string) => {
     if (retainedInputsRef.current.delete(key)) publishRetainedInputs();
   };
@@ -4094,7 +4096,11 @@ export function App() {
     const retainedBytes = [...retainedInputsRef.current.values()].reduce((total, input) => total + input.bytes, 0);
     if (retainedInputsRef.current.size >= MAX_RETAINED_PROMPT_INPUTS
       || retainedBytes + bytes > MAX_RETAINED_PROMPT_INPUT_BYTES) {
-      setPromptNotice("保留输入的容量已满，请先恢复或丢弃副本后再发送；当前草稿已保留。");
+      const hasRecoveryInputs = [...retainedInputsRef.current.values()]
+        .some((input) => input.status === "cancelled" || input.status === "unknown");
+      setPromptNotice(hasRecoveryInputs
+        ? "保留输入的容量已满，请在“恢复输入”中恢复或丢弃内容；当前草稿已保留。"
+        : "保留输入的容量已满，请等待排队消息投递或撤回部分消息；当前草稿已保留。");
       return false;
     }
     const scopeKey = pendingConversationKey(pending);
@@ -5750,8 +5756,7 @@ export function App() {
               draftScopeKey={draftScope ? pendingConversationKey(draftScope) : undefined}
               submitting={Boolean(pendingPrompt)}
               retainedInputs={retainedInputs}
-              retainedInputScopeKey={currentFocus && confirmedInputFocusRef.current && sameFocus(currentFocus, confirmedInputFocusRef.current)
-                ? pendingConversationKey({ ...currentFocus, workspaceKey: currentWorkspaceKey() }) : undefined}
+              retainedInputScopeKey={draftScope ? pendingConversationKey(draftScope) : undefined}
               canRestoreRetainedInput={Boolean(currentFocus && confirmedInputFocusRef.current
                 && sameFocus(currentFocus, confirmedInputFocusRef.current) && !pendingFocus && !pendingPrompt
                 && !transitioning && !switchingFocus)}

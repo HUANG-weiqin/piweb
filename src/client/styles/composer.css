@@ -84,34 +84,55 @@
 .retained-inputs {
   max-height: 240px;
   overflow: auto;
-  padding: 10px;
   border: 1px solid var(--rebel-line);
   background: var(--rebel-black);
   color: var(--rebel-paper);
   font-size: 12px;
 }
 
-.retained-inputs h2 {
-  margin: 0 0 6px;
-  font-size: 13px;
+.retained-inputs-toggle {
+  padding: 7px 10px;
+  color: var(--rebel-paper-muted);
+  cursor: pointer;
 }
 
-.retained-inputs p {
-  margin: 4px 0 8px;
+.retained-inputs-content {
+  padding: 8px 10px;
+}
+
+.retained-inputs-help,
+.retained-inputs-warning {
+  margin: 0 0 6px;
   color: var(--rebel-paper-muted);
+  font-size: 11px;
+}
+
+.retained-inputs-warning {
+  color: var(--rebel-paper);
 }
 
 .retained-input {
   min-width: 0;
-  margin-top: 8px;
-  padding: 8px 0;
+  padding: 6px 0;
   border-top: 1px solid var(--rebel-line);
 }
 
 .retained-input-summary {
   display: flex;
+  align-items: center;
   gap: 8px;
   min-width: 0;
+  min-height: 28px;
+  cursor: pointer;
+}
+
+.retained-input-summary::before {
+  content: "▸";
+  color: var(--rebel-paper-muted);
+}
+
+.retained-input-original[open] > summary::before {
+  content: "▾";
 }
 
 .retained-input-text {
@@ -122,23 +143,30 @@
   white-space: nowrap;
 }
 
-.retained-input-summary > span:last-child {
+.retained-input-image-count,
+.retained-input-state {
   flex: 0 0 auto;
+  color: var(--rebel-paper-muted);
   font-size: 11px;
 }
 
 .retained-input-scope {
+  margin: 3px 0;
   overflow-wrap: anywhere;
+  color: var(--rebel-paper-muted);
+  font-size: 11px;
 }
 
 .retained-input-actions {
   display: flex;
-  gap: 8px;
-  margin: 6px 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
 }
 
 .retained-input-actions button {
-  min-height: 32px;
+  min-height: 30px;
   padding: 4px 8px;
   border: 1px solid var(--rebel-line);
   border-radius: 0;
@@ -146,14 +174,19 @@
   background: var(--rebel-black);
 }
 
-.retained-input-original summary,
-.retained-inputs-other > summary {
-  cursor: pointer;
-  padding: 6px 0;
+.retained-input-reason,
+.retained-inputs-lifetime {
+  color: var(--rebel-paper-muted);
+  font-size: 10px;
+}
+
+.retained-inputs-lifetime {
+  display: block;
+  margin-top: 6px;
 }
 
 .retained-input-original pre {
-  margin: 8px 0;
+  margin: 6px 0;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   font: inherit;
@@ -171,6 +204,13 @@
   object-fit: contain;
 }
 
+.retained-inputs-toggle:focus-visible,
+.retained-input-summary:focus-visible,
+.retained-input-actions button:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
 .retained-inputs-fallback {
   position: fixed;
   z-index: 20;
@@ -179,20 +219,22 @@
   width: min(520px, calc(100vw - 32px));
 }
 
+.retained-inputs-inline {
+  max-height: none;
+  overflow: visible;
+  border: 0;
+}
+
+.retained-inputs-inline .retained-inputs-content {
+  padding: 0;
+}
+
 @media (max-width: 600px) {
-  .retained-inputs-surface .retained-inputs {
-    max-height: none;
-  }
-
+  .retained-inputs-toggle,
   .retained-input-actions button,
-  .retained-input-original summary,
-  .retained-inputs-other > summary {
-    min-height: 44px;
-  }
-
   .retained-input-summary {
-    flex-direction: column;
-    gap: 4px;
+    box-sizing: border-box;
+    min-height: 44px;
   }
 }
 

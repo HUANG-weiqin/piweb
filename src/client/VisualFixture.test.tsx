@@ -12,7 +12,10 @@ afterEach(() => {
 describe("VisualFixture", () => {
   it("offers a stopped original without replacing the fixture draft, then restores it after explicit draft clearing", () => {
     render(<VisualFixture showComposerStates />);
-    const panel = screen.getByRole("region", { name: "保留的原输入" });
+    const summary = screen.getByText("恢复输入 · 1 条");
+    expect(summary.closest("details")).not.toHaveAttribute("open");
+    fireEvent.click(summary);
+    const panel = screen.getByRole("region", { name: "恢复输入" });
     expect(within(panel).getByRole("button", { name: "恢复到输入框" })).toBeDisabled();
     const draft = screen.getByRole("textbox", { name: "给 Pi 发送消息" });
     expect(draft).toHaveValue("检查两张截图中的层级、密度与状态辨识度。");
@@ -20,7 +23,7 @@ describe("VisualFixture", () => {
     fireEvent.click(screen.getByRole("button", { name: "移除图片 1" }));
     fireEvent.click(within(panel).getByRole("button", { name: "恢复到输入框" }));
     expect(draft).toHaveValue("停止后保留的原输入。请先清空当前草稿，再手动恢复。");
-    expect(screen.queryByRole("region", { name: "保留的原输入" })).not.toBeInTheDocument();
+    expect(screen.queryByText("恢复输入 · 1 条")).not.toBeInTheDocument();
   });
   it("starts its phone adapter on the conversation page", () => {
     vi.stubGlobal("matchMedia", vi.fn((query: string) => ({
