@@ -4,7 +4,10 @@ import {
   createAgentSessionFromServices,
   createAgentSessionServices,
   createBashToolDefinition,
+  createCodemodeExtension,
   createLocalBashOperations,
+  createMcpExtension,
+  createToolSearchExtension,
   defineTool,
   getAgentDir,
   hasTrustRequiringProjectResources,
@@ -15,12 +18,17 @@ import {
   SessionManager,
   SettingsManager,
   type AgentSession,
+  type BeforeAgentStartEvent,
+  type BeforeAgentStartEventResult,
   type CreateAgentSessionOptions,
   type CreateModelRuntimeOptions,
   type CreateAgentSessionResult,
+  type ExtensionAPI,
   type ExtensionContext,
   type ExtensionCommandContextActions,
   type ExtensionError,
+  type ExtensionFactory,
+  type ExtensionHandler,
   type ExtensionUIContext,
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
@@ -108,6 +116,68 @@ interface RuntimePromptMutationAdapter {
   dispose(): void;
 }
 
+interface NativeMcpSectionCapture {
+  recorded: boolean;
+  present: boolean;
+  value?: unknown;
+}
+
+interface NativeExtensionBoundary {
+  readonly mcpSection: AsyncLocalStorage<NativeMcpSectionCapture>;
+  isChangingTools(): boolean;
+  withToolChange<T>(change: () => T): T;
+}
+
+function createNativeExtensionBoundary(): NativeExtensionBoundary {
+  let toolChangeDepth = 0;
+  return {
+    mcpSection: new AsyncLocalStorage<NativeMcpSectionCapture>(),
+    isChangingTools: () => toolChangeDepth > 0,
+    withToolChange<T>(change: () => T): T {
+      toolChangeDepth++;
+      try {
+        return change();
+      } finally {
+        toolChangeDepth--;
+      }
+    },
+  };
+}
+
+function scopedNativeExtension(
+  factory: ExtensionFactory,
+  boundary: NativeExtensionBoundary,
+  captureMcpSection = false,
+): ExtensionFactory {
+  return (pi) => {
+    const scoped = Object.create(pi) as ExtensionAPI;
+    scoped.registerTool = (tool) => boundary.withToolChange(() => pi.registerTool(tool));
+    scoped.setActiveTools = (toolNames) => boundary.withToolChange(() => pi.setActiveTools(toolNames));
+    if (captureMcpSection) {
+      scoped.on = ((event: string, handler: unknown) => {
+        if (event !== "before_agent_start") {
+          return Reflect.apply(pi.on, pi, [event, handler]) as () => void;
+        }
+        const beforeStart = handler as ExtensionHandler<
+          BeforeAgentStartEvent,
+          BeforeAgentStartEventResult
+        >;
+        return pi.on("before_agent_start", async (input, ctx) => {
+          const result = await beforeStart(input, ctx);
+          const capture = boundary.mcpSection.getStore();
+          if (capture) {
+            capture.recorded = true;
+            capture.present = Object.hasOwn(input.systemPromptOptions.sections, "mcp_servers");
+            capture.value = input.systemPromptOptions.sections.mcp_servers;
+          }
+          return result;
+        });
+      }) as ExtensionAPI["on"];
+    }
+    return factory(scoped);
+  };
+}
+
 const RUNTIME_PROMPT_MUTATION_ERROR = "Runtime system prompt changes are not supported";
 
 interface MutablePromptToolSession {
@@ -146,12 +216,13 @@ function installReadOnlyToolProjection(
 
 /**
  * Pi rebuilds its base system prompt whenever the active tool set changes.
- * Extension startup is the one initialization boundary allowed to shape that
- * set. Later tool refreshes and all per-turn prompt overrides must fail before
- * they can perturb the provider request prefix.
+ * Startup establishes the initial set; only scoped native MCP/tool-search calls
+ * may later update it. Per-turn prompt changes remain blocked except for the
+ * native MCP server-list section.
  */
 function installRuntimePromptMutationBoundary(
   session: AgentSession,
+  nativeBoundary: NativeExtensionBoundary,
 ): RuntimePromptMutationAdapter {
   const mutableSession = session as unknown as MutablePromptToolSession;
   const nativeSetActiveTools = session.setActiveToolsByName;
@@ -165,22 +236,37 @@ function installRuntimePromptMutationBoundary(
     throw new Error(RUNTIME_PROMPT_MUTATION_ERROR);
   };
   const guardedSetActiveTools: AgentSession["setActiveToolsByName"] = (toolNames) => {
-    if (toolTopologyFrozen) rejectMutation();
+    if (toolTopologyFrozen && !nativeBoundary.isChangingTools()) rejectMutation();
     nativeSetActiveTools.call(session, toolNames);
   };
   const guardedRefreshTools: MutablePromptToolSession["_refreshToolRegistry"] = (...args) => {
-    if (toolTopologyFrozen) rejectMutation();
+    if (toolTopologyFrozen && !nativeBoundary.isChangingTools()) rejectMutation();
     return nativeRefreshTools.call(session, ...args);
   };
   const guardedEmitBeforeAgentStart: typeof runner.emitBeforeAgentStart = async (...args) => {
-    // AgentSession supplies its normalized base options; snapshot them before
-    // the extension runner creates and exposes its mutable normalized copy.
+    // Only Pi's own MCP handler may change its reserved prompt section.
+    // All other fields and all other extensions remain behind the same gate.
     const expectedOptions = structuredClone(args[2]);
-    const result = await nativeEmitBeforeAgentStart.call(runner, ...args);
-    if (!isDeepStrictEqual(result.systemPromptOptions, expectedOptions)) {
-      rejectMutation();
-    }
-    return result;
+    const capture: NativeMcpSectionCapture = { recorded: false, present: false };
+    return nativeBoundary.mcpSection.run(capture, async () => {
+      const result = await nativeEmitBeforeAgentStart.call(runner, ...args);
+      if (capture.recorded) {
+        const sections = expectedOptions.sections ??= {};
+        const value = capture.value;
+        if (capture.present) {
+          if (typeof value !== "string" || value.length > 4_096) {
+            throw new Error(RUNTIME_PROMPT_MUTATION_ERROR);
+          }
+          sections.mcp_servers = value;
+        } else {
+          delete sections.mcp_servers;
+        }
+      }
+      if (!isDeepStrictEqual(result.systemPromptOptions, expectedOptions)) {
+        rejectMutation();
+      }
+      return result;
+    });
   };
 
   session.setActiveToolsByName = guardedSetActiveTools;
@@ -1270,6 +1356,22 @@ export class PiRuntime implements PiRuntimeLike {
         }
       : undefined;
     const roleSystemPrompt = options.roleSystemPrompt;
+    const nativeBoundary = createNativeExtensionBoundary();
+    const nativeExtensions = options.toolMode === "full_access" ? [
+      { name: "codemode", factory: createCodemodeExtension(), builtin: true, replaceable: true },
+      {
+        name: "tool-search",
+        factory: scopedNativeExtension(createToolSearchExtension(), nativeBoundary),
+        builtin: true,
+        replaceable: true,
+      },
+      {
+        name: "mcp",
+        factory: scopedNativeExtension(createMcpExtension(), nativeBoundary, true),
+        builtin: true,
+        replaceable: true,
+      },
+    ] : [];
     let workbenchCustomTools = options.workbenchCustomTools;
     const readOnlyToolProjection = options.toolMode === "read_only";
     const allowedToolNames = readOnlyToolProjection
@@ -1382,14 +1484,12 @@ export class PiRuntime implements PiRuntimeLike {
         agentDir: getAgentDir(),
         modelRuntime: owner.runtime,
         settingsManager: settings,
-        resourceLoaderOptions: roleSystemPrompt
-          ? {
-              appendSystemPromptOverride: (base) => [
-                ...base,
-                roleSystemPrompt,
-              ],
-            }
-          : undefined,
+        resourceLoaderOptions: {
+          extensionFactories: nativeExtensions,
+          ...(roleSystemPrompt ? {
+            appendSystemPromptOverride: (base: string[]) => [...base, roleSystemPrompt],
+          } : {}),
+        },
         resourceLoaderReloadOptions: {
           resolveProjectTrust: () => this.resolveProjectTrust(
             cwd,
@@ -1483,6 +1583,7 @@ export class PiRuntime implements PiRuntimeLike {
         : [
             ...new Set([
               ...createdSession.getActiveToolNames(),
+              ...(options.toolMode === "full_access" ? ["codemode"] : []),
               "grep",
               "find",
               "ls",
@@ -1542,7 +1643,7 @@ export class PiRuntime implements PiRuntimeLike {
           `Pi session did not activate workbench tool "${inactiveWorkbenchTool.name}"`,
         );
       }
-      runtimePromptMutationAdapter = installRuntimePromptMutationBoundary(createdSession);
+      runtimePromptMutationAdapter = installRuntimePromptMutationBoundary(createdSession, nativeBoundary);
       if (options.toolCallGate) {
         this.installToolCallGate(createdSession, options.toolCallGate);
       }
@@ -1862,8 +1963,124 @@ export class PiRuntime implements PiRuntimeLike {
   }
 
   private installToolCallGate(session: AgentSession, gate: ToolCallGate): void {
+    const runner = session.extensionRunner;
+    const nativeHasHandlers = runner.hasHandlers;
+    const nativeEmitToolCall = runner.emitToolCall;
+    const nativeCreateToolContext = runner.createToolContext;
+    const nestedToolScope = new AsyncLocalStorage<{
+      callerToolCallId: string;
+      rootSignal: AbortSignal;
+      executionSignal: AbortSignal;
+    }>();
     const extensionHook = session.agent.beforeToolCall;
+    const authorize = (
+      toolCallId: string,
+      toolName: string,
+      args: unknown,
+      signal: AbortSignal,
+    ) => {
+      try {
+        freezeStableJsonValue(args);
+      } catch {
+        return {
+          block: true,
+          reason: "Tool arguments must be stable plain JSON data",
+        };
+      }
+      return gate({
+        toolCallId,
+        toolName,
+        toolSource: session.getAllTools().find((tool) => tool.name === toolName)
+          ?.sourceInfo.source ?? "unknown",
+        args,
+        signal,
+      });
+    };
     session.agent.toolExecution = "sequential";
+    // Pi's nested ctx.executeTool() calls AgentSession._beforeToolCall directly,
+    // bypassing agent.beforeToolCall. Keep the originating run signal across
+    // codemode's independently cancellable child calls, and make the SDK's
+    // execution signal abort when either parent or child is cancelled.
+    runner.createToolContext = (toolCallId, parentSignal) => {
+      const context = nativeCreateToolContext.call(runner, toolCallId, parentSignal);
+      const inherited = nestedToolScope.getStore();
+      const rootSignal = inherited?.rootSignal ?? parentSignal;
+      const validParent = !inherited || inherited.executionSignal === parentSignal;
+      const executeTool: typeof context.executeTool = (name, args, options = {}) => {
+        if (
+          !validParent || !rootSignal || rootSignal !== session.agent.signal ||
+          rootSignal.aborted || !parentSignal || parentSignal.aborted ||
+          options.signal?.aborted
+        ) {
+          return Promise.resolve({
+            toolCall: { type: "toolCall", id: `${toolCallId}/0`, name, arguments: {} },
+            result: {
+              content: [{ type: "text", text: "No active run owns this nested tool call" }],
+              details: {},
+            },
+            isError: true,
+          });
+        }
+        const childSignal = options.signal ?? parentSignal;
+        const executionSignal = childSignal === parentSignal
+          ? parentSignal
+          : AbortSignal.any([parentSignal, childSignal]);
+        return nestedToolScope.run(
+          { callerToolCallId: toolCallId, rootSignal, executionSignal },
+          () => context.executeTool(name, args, { ...options, signal: executionSignal }),
+        );
+      };
+      const descriptors = Object.getOwnPropertyDescriptors(context);
+      if (!descriptors.executeTool || !("value" in descriptors.executeTool)) {
+        throw new Error("Pi nested tool context is unavailable");
+      }
+      descriptors.executeTool.value = executeTool;
+      return Object.defineProperties(
+        Object.create(Object.getPrototypeOf(context)) as typeof context,
+        descriptors,
+      );
+    };
+    runner.hasHandlers = (eventType) => eventType === "tool_call" ||
+      nativeHasHandlers.call(runner, eventType);
+    runner.emitToolCall = async (event) => {
+      const scope = nestedToolScope.getStore();
+      if (!scope) {
+        if (event.parentToolCallId !== undefined) {
+          return { block: true, reason: "Tool execution guard is unavailable" };
+        }
+        return nativeEmitToolCall.call(runner, event);
+      }
+      if (
+        (event.parentToolCallId !== undefined &&
+          event.parentToolCallId !== scope.callerToolCallId) ||
+        scope.rootSignal !== session.agent.signal
+      ) {
+        return { block: true, reason: "Tool execution guard is unavailable" };
+      }
+      if (scope.rootSignal.aborted || scope.executionSignal.aborted) {
+        return { block: true, reason: "Run cancelled before tool execution" };
+      }
+      const extensionResult = await nativeEmitToolCall.call(runner, event);
+      if (
+        scope.rootSignal !== session.agent.signal ||
+        scope.rootSignal.aborted ||
+        scope.executionSignal.aborted
+      ) {
+        return { block: true, reason: "Run cancelled before tool execution" };
+      }
+      if (extensionResult?.block) return extensionResult;
+      const decision = await authorize(
+        event.toolCallId, event.toolName, event.input, scope.executionSignal,
+      );
+      if (
+        scope.rootSignal !== session.agent.signal ||
+        scope.rootSignal.aborted ||
+        scope.executionSignal.aborted
+      ) {
+        return { block: true, reason: "Run cancelled before tool execution" };
+      }
+      return decision;
+    };
     session.agent.beforeToolCall = async (context, signal) => {
       if (!signal) {
         return { block: true, reason: "Tool execution guard is unavailable" };
@@ -1876,23 +2093,12 @@ export class PiRuntime implements PiRuntimeLike {
         return { block: true, reason: "Run cancelled before tool execution" };
       }
       if (extensionResult?.block) return extensionResult;
-      try {
-        freezeStableJsonValue(context.args);
-      } catch {
-        return {
-          block: true,
-          reason: "Tool arguments must be stable plain JSON data",
-        };
-      }
-      return gate({
-        toolCallId: String(context.toolCall.id),
-        toolName: String(context.toolCall.name),
-        toolSource: session.getAllTools().find((tool) => (
-          tool.name === context.toolCall.name
-        ))?.sourceInfo.source ?? "unknown",
-        args: context.args,
+      return authorize(
+        String(context.toolCall.id),
+        String(context.toolCall.name),
+        context.args,
         signal,
-      });
+      );
     };
   }
 

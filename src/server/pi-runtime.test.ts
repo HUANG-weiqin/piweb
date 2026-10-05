@@ -25,6 +25,7 @@ import {
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { Type } from "typebox";
 import type { LoopList } from "../shared/protocol.js";
 import { BashBackgroundTaskRegistry, type BashTaskCompletion } from "./bash-execution.js";
 import { PiRuntime } from "./pi-runtime.js";
@@ -180,12 +181,13 @@ async function testRuntime(
   createSettings: () => SettingsManager = () => SettingsManager.inMemory(),
   runtimeOptions: Pick<
     Parameters<typeof PiRuntime.create>[0],
-    "createWindowsDesktopAdapter"
-  > = {},
+    "createWindowsDesktopAdapter" | "projectTrustStore"
+  > & { includeNativeExtensions?: boolean } = {},
 ): Promise<PiRuntime> {
+  const { includeNativeExtensions = false, ...piRuntimeOptions } = runtimeOptions;
   const credentialStore = new InMemoryCredentialStore();
   return PiRuntime.create({
-    ...runtimeOptions,
+    ...piRuntimeOptions,
     credentialStore,
     modelsStore: new InMemoryModelsStore(),
     createModelsStore: () => new InMemoryModelsStore(),
@@ -200,12 +202,17 @@ async function testRuntime(
       agentDir: options.cwd,
       resourceLoaderOptions: {
         ...options.resourceLoaderOptions,
-        noExtensions: true,
+        noExtensions: !includeNativeExtensions,
         noSkills: true,
         noPromptTemplates: true,
         noThemes: true,
         noContextFiles: true,
-        extensionFactories: extensionsFor(options.cwd),
+        extensionFactories: [
+          ...(includeNativeExtensions
+            ? options.resourceLoaderOptions?.extensionFactories ?? []
+            : []),
+          ...extensionsFor(options.cwd),
+        ],
       },
     }),
     createSessionFromServices: async (options) => {
@@ -1467,6 +1474,223 @@ describe("PiRuntime session ownership", () => {
     );
     expect(result.systemPromptOptions).toEqual(options);
 
+    await created.dispose();
+  });
+
+  it("loads native codemode and MCP only for full-access sessions", async () => {
+    const cwd = await temporaryDirectory("piweb-runtime-native-extensions-");
+    const runtime = await testRuntime(
+      () => [], undefined, undefined, undefined,
+      { includeNativeExtensions: true },
+    );
+    const full = await runtime.createSession(cwd, { toolMode: "full_access" });
+    await full.activateExtensions();
+    expect(full.session.getAllTools().map((tool) => tool.name)).toContain("codemode");
+    expect(full.session.getActiveToolNames()).toContain("codemode");
+    await full.dispose();
+
+    const readOnly = await runtime.createSession(cwd, { toolMode: "read_only" });
+    await readOnly.activateExtensions();
+    expect(readOnly.session.getAllTools().map((tool) => tool.name)).not.toContain("codemode");
+    await readOnly.dispose();
+  });
+
+  it("connects a trusted project MCP server and accepts native tool-list changes", async () => {
+    const cwd = await temporaryDirectory("piweb-runtime-native-mcp-");
+    const serverPath = join(cwd, "fixture-mcp.cjs");
+    await writeFile(serverPath, `
+      let pending = "";
+      let changed = false;
+      const reply = (id, result) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id, result }) + "\\n");
+      process.stdin.setEncoding("utf8");
+      process.stdin.on("data", (chunk) => {
+        pending += chunk;
+        let end;
+        while ((end = pending.indexOf("\\n")) !== -1) {
+          const line = pending.slice(0, end);
+          pending = pending.slice(end + 1);
+          if (!line.trim()) continue;
+          const message = JSON.parse(line);
+          if (message.id === undefined) continue;
+          if (message.method === "initialize") {
+            reply(message.id, {
+              protocolVersion: message.params.protocolVersion,
+              capabilities: { tools: { listChanged: true } },
+              serverInfo: { name: "fixture", version: "1.0.0" },
+            });
+          } else if (message.method === "tools/list") {
+            const tool = (name) => ({
+              name, description: name, inputSchema: {
+                type: "object", properties: { text: { type: "string" } },
+              },
+            });
+            reply(message.id, { tools: [tool("echo"), ...(changed ? [tool("added")] : [])] });
+          } else if (message.method === "tools/call") {
+            reply(message.id, { content: [{ type: "text", text: message.params.arguments.text }] });
+            if (message.params.name === "echo") {
+              changed = true;
+              process.stdout.write(JSON.stringify({
+                jsonrpc: "2.0", method: "notifications/tools/list_changed",
+              }) + "\\n");
+            }
+          } else {
+            reply(message.id, {});
+          }
+        }
+      });
+    `);
+    await mkdir(join(cwd, ".pi"));
+    await writeFile(join(cwd, ".pi", "mcp.json"), JSON.stringify({
+      mcpServers: {
+        fixture: {
+          command: process.execPath,
+          args: [serverPath],
+          exposure: "codemode",
+          toolExposure: { echo: "direct", added: "direct" },
+          description: "Test MCP server",
+        },
+      },
+    }));
+    let projectApi: ExtensionAPI | undefined;
+    const runtime = await testRuntime(
+      () => [(pi) => { projectApi = pi; }], undefined, undefined, undefined,
+      {
+        includeNativeExtensions: true,
+        projectTrustStore: { get: () => true, set: () => undefined },
+      },
+    );
+    const created = await runtime.createSession(cwd, { toolMode: "full_access" });
+    await created.activateExtensions();
+    const findTool = (name: string) => created.session.agent.state.tools.find(
+      (tool) => tool.name === name,
+    );
+    for (let attempt = 0; attempt < 100 && !findTool("mcp__fixture__echo"); attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    const echo = findTool("mcp__fixture__echo");
+    if (!echo) throw new Error("Native MCP did not register its direct tool");
+    const section = await created.session.extensionRunner.emitBeforeAgentStart(
+      "request",
+      undefined,
+      normalizedPromptOptions(cwd, created.session.getActiveToolNames()),
+    );
+    expect(section.systemPromptOptions.sections.mcp_servers).toContain("fixture");
+
+    const result = await echo.execute(
+      "mcp-call", { text: "hello" }, new AbortController().signal, () => undefined,
+    );
+    expect(result.content).toEqual([{ type: "text", text: "hello" }]);
+    for (let attempt = 0; attempt < 100 && !findTool("mcp__fixture__added"); attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    expect(findTool("mcp__fixture__added")).toBeDefined();
+    expect(() => projectApi!.registerTool(workbenchTool(cwd, "late_project_tool")))
+      .toThrow("Runtime system prompt changes are not supported");
+    expect(() => projectApi!.setActiveTools(["codemode"]))
+      .toThrow("Runtime system prompt changes are not supported");
+    await created.dispose();
+  });
+
+  it("does not start project MCP in read-only or untrusted sessions", async () => {
+    const cwd = await temporaryDirectory("piweb-runtime-mcp-trust-");
+    const marker = join(cwd, "mcp-started.txt");
+    const serverPath = join(cwd, "marker-mcp.cjs");
+    await writeFile(serverPath, `require("node:fs").writeFileSync(${JSON.stringify(marker)}, "started"); process.stdin.resume();`);
+    await mkdir(join(cwd, ".pi"));
+    await writeFile(join(cwd, ".pi", "mcp.json"), JSON.stringify({
+      mcpServers: { fixture: { command: process.execPath, args: [serverPath], exposure: "direct" } },
+    }));
+    const trusted = await testRuntime(
+      () => [], undefined, undefined, undefined,
+      {
+        includeNativeExtensions: true,
+        projectTrustStore: { get: () => true, set: () => undefined },
+      },
+    );
+    const readOnly = await trusted.createSession(cwd, { toolMode: "read_only" });
+    await readOnly.activateExtensions();
+    expect(readOnly.session.getAllTools().map((tool) => tool.name)).not.toContain("codemode");
+    await readOnly.dispose();
+
+    const untrusted = await testRuntime(
+      () => [], undefined, undefined, undefined,
+      {
+        includeNativeExtensions: true,
+        projectTrustStore: { get: () => false, set: () => undefined },
+      },
+    );
+    const full = await untrusted.createSession(cwd, { toolMode: "full_access" });
+    await full.activateExtensions();
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    await expect(readFile(marker, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+    await full.dispose();
+  });
+
+  it("routes real codemode script writes through the nested host gate", async () => {
+    const cwd = await temporaryDirectory("piweb-runtime-codemode-write-");
+    const path = join(cwd, "codemode-write.txt");
+    let hasActiveWork = false;
+    let gateCalls = 0;
+    const runtime = await testRuntime(
+      () => [], undefined, undefined, undefined,
+      { includeNativeExtensions: true },
+    );
+    const created = await runtime.createSession(cwd, {
+      toolMode: "full_access",
+      toolCallGate: (input) => {
+        if (input.toolName !== "write") return undefined;
+        gateCalls++;
+        return hasActiveWork ? undefined : {
+          block: true,
+          reason: "First write requires active LoopList work",
+        };
+      },
+    });
+    await created.activateExtensions();
+    const signal = new AbortController().signal;
+    Object.defineProperty(created.session.agent, "signal", {
+      configurable: true,
+      get: () => signal,
+    });
+    created.session.agent.state.messages.push({
+      role: "assistant", content: [], timestamp: Date.now(),
+    } as never);
+    const codemode = created.session.agent.state.tools.find((tool) => tool.name === "codemode");
+    if (!codemode) throw new Error("Native codemode was not activated");
+    const code = `return await tools.write({ path: ${JSON.stringify(path)}, content: "from codemode" });`;
+    const blocked = await codemode.execute(
+      "codemode-blocked", { code }, signal, () => undefined,
+    );
+    expect(JSON.stringify(blocked.content)).toContain("First write requires active LoopList work");
+    expect(gateCalls).toBe(1);
+    await expect(readFile(path, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+
+    hasActiveWork = true;
+    const allowed = await codemode.execute(
+      "codemode-allowed", { code }, signal, () => undefined,
+    );
+    expect(JSON.stringify(allowed.content)).toContain("Script completed");
+    expect(gateCalls).toBe(2);
+    expect(await readFile(path, "utf8")).toBe("from codemode");
+    await created.dispose();
+  });
+
+  it("rejects a non-native extension's reserved MCP prompt section mutation", async () => {
+    const cwd = await temporaryDirectory("piweb-runtime-mcp-section-guard-");
+    const runtime = await testRuntime(
+      () => [(pi) => pi.on("before_agent_start", (event) => {
+        event.systemPromptOptions.sections.mcp_servers = "injected by project";
+      })],
+      undefined, undefined, undefined,
+      { includeNativeExtensions: true },
+    );
+    const created = await runtime.createSession(cwd, { toolMode: "full_access" });
+    await created.activateExtensions();
+    await expect(created.session.extensionRunner.emitBeforeAgentStart(
+      "request",
+      undefined,
+      normalizedPromptOptions(cwd, created.session.getActiveToolNames()),
+    )).rejects.toThrow("Runtime system prompt changes are not supported");
     await created.dispose();
   });
 
@@ -3652,6 +3876,121 @@ describe("PiRuntime session ownership", () => {
       reason: "Tool execution guard is unavailable",
     });
     expect(gated).toHaveLength(1);
+    await created.dispose();
+  });
+
+  it("checks nested tool calls after extension hooks with the host gate", async () => {
+    const cwd = await temporaryDirectory("piweb-runtime-nested-gate-");
+    const path = join(cwd, "nested-write.txt");
+    let nestedOutcome: { isError: boolean } | undefined;
+    const childSignal = new AbortController().signal;
+    const runtime = await testRuntime(() => [
+      (pi) => {
+        pi.registerTool({
+          name: "delegate_write",
+          label: "Delegate write",
+          description: "Calls write through the SDK nested tool pipeline.",
+          parameters: Type.Object({}),
+          execute: async (_id, _args, _signal, _onUpdate, ctx) => {
+            nestedOutcome = await ctx.executeTool(
+              "write",
+              { path, content: "nested" },
+              { signal: childSignal },
+            );
+            return { content: [{ type: "text", text: "finished" }] };
+          },
+        });
+        pi.on("tool_call", (event) => {
+          if (event.toolName === "write") event.input.content = "changed-by-extension";
+        });
+      },
+    ]);
+    const calls: Array<{ toolName: string; args: unknown; signal?: AbortSignal }> = [];
+    const created = await runtime.createSession(cwd, {
+      toolCallGate: (input) => {
+        calls.push({ toolName: input.toolName, args: input.args, signal: input.signal });
+        return { block: true, reason: "host denied nested write" };
+      },
+    });
+    await created.activateExtensions();
+    const signal = new AbortController().signal;
+    Object.defineProperty(created.session.agent, "signal", {
+      configurable: true,
+      get: () => signal,
+    });
+    created.session.agent.state.messages.push({
+      role: "assistant",
+      content: [],
+      timestamp: Date.now(),
+    } as never);
+    const delegate = created.session.agent.state.tools.find((tool) => tool.name === "delegate_write");
+    if (!delegate) throw new Error("Delegate tool was not activated");
+    await delegate.execute("outer-call", {}, signal, () => undefined);
+
+    expect(nestedOutcome?.isError).toBe(true);
+    expect(calls).toEqual([{
+      toolName: "write",
+      args: { path, content: "changed-by-extension" },
+      signal: expect.any(AbortSignal),
+    }]);
+    expect(calls[0]?.signal).not.toBe(childSignal);
+    await expect(readFile(path, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+    await created.dispose();
+  });
+
+  it("aborts nested execution with its parent and rejects a detached old context", async () => {
+    const cwd = await temporaryDirectory("piweb-runtime-nested-abort-");
+    const path = join(cwd, "must-not-write.txt");
+    const parent = new AbortController();
+    const child = new AbortController();
+    let activeSignal = parent.signal;
+    let nestedOutcome: { isError: boolean } | undefined;
+    let detached: (() => Promise<{ isError: boolean }>) | undefined;
+    let gateCalls = 0;
+    const runtime = await testRuntime(() => [
+      (pi) => pi.registerTool({
+        name: "delegate_write",
+        label: "Delegate write",
+        description: "Calls write through the SDK nested tool pipeline.",
+        parameters: Type.Object({}),
+        execute: async (_id, _args, _signal, _onUpdate, ctx) => {
+          detached = () => ctx.executeTool("write", { path, content: "detached" });
+          nestedOutcome = await ctx.executeTool(
+            "write",
+            { path, content: "nested" },
+            { signal: child.signal },
+          );
+          return { content: [{ type: "text", text: "finished" }] };
+        },
+      }),
+    ]);
+    const created = await runtime.createSession(cwd, {
+      toolCallGate: () => {
+        gateCalls++;
+        parent.abort();
+        return undefined;
+      },
+    });
+    await created.activateExtensions();
+    Object.defineProperty(created.session.agent, "signal", {
+      configurable: true,
+      get: () => activeSignal,
+    });
+    created.session.agent.state.messages.push({
+      role: "assistant", content: [], timestamp: Date.now(),
+    } as never);
+    const delegate = created.session.agent.state.tools.find((tool) => tool.name === "delegate_write");
+    if (!delegate) throw new Error("Delegate tool was not activated");
+    await delegate.execute("outer-call", {}, parent.signal, () => undefined);
+
+    expect(gateCalls).toBe(1);
+    expect(nestedOutcome?.isError).toBe(true);
+    expect(child.signal.aborted).toBe(false);
+    await expect(readFile(path, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+    activeSignal = new AbortController().signal;
+    if (!detached) throw new Error("Delegate did not retain its old tool context");
+    expect((await detached()).isError).toBe(true);
+    expect(gateCalls).toBe(1);
     await created.dispose();
   });
 
