@@ -1,4 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
+import { createReadStream } from "node:fs";
+import { createInterface } from "node:readline";
 import {
   link,
   lstat,
@@ -36,6 +38,7 @@ import {
 import {
   CONVERSATION_META_CUSTOM_TYPE,
   createConversationMetaEntry,
+  parseConversationLineage,
   parseConversationMetaEntry,
   parseReservedConversationEntry,
   type ConversationMeta,
@@ -124,10 +127,12 @@ interface ConversationCatalog {
   observations: CatalogObservation[];
 }
 
-/** A complete catalog proof taken after a delete batch commits. */
-export interface ConversationDeletionFinalCatalogProof {
+/** Fresh header-namespace membership after a delete batch commits. */
+export interface ConversationDeletionFinalNamespaceProof {
   readonly remainingConversationIds: readonly string[];
 }
+
+export type ConversationLineage = Pick<ConversationMeta, "createdBy" | "orchestration">;
 
 export type ProjectStoreListener = () => void;
 
@@ -199,6 +204,81 @@ interface NamespaceHeaderCensus {
   evidence: readonly Readonly<NamespaceHeaderEvidence>[];
 }
 
+export class ConversationLineageSnapshot {
+  readonly lineages: ReadonlyMap<string, ConversationLineage>;
+  readonly #owner: ProjectStore;
+  readonly #namespace: NamespaceHeaderCensus;
+  readonly #capturedLineages: ReadonlyMap<string, ConversationLineage>;
+
+  constructor(
+    owner: ProjectStore,
+    namespace: NamespaceHeaderCensus,
+    lineages: ReadonlyMap<string, ConversationLineage>,
+  ) {
+    this.#owner = owner;
+    this.#namespace = namespace;
+    this.#capturedLineages = new Map(
+      [...lineages].map(([id, lineage]) => [id, structuredClone(lineage)]),
+    );
+    this.lineages = new Map(
+      [...lineages].map(([id, lineage]) => [id, structuredClone(lineage)]),
+    );
+  }
+
+  matches(
+    owner: ProjectStore,
+    namespace: NamespaceHeaderCensus,
+    lineages: ReadonlyMap<string, ConversationLineage>,
+  ): boolean {
+    return this.#owner === owner
+      && namespaceHeaderEvidenceSetsEqual(this.#namespace, namespace)
+      && lineageMapsEqual(this.#capturedLineages, lineages);
+  }
+
+  matchesRemaining(
+    owner: ProjectStore,
+    namespace: NamespaceHeaderCensus,
+    lineages: ReadonlyMap<string, ConversationLineage>,
+    removedIds: ReadonlySet<string>,
+  ): boolean {
+    const remaining: NamespaceHeaderCensus = {
+      evidence: this.#namespace.evidence.filter(
+        ({ conversationId }) => !removedIds.has(conversationId!),
+      ),
+    };
+    const expectedLineages = new Map(
+      [...this.#capturedLineages].filter(([id]) => !removedIds.has(id)),
+    );
+    return this.#owner === owner
+      && namespaceHeaderEvidenceSetsEqual(remaining, namespace)
+      && lineageMapsEqual(expectedLineages, lineages);
+  }
+
+  matchesTarget(
+    conversationId: string,
+    meta: ConversationMeta | undefined,
+  ): boolean {
+    const captured = this.#capturedLineages.get(conversationId);
+    return captured !== undefined
+      && meta !== undefined
+      && JSON.stringify(captured) === JSON.stringify({
+        createdBy: meta.createdBy,
+        ...(meta.orchestration === undefined ? {} : {
+          orchestration: meta.orchestration,
+        }),
+      });
+  }
+}
+
+function lineageMapsEqual(
+  first: ReadonlyMap<string, ConversationLineage>,
+  second: ReadonlyMap<string, ConversationLineage>,
+): boolean {
+  return first.size === second.size && [...first].every(([id, lineage]) => {
+    const other = second.get(id);
+    return other !== undefined && JSON.stringify(lineage) === JSON.stringify(other);
+  });
+}
 
 interface VerifiedTargetSessionFileRead<
   Inspection extends PiSessionFileInspection = PiSessionFileInspection,
@@ -2021,18 +2101,63 @@ export class ProjectStore {
     return inspections;
   }
 
+  /** Fresh strict header membership; no transcript body, SDK index, or discovery cache. */
+  readConversationIds(): Promise<readonly string[]> {
+    return this.enqueueConversationOperation(async () => {
+      await this.recoverAbandonedSessionQuarantines();
+      const namespace = await this.readStrictNamespaceHeaderCensus();
+      return Object.freeze(
+        namespace.evidence.map(({ conversationId }) => conversationId!).sort(),
+      );
+    });
+  }
+
+  /** Late negative fact only, after the caller's leased physical deletion. */
+  async assertConversationsAbsent(conversationIds: readonly string[]): Promise<void> {
+    const ids = new Set(conversationIds);
+    for (const id of ids) assertSessionId(id, "conversationId");
+    // Deliberately outside the store queue: a queued display body scan must
+    // not delay this post-delete check. This neither recovers artifacts nor
+    // authorizes deletion or a positive conversation observation.
+    const namespace = await this.readStrictNamespaceHeaderCensus();
+    for (const { conversationId } of namespace.evidence) {
+      if (ids.has(conversationId!)) {
+        throw new Error(`Conversation remains present after deletion: ${conversationId}`);
+      }
+    }
+  }
+
+  /** Freeze the complete current lineage namespace without reading transcript tails. */
+  readConversationLineages(): Promise<ConversationLineageSnapshot> {
+    return this.enqueueConversationOperation(async () => {
+      await this.recoverAbandonedSessionQuarantines();
+      const before = await this.readStrictNamespaceHeaderCensus();
+      const first = await this.readNamespaceLineages(before);
+      const after = await this.readStrictNamespaceHeaderCensus();
+      if (!namespaceHeaderEvidenceSetsEqual(before, after)) {
+        throw new SessionDirectoryChangedError();
+      }
+      const second = await this.readNamespaceLineages(after);
+      const finalNamespace = await this.readStrictNamespaceHeaderCensus();
+      if (!namespaceHeaderEvidenceSetsEqual(after, finalNamespace)
+        || !lineageMapsEqual(first, second)) {
+        throw new SessionDirectoryChangedError(
+          "Project conversation namespace or lineage changed while it was being read",
+        );
+      }
+      return new ConversationLineageSnapshot(this, finalNamespace, second);
+    });
+  }
+
   async deleteConversation(conversationId: string): Promise<void> {
     await this.deleteConversations([conversationId]);
   }
 
-  /**
-   * Deletes one frozen set of conversations through one complete catalog
-   * transaction and returns the final complete catalog proof. Callers must
-   * already own every matching deletion lease.
-   */
+  /** Deletes one frozen set after target-only inspection and a strict namespace proof. */
   deleteConversations(
     conversationIds: readonly string[],
-  ): Promise<ConversationDeletionFinalCatalogProof> {
+    lineageSnapshot?: ConversationLineageSnapshot,
+  ): Promise<ConversationDeletionFinalNamespaceProof> {
     const uniqueConversationIds = [...new Set(conversationIds)];
     if (uniqueConversationIds.length === 0) {
       return Promise.reject(new Error("At least one conversation is required"));
@@ -2042,42 +2167,93 @@ export class ProjectStore {
     }
     return this.enqueueConversationOperation(async () => {
       await this.recoverAbandonedSessionQuarantines();
-      const batch = await this.readVerifiedSessionFileBatch(
-        uniqueConversationIds,
-        { allowMissing: true },
+      const namespace = await this.readStrictNamespaceHeaderCensus();
+      if (lineageSnapshot !== undefined) {
+        const lineages = await this.readNamespaceLineages(namespace);
+        if (!lineageSnapshot.matches(this, namespace, lineages)) {
+          throw new SessionDirectoryChangedError("Conversation deletion namespace or lineage changed");
+        }
+      }
+      const byId = new Map(
+        namespace.evidence.map((entry) => [entry.conversationId!, entry.file]),
       );
+      const targets = new Map<string, InspectedSessionFileRead>();
+      for (const conversationId of uniqueConversationIds) {
+        const file = byId.get(conversationId);
+        if (file === undefined) continue; // Idempotent tombstone recovery.
+        const target = await this.readStableExpectedSessionFile(
+          file, conversationId,
+        );
+        if (lineageSnapshot !== undefined
+          && !lineageSnapshot.matchesTarget(
+            conversationId, target.inspection.conversationMeta,
+          )) {
+          throw new SessionDirectoryChangedError(
+            `Conversation lineage changed: ${conversationId}`,
+          );
+        }
+        targets.set(conversationId, target);
+      }
       const quarantined: QuarantinedSessionFile[] = [];
+      const deletedIds = new Set(uniqueConversationIds);
+      const removedIds = new Set(targets.keys());
 
       try {
+        if (lineageSnapshot !== undefined) {
+          const current = await this.readStrictNamespaceHeaderCensus();
+          if (!lineageSnapshot.matches(
+            this, current, await this.readNamespaceLineages(current),
+          )) {
+            throw new SessionDirectoryChangedError("Conversation deletion namespace or lineage changed");
+          }
+        }
         for (const conversationId of uniqueConversationIds) {
-          const target = batch.targets.get(conversationId);
+          const target = targets.get(conversationId);
           if (target !== undefined) {
             quarantined.push(await this.quarantineSessionFile(
-              target,
-              conversationId,
+              target, conversationId, lineageSnapshot,
             ));
           }
         }
         const quarantinePaths = quarantined.map(
           ({ quarantinePath }) => quarantinePath,
         );
+        const verifyRemaining = async () => {
+          const remaining = await this.readStrictNamespaceHeaderCensus(quarantinePaths);
+          const reappeared = remaining.evidence.find(
+            ({ conversationId }) => deletedIds.has(conversationId!),
+          );
+          if (reappeared !== undefined) {
+            throw new SessionDirectoryChangedError(
+              `Conversation reappeared during deletion: ${reappeared.conversationId}`,
+            );
+          }
+          if (lineageSnapshot !== undefined && !lineageSnapshot.matchesRemaining(
+            this,
+            remaining,
+            await this.readNamespaceLineages(remaining),
+            removedIds,
+          )) {
+            throw new SessionDirectoryChangedError("Conversation deletion namespace or lineage changed");
+          }
+        };
 
-        // Quarantine changes the controlled JSONL set, so prove the remaining
-        // project before any unrelated durable side effect.
-        await this.getVerifiedSessionCatalog(quarantinePaths);
+        await verifyRemaining();
         for (const conversationId of uniqueConversationIds) {
           await deleteConversationNotebook(this.stateDir, conversationId);
         }
         await this.clearLastConversationsIf(new Set(uniqueConversationIds));
-
-        // Side effects may have yielded to writers. Revalidate all remaining
-        // JSONL files before the irreversible quarantine unlinks.
-        await this.getVerifiedSessionCatalog(quarantinePaths);
+        await verifyRemaining();
         for (const entry of quarantined) {
-          await this.readStableExpectedSessionFile(
-            entry.quarantineFingerprint,
-            entry.conversationId,
+          const verified = await this.readStableExpectedSessionFile(
+            entry.quarantineFingerprint, entry.conversationId,
           );
+          if (lineageSnapshot !== undefined
+            && !lineageSnapshot.matchesTarget(
+              entry.conversationId, verified.inspection.conversationMeta,
+            )) {
+            throw new SessionDirectoryChangedError(`Conversation lineage changed: ${entry.conversationId}`);
+          }
         }
         for (let index = 0; index < quarantined.length;) {
           const entry = quarantined[index]!;
@@ -2085,25 +2261,35 @@ export class ProjectStore {
           quarantined.splice(index, 1);
         }
 
-        // A successful delete is projected only from a complete proof taken
-        // after every captured quarantine has been unlinked.
-        const committedCatalog = await this.getVerifiedSessionCatalog();
-        const reappeared = committedCatalog.information.find(({ id }) =>
-          uniqueConversationIds.includes(id)
+        const finalNamespace = await this.readStrictNamespaceHeaderCensus();
+        const remainingConversationIds = Object.freeze(
+          finalNamespace.evidence.map(({ conversationId }) => conversationId!).sort(),
         );
+        const reappeared = remainingConversationIds.find((id) => deletedIds.has(id));
         if (reappeared !== undefined) {
-          throw new Error(
-            `Conversation reappeared during deletion: ${reappeared.id}`,
-          );
+          throw new Error(`Conversation reappeared during deletion: ${reappeared}`);
         }
-        this.replaceConversations(toConversationSummaries(
-          committedCatalog.information,
-        ));
-        return {
-          remainingConversationIds: Object.freeze(
-            committedCatalog.information.map(({ id }) => id).sort(),
-          ),
-        };
+        this.replaceConversations(
+          this.conversations.filter(({ id }) => !deletedIds.has(id)),
+        );
+        for (const id of deletedIds) this.conversationProjectionOverrides.delete(id);
+        const priorCatalog = this.conversationCatalog;
+        if (priorCatalog !== undefined) {
+          try {
+            await this.persistConversationCatalog({
+              ...priorCatalog,
+              coverage: { kind: "unknown" },
+              observations: priorCatalog.observations.filter((observation) =>
+                observation.header.kind !== "claims"
+                || !deletedIds.has(observation.header.conversationId)
+              ),
+            }, { expectedCurrent: priorCatalog });
+          } catch {
+            // A disposable discovery observation cannot invalidate committed deletion.
+            this.conversationCatalog = undefined;
+          }
+        }
+        return { remainingConversationIds };
       } catch (error) {
         const recoveryErrors: unknown[] = [];
         for (const entry of [...quarantined].reverse()) {
@@ -2779,19 +2965,105 @@ export class ProjectStore {
    * fixed first-line limit is conclusively not an identity candidate; I/O and
    * path uncertainty still fail the census closed.
    */
-  private async readStableNamespaceHeaderCensus(): Promise<NamespaceHeaderCensus> {
-    const filesBeforeRead = await this.listSafeSessionFiles();
+  private async readStableNamespaceHeaderCensus(
+    allowedQuarantinePaths?: readonly string[],
+  ): Promise<NamespaceHeaderCensus> {
+    const filesBeforeRead = await this.listSafeSessionFiles(allowedQuarantinePaths);
     const evidence: NamespaceHeaderEvidence[] = [];
     for (const file of filesBeforeRead) {
       evidence.push(await this.readSessionHeaderEvidence(file));
     }
-    const filesAfterRead = await this.listSafeSessionFiles();
+    const filesAfterRead = await this.listSafeSessionFiles(allowedQuarantinePaths);
     if (!sessionFileIdentitySetsEqual(filesBeforeRead, filesAfterRead)) {
       throw new SessionDirectoryChangedError(
         "Project session namespace changed while headers were being read",
       );
     }
     return { evidence: Object.freeze(evidence) };
+  }
+
+  private async readStrictNamespaceHeaderCensus(
+    allowedQuarantinePaths?: readonly string[],
+  ): Promise<NamespaceHeaderCensus> {
+    const namespace = await this.readStableNamespaceHeaderCensus(allowedQuarantinePaths);
+    const ids = new Set<string>();
+    for (const entry of namespace.evidence) {
+      if (entry.conversationId === undefined) {
+        throw new Error(`Session file has an invalid header: ${entry.file.path}`);
+      }
+      if (ids.has(entry.conversationId)) {
+        throw new Error(`Duplicate conversation identity ${entry.conversationId}`);
+      }
+      ids.add(entry.conversationId);
+    }
+    return namespace;
+  }
+
+  private async readNamespaceLineages(
+    namespace: NamespaceHeaderCensus,
+  ): Promise<ReadonlyMap<string, ConversationLineage>> {
+    const lineages = new Map<string, ConversationLineage>();
+    for (const entry of namespace.evidence) {
+      lineages.set(entry.conversationId!, await this.readSessionLineage(entry.file, entry.conversationId!));
+    }
+    return lineages;
+  }
+
+  private async readSessionLineage(
+    file: Readonly<SessionFileFingerprint>,
+    conversationId: string,
+  ): Promise<ConversationLineage> {
+    const before = await this.fingerprintSafeSessionPath(file.path);
+    if (!sessionFileIdentitiesEqual(file, before)) {
+      throw new SessionDirectoryChangedError("Conversation file changed while lineage was being read");
+    }
+    const stream = createReadStream(before.path, { encoding: "utf8" });
+    const lines = createInterface({ input: stream, crlfDelay: Infinity });
+    let lineage: ConversationLineage | undefined;
+    let lineNumber = 0;
+    try {
+      for await (const line of lines) {
+        lineNumber += 1;
+        if (lineNumber === 1) {
+          validatePiSessionFile(`${line}\n`, before.path, conversationId);
+          continue;
+        }
+        if (line.trim().length === 0) continue;
+        let value: unknown;
+        try {
+          value = JSON.parse(line);
+        } catch (error) {
+          throw new Error(`Session file has invalid JSON before metadata on line ${lineNumber}: ${before.path}`, { cause: error });
+        }
+        if (typeof value !== "object" || value === null || Array.isArray(value)) {
+          throw new Error(`Session file has invalid entry before metadata: ${before.path}`);
+        }
+        const entry = value as Record<string, unknown>;
+        if (entry.customType !== CONVERSATION_META_CUSTOM_TYPE) continue;
+        if (entry.type !== "custom"
+          || typeof entry.id !== "string" || !SESSION_ID_PATTERN.test(entry.id)
+          || !(entry.parentId === null || typeof entry.parentId === "string" && SESSION_ID_PATTERN.test(entry.parentId))
+          || typeof entry.timestamp !== "string" || !Number.isFinite(Date.parse(entry.timestamp))
+          || new Date(entry.timestamp).toISOString() !== entry.timestamp
+          || Object.keys(entry).some((key) => !["type", "id", "parentId", "timestamp", "customType", "data"].includes(key))
+        ) {
+          throw new Error(`Session file has invalid conversation metadata carrier: ${before.path}`);
+        }
+        lineage = parseConversationLineage(entry.data);
+        break;
+      }
+    } finally {
+      lines.close();
+      stream.destroy();
+    }
+    const after = await this.fingerprintSafeSessionPath(before.path);
+    if (!sessionFileIdentitiesEqual(before, after)) {
+      throw new SessionDirectoryChangedError("Conversation file changed while lineage was being read");
+    }
+    if (lineage === undefined) {
+      throw new Error(`Session file is missing conversation metadata: ${before.path}`);
+    }
+    return lineage;
   }
 
   private async readSessionHeaderEvidence(
@@ -3080,6 +3352,7 @@ export class ProjectStore {
   private async quarantineSessionFile(
     target: VerifiedSessionFileRead,
     conversationId: string,
+    lineageSnapshot?: ConversationLineageSnapshot,
   ): Promise<QuarantinedSessionFile> {
     const quarantinePath = join(
       this.sessionDir,
@@ -3103,6 +3376,10 @@ export class ProjectStore {
         quarantineFingerprint,
         conversationId,
       );
+      if (lineageSnapshot !== undefined
+        && !lineageSnapshot.matchesTarget(conversationId, verified.inspection.conversationMeta)) {
+        throw new SessionDirectoryChangedError(`Conversation lineage changed: ${conversationId}`);
+      }
       return {
         originalPath: target.path,
         quarantinePath,

@@ -1016,7 +1016,7 @@ describe("ProjectStore", () => {
     );
 
     await expect(store.deleteConversation(conversationId)).rejects.toThrow(
-      "invalid JSON",
+      "invalid header",
     );
 
     await expect(readFile(sessionFile, "utf8")).resolves.toBe(corruptRaw);
@@ -1027,6 +1027,204 @@ describe("ProjectStore", () => {
     await expect(
       readFile(join(store.sessionDir, recoveryFiles[0]!), "utf8"),
     ).resolves.toContain(conversationId);
+  });
+
+  it("checks late absence without waiting for queued display body work", async () => {
+    const cwd = await createTemporaryDirectory("piweb-delete-late-absence-");
+    const store = await ProjectStore.open(cwd);
+    const unrelated = await store.createConversation(randomUUID(), discoveryMeta(), {
+      updateRecent: false, refreshIndex: false,
+    });
+    unrelated.appendSessionInfo("force display body read");
+    const entered = createDeferred<void>();
+    const release = createDeferred<void>();
+    const internals = store as unknown as ProjectStoreIntegrityInternals;
+    const originalRead = internals.readStableExpectedSessionFile.bind(store);
+    vi.spyOn(internals, "readStableExpectedSessionFile").mockImplementationOnce(
+      async (...args) => {
+        entered.resolve();
+        await release.promise;
+        return originalRead(...args);
+      },
+    );
+    const display = store.discoverConversations();
+    await entered.promise;
+    let guardSettled = false;
+    try {
+      const guard = store.assertConversationsAbsent([randomUUID()]).then(() => {
+        guardSettled = true;
+      });
+      await vi.waitFor(() => expect(guardSettled).toBe(true));
+      await guard;
+    } finally {
+      release.resolve();
+      await display;
+    }
+  });
+
+  it("fails late absence closed on an unknown header or leftover quarantine without recovery", async () => {
+    const cwd = await createTemporaryDirectory("piweb-delete-late-unsafe-");
+    const store = await ProjectStore.open(cwd);
+    const invalid = join(store.sessionDir, "unknown.jsonl");
+    await writeFile(invalid, '{"type":"session"\n');
+    await expect(store.assertConversationsAbsent([randomUUID()])).rejects.toThrow(/invalid header/i);
+    await unlink(invalid);
+
+    const conversation = await store.createConversation(undefined, discoveryMeta());
+    await expect(store.assertConversationsAbsent([conversation.getSessionId()]))
+      .rejects.toThrow(/remains present/i);
+    const path = conversation.getSessionFile()!;
+    const quarantine = join(store.sessionDir, `.${basename(path)}.${randomUUID()}.delete-quarantine`);
+    await rename(path, quarantine);
+    await expect(store.assertConversationsAbsent([conversation.getSessionId()]))
+      .rejects.toThrow(/quarantine/i);
+    await expect(readFile(quarantine, "utf8")).resolves.toContain(conversation.getSessionId());
+    await expect(readFile(path, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("recovers a same-process deletion quarantine before fresh membership and lineage reads", async () => {
+    const cwd = await createTemporaryDirectory("piweb-delete-membership-recovery-");
+    const store = await ProjectStore.open(cwd);
+    const conversation = await store.createConversation(undefined, discoveryMeta());
+    const path = conversation.getSessionFile()!;
+    const quarantine = join(
+      store.sessionDir,
+      `.${basename(path)}.${randomUUID()}.delete-quarantine`,
+    );
+    await rename(path, quarantine);
+
+    expect(await store.readConversationIds()).toContain(conversation.getSessionId());
+    await expect(readFile(quarantine, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+    await rename(path, quarantine);
+    expect((await store.readConversationLineages()).lineages.get(conversation.getSessionId())?.createdBy)
+      .toEqual({ kind: "user" });
+    await expect(readFile(quarantine, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("deletes a cold target despite an unrelated malformed tail without SDK listing or reading its body", async () => {
+    const cwd = await createTemporaryDirectory("piweb-delete-cold-target-");
+    const store = await ProjectStore.open(cwd);
+    const target = await store.createConversation(undefined, discoveryMeta());
+    const unrelated = await store.createConversation(undefined, discoveryMeta());
+    const targetPath = target.getSessionFile()!;
+    const unrelatedPath = unrelated.getSessionFile()!;
+    await writeFile(unrelatedPath, `${await readFile(unrelatedPath, "utf8")}{broken tail\n`);
+    const listAll = vi.spyOn(SessionManager, "listAll");
+    const reads = vi.spyOn(store as unknown as ProjectStoreIntegrityInternals, "readStableExpectedSessionFile");
+
+    const proof = await store.deleteConversations([target.getSessionId()]);
+
+    expect(proof.remainingConversationIds).toContain(unrelated.getSessionId());
+    expect(listAll).not.toHaveBeenCalled();
+    expect(reads.mock.calls.every(([file]) => file.path !== unrelatedPath)).toBe(true);
+    await expect(readFile(targetPath, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(readFile(unrelatedPath, "utf8")).resolves.toContain("{broken tail");
+    await expect(store.refreshConversations()).rejects.toThrow(/invalid JSON/i);
+  });
+
+  it.each(["invalid header", "duplicate claim"] as const)(
+    "rejects an unrelated %s in strict deletion membership",
+    async (fault) => {
+      const cwd = await createTemporaryDirectory("piweb-delete-invalid-namespace-");
+      const store = await ProjectStore.open(cwd);
+      const target = await store.createConversation(undefined, discoveryMeta());
+      const extraPath = join(store.sessionDir, "unrelated.jsonl");
+      if (fault === "invalid header") {
+        await writeFile(extraPath, '{"type":"session"\n');
+      } else {
+        await writeSessionHeader(extraPath, target.getSessionId(), store.cwd);
+        await writeFile(extraPath, `${await readFile(extraPath, "utf8")}{broken tail\n`);
+      }
+
+      await expect(store.readConversationIds()).rejects.toThrow(fault === "invalid header" ? /invalid header/i : /duplicate/i);
+      await expect(store.deleteConversation(target.getSessionId())).rejects.toThrow(fault === "invalid header" ? /invalid header/i : /duplicate/i);
+      await expect(readFile(target.getSessionFile()!, "utf8")).resolves.toContain(target.getSessionId());
+    },
+  );
+
+  it("reads lineage from a later base entry without validating an unrelated role or tail", async () => {
+    const cwd = await createTemporaryDirectory("piweb-delete-lineage-layout-");
+    const store = await ProjectStore.open(cwd);
+    const target = await store.createConversation(undefined, discoveryMeta());
+    const path = target.getSessionFile()!;
+    const lines = (await readFile(path, "utf8")).trimEnd().split("\n");
+    const meta = JSON.parse(lines[1]!) as Record<string, unknown>;
+    (meta.data as Record<string, unknown>).role = { invalid: true };
+    const prefix = JSON.stringify({ type: "session_info", id: "prefix", parentId: null, timestamp: "2026-01-01T00:00:00.000Z", name: "before metadata" });
+    await writeFile(path, `${lines[0]}\n${prefix}\n${JSON.stringify(meta)}\n{broken tail\n`);
+
+    const snapshot = await store.readConversationLineages();
+    expect(snapshot.lineages.get(target.getSessionId())?.createdBy).toEqual({ kind: "user" });
+  });
+
+  it("reads a large escaped base metadata line beyond the header limit", async () => {
+    const cwd = await createTemporaryDirectory("piweb-delete-large-meta-");
+    const store = await ProjectStore.open(cwd);
+    const conversation = await store.createConversation(undefined, discoveryMeta());
+    const path = conversation.getSessionFile()!;
+    const lines = (await readFile(path, "utf8")).trimEnd().split("\n");
+    const meta = JSON.parse(lines[1]!) as { data: ConversationMeta };
+    meta.data.role.systemPrompt = "escaped\n".repeat(10_000);
+    await writeFile(path, `${lines[0]}\n${JSON.stringify(meta)}\n`);
+    expect(Buffer.byteLength(JSON.stringify(meta))).toBeGreaterThan(64 * 1024);
+
+    const snapshot = await store.readConversationLineages();
+    expect(snapshot.lineages.get(conversation.getSessionId())?.createdBy).toEqual({ kind: "user" });
+  });
+
+  it("accepts target shutdown-style append and unrelated corrupt tail after a lineage snapshot", async () => {
+    const cwd = await createTemporaryDirectory("piweb-delete-snapshot-append-");
+    const store = await ProjectStore.open(cwd);
+    const target = await store.createConversation(undefined, discoveryMeta());
+    const unrelated = await store.createConversation(undefined, discoveryMeta());
+    const snapshot = await store.readConversationLineages();
+    Object.assign(snapshot.lineages.get(unrelated.getSessionId())!.createdBy, {
+      kind: "conversation", conversationId: randomUUID(),
+    });
+    target.appendSessionInfo("shutdown-style tail");
+    await writeFile(unrelated.getSessionFile()!, `${await readFile(unrelated.getSessionFile()!, "utf8")}{broken tail\n`);
+
+    const proof = await store.deleteConversations([target.getSessionId()], snapshot);
+    expect(proof.remainingConversationIds).toContain(unrelated.getSessionId());
+    await expect(readFile(target.getSessionFile()!, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("rejects a changed lineage captured in a deletion snapshot", async () => {
+    const cwd = await createTemporaryDirectory("piweb-delete-snapshot-change-");
+    const store = await ProjectStore.open(cwd);
+    const target = await store.createConversation(undefined, discoveryMeta());
+    const unrelated = await store.createConversation(undefined, discoveryMeta());
+    const snapshot = await store.readConversationLineages();
+    const unrelatedPath = unrelated.getSessionFile()!;
+    const raw = await readFile(unrelatedPath, "utf8");
+    await writeFile(unrelatedPath, raw.replace('"kind":"user"', `"kind":"conversation","conversationId":"${target.getSessionId()}"`));
+    await expect(store.deleteConversations([target.getSessionId()], snapshot)).rejects.toThrow(/lineage|namespace/i);
+    await expect(readFile(target.getSessionFile()!, "utf8")).resolves.toContain(target.getSessionId());
+  });
+
+  it("rejects a new namespace member after a deletion snapshot", async () => {
+    const cwd = await createTemporaryDirectory("piweb-delete-snapshot-namespace-");
+    const store = await ProjectStore.open(cwd);
+    const target = await store.createConversation(undefined, discoveryMeta());
+    const snapshot = await store.readConversationLineages();
+    await writeSessionHeader(join(store.sessionDir, "new-member.jsonl"), randomUUID(), store.cwd);
+
+    await expect(store.deleteConversations([target.getSessionId()], snapshot)).rejects.toThrow(/namespace/i);
+    await expect(readFile(target.getSessionFile()!, "utf8")).resolves.toContain(target.getSessionId());
+  });
+
+  it("rejects a same-header target inode replacement after a deletion snapshot", async () => {
+    const cwd = await createTemporaryDirectory("piweb-delete-snapshot-replacement-");
+    const store = await ProjectStore.open(cwd);
+    const target = await store.createConversation(undefined, discoveryMeta());
+    const path = target.getSessionFile()!;
+    const snapshot = await store.readConversationLineages();
+    const replacement = join(store.sessionDir, ".replacement.tmp");
+    await writeFile(replacement, await readFile(path, "utf8"));
+    await rename(replacement, path);
+
+    await expect(store.deleteConversations([target.getSessionId()], snapshot)).rejects.toThrow(/namespace/i);
+    await expect(readFile(path, "utf8")).resolves.toContain(target.getSessionId());
   });
 
   it("projects an unrelated conversation added at quarantine unlink", async () => {
@@ -1047,15 +1245,12 @@ describe("ProjectStore", () => {
 
     await store.deleteConversation(deleted.getSessionId());
 
-    expect(store.listConversations().map(({ id }) => id)).toEqual(
-      expect.arrayContaining([retained.getSessionId(), addedId]),
-    );
-    expect(store.listConversations().map(({ id }) => id)).not.toContain(
-      deleted.getSessionId(),
-    );
+    expect(store.listConversations().map(({ id }) => id)).toContain(retained.getSessionId());
+    expect(store.listConversations().map(({ id }) => id)).not.toContain(deleted.getSessionId());
+    expect(await store.readConversationIds()).toContain(addedId);
   });
 
-  it("projects retained conversations from the catalog generation that deletion proved", async () => {
+  it("rejects an unstable namespace census and safely retries with its added member", async () => {
     const cwd = await createTemporaryDirectory("piweb-delete-generation-");
     const store = await ProjectStore.open(cwd);
     const deleted = await store.createConversation();
@@ -1077,18 +1272,17 @@ describe("ProjectStore", () => {
       },
     );
 
-    await store.deleteConversation(deleted.getSessionId());
-
-    expect(listAll).toHaveBeenCalledTimes(2);
-    expect(store.listConversations().map(({ id }) => id)).toEqual(
+    await expect(store.deleteConversation(deleted.getSessionId()))
+      .rejects.toThrow("namespace changed");
+    const proof = await store.deleteConversations([deleted.getSessionId()]);
+    expect(listAll).not.toHaveBeenCalled();
+    expect(proof.remainingConversationIds).toEqual(
       expect.arrayContaining([retained.getSessionId(), addedId]),
     );
-    expect(store.listConversations().map(({ id }) => id)).not.toContain(
-      deleted.getSessionId(),
-    );
+    expect(store.listConversations().map(({ id }) => id)).not.toContain(deleted.getSessionId());
   });
 
-  it("publishes a conversation added after the first post-quarantine proof", async () => {
+  it("includes a conversation added after the first post-quarantine proof in final membership", async () => {
     const cwd = await createTemporaryDirectory("piweb-delete-post-proof-add-");
     const store = await ProjectStore.open(cwd);
     const deleted = await store.createConversation();
@@ -1107,9 +1301,8 @@ describe("ProjectStore", () => {
 
     await store.deleteConversation(deleted.getSessionId());
 
-    expect(store.listConversations().map(({ id }) => id)).toEqual(
-      expect.arrayContaining([retained.getSessionId(), addedId]),
-    );
+    expect(store.listConversations().map(({ id }) => id)).toContain(retained.getSessionId());
+    expect(await store.readConversationIds()).toContain(addedId);
   });
 
   it("recovers a partially unlinked batch across restart", async () => {
@@ -1205,7 +1398,7 @@ describe("ProjectStore", () => {
     }
   });
 
-  it("restores quarantine when an unrelated file becomes corrupt after proof", async () => {
+  it("keeps deletion committed when an unrelated file becomes corrupt after proof", async () => {
     const cwd = await createTemporaryDirectory("piweb-delete-post-proof-corrupt-");
     const store = await ProjectStore.open(cwd);
     const deleted = await store.createConversation();
@@ -1218,23 +1411,16 @@ describe("ProjectStore", () => {
     vi.spyOn(internals, "clearLastConversationsIf").mockImplementationOnce(
       async (conversationIds) => {
         await originalClearLastConversations(conversationIds);
-        await writeFile(corruptPath, '{"type":"session"\n');
+        await writeSessionHeader(corruptPath, randomUUID(), store.cwd);
+        await writeFile(corruptPath, `${await readFile(corruptPath, "utf8")}{broken tail\n`);
       },
     );
 
-    await expect(
-      store.deleteConversation(deleted.getSessionId()),
-    ).rejects.toThrow("invalid JSON");
-
-    await expect(readFile(deletedPath, "utf8")).resolves.toContain(
-      deleted.getSessionId(),
-    );
-    await expect(readFile(corruptPath, "utf8")).resolves.toBe(
-      '{"type":"session"\n',
-    );
-    expect(store.listConversations().map(({ id }) => id)).toEqual(
-      expect.arrayContaining([deleted.getSessionId(), retained.getSessionId()]),
-    );
+    await store.deleteConversation(deleted.getSessionId());
+    await expect(readFile(deletedPath, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(readFile(corruptPath, "utf8")).resolves.toContain("{broken tail");
+    expect(store.listConversations().map(({ id }) => id)).toContain(retained.getSessionId());
+    expect(store.listConversations().map(({ id }) => id)).not.toContain(deleted.getSessionId());
   });
 
   it("truncates one inspected target and reuses unrelated discovery observations without a full SDK list", async () => {
@@ -1694,7 +1880,7 @@ describe("ProjectStore", () => {
     delayedScan.resolve(information);
     await Promise.all([refresh, deletion]);
 
-    expect(listAll).toHaveBeenCalledTimes(2);
+    expect(listAll).toHaveBeenCalledTimes(1);
     expect(store.lastConversationId).toBe(retained.getSessionId());
     expect(store.listConversations().map(({ id }) => id)).toEqual([
       retained.getSessionId(),

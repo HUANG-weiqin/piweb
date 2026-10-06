@@ -82,6 +82,8 @@ import {
 } from "./project-inbox.js";
 import {
   ConversationNotFoundError,
+  type ConversationLineage,
+  type ConversationLineageSnapshot,
   type ProjectStore,
 } from "./project-store.js";
 import {
@@ -3454,18 +3456,19 @@ export class ProjectSessionCoordinator {
       await context.inbox.listDeletedTargets(),
     );
     if (durableIdsSnapshot.size === 0 || context.closing) return;
-    const clearedAbsentIds = await this.clearFullyDeletedTargetFences(
+    const handledAbsentIds = await this.clearFullyDeletedTargetFences(
       context,
       durableIdsSnapshot,
     );
     const remainingDurableIds = new Set(
       [...durableIdsSnapshot].filter((conversationId) =>
-        !clearedAbsentIds.has(conversationId)
+        !handledAbsentIds.has(conversationId)
       ),
     );
     if (remainingDurableIds.size === 0 || context.closing) return;
+    let lineageSnapshot: ConversationLineageSnapshot;
     try {
-      await this.hydrateConversationProfiles(context);
+      lineageSnapshot = await context.project.readConversationLineages();
     } catch {
       for (const conversationId of remainingDurableIds) {
         context.attention.add(conversationId);
@@ -3479,7 +3482,9 @@ export class ProjectSessionCoordinator {
       try {
         cascades.set(
           conversationId,
-          this.collectCascadeDeletionIds(context, conversationId),
+          this.collectCascadeDeletionIds(
+            context, conversationId, lineageSnapshot.lineages,
+          ),
         );
       } catch {
         // Keep a malformed lineage as a one-item fallback. Its normal delete
@@ -3530,26 +3535,28 @@ export class ProjectSessionCoordinator {
   }
 
   /**
-   * Once all durable targets in a subset are already physically absent, no
-   * lineage inspection or per-target retry is necessary. Capture their exact
-   * sidecars once, dispose any stragglers, and clear the fences as one batch.
+   * Physically absent durable targets need no lineage inspection or target
+   * retry. Capture their exact sidecars and clear their fences as one batch.
+   * Return IDs already handled (including failed cleanup) so this recovery
+   * pass cannot replan a reappeared file as a fresh deletion target.
    */
   private async clearFullyDeletedTargetFences(
     context: ProjectContext,
     durableConversationIds: ReadonlySet<string>,
   ): Promise<Set<string>> {
-    // This fresh complete catalog is the only evidence that an external source
-    // has no transcript left to receive its terminal card.
-    let finalCatalog: ConversationSummary[];
+    // Fresh strict header membership proves an absent target or external
+    // source without reading unrelated transcript tails.
+    let remainingIds: readonly string[];
     try {
-      finalCatalog = await context.project.refreshConversations();
+      remainingIds = await context.project.readConversationIds();
     } catch {
       for (const conversationId of durableConversationIds) {
         context.attention.add(conversationId);
       }
-      return new Set();
+      // Unknown namespace cannot authorize a retry in this same pass.
+      return new Set(durableConversationIds);
     }
-    const presentIds = new Set(finalCatalog.map(({ id }) => id));
+    const presentIds = new Set(remainingIds);
     const absentIds = [...durableConversationIds].filter((conversationId) =>
       !presentIds.has(conversationId) && !context.actors.has(conversationId)
     );
@@ -3563,8 +3570,8 @@ export class ProjectSessionCoordinator {
       );
       for (const envelope of batch.pending) {
         // An in-batch source is being cleaned with its target. An external
-        // source may skip a card only when this same complete catalog proved
-        // its transcript absent; present sources must durably terminalize.
+        // source may skip a card only when this fresh namespace proved its
+        // transcript absent; present sources must durably terminalize.
         if (
           absentIdSet.has(envelope.fromConversationId)
           || !presentIds.has(envelope.fromConversationId)
@@ -3583,6 +3590,7 @@ export class ProjectSessionCoordinator {
         }
       }
       await context.inbox.deleteCapturedTargetMessages(batch);
+      await this.assertDeletionTargetsStillAbsent(context, batch.conversationIds);
       try {
         await context.inbox.clearTargetDeletionBatch(batch);
       } catch (error) {
@@ -3609,7 +3617,24 @@ export class ProjectSessionCoordinator {
           context.attention.add(conversationId);
         }
       }
-      return clearedDuringFailedClear;
+      // Do not turn a replacement discovered during cleanup into a new
+      // deletion target in the same recovery pass. A later pass may replan.
+      return new Set(absentIds);
+    }
+  }
+
+  /** Reprove absence outside the Store queue after sidecar work, before fence clear. */
+  private async assertDeletionTargetsStillAbsent(
+    context: ProjectContext,
+    conversationIds: readonly string[],
+  ): Promise<void> {
+    try {
+      await context.project.assertConversationsAbsent(conversationIds);
+    } catch (error) {
+      for (const conversationId of conversationIds) {
+        context.attention.add(conversationId);
+      }
+      throw error;
     }
   }
 
@@ -4047,18 +4072,15 @@ export class ProjectSessionCoordinator {
             return { deleted: existing.deleted };
           }
 
-          const targetExists = context.actors.has(input.conversationId)
-            || context.project.listConversations().some(
-              ({ id }) => id === input.conversationId,
-            );
-          if (targetExists) {
-            await this.hydrateConversationProfiles(context);
-            if (
-              this.collectCascadeDeletionIds(context, input.conversationId)
-                .includes(sourceConversationId)
-            ) {
-              throw new Error("An Agent cannot delete its own session");
-            }
+          const lineageSnapshot = await context.project.readConversationLineages();
+          const targetExists = lineageSnapshot.lineages.has(input.conversationId);
+          if (!targetExists && context.actors.has(input.conversationId)) {
+            throw new Error("Active conversation disappeared from the disk namespace");
+          }
+          if (targetExists && this.collectCascadeDeletionIds(
+            context, input.conversationId, lineageSnapshot.lineages,
+          ).includes(sourceConversationId)) {
+            throw new Error("An Agent cannot delete its own session");
           }
           if (!existing) {
             appendReservedCustomEntry(
@@ -4081,6 +4103,9 @@ export class ProjectSessionCoordinator {
                 input.conversationId,
                 true,
                 sourceConversationId,
+                false,
+                undefined,
+                lineageSnapshot,
               );
           appendReservedCustomEntry(
             source.sessionManager,
@@ -4172,9 +4197,9 @@ export class ProjectSessionCoordinator {
 
   /**
    * Synchronously resolve orchestration rootConversationId and depth for a
-   * given conversation. Caller must have run hydrateConversationProfiles()
-   * first so context.profiles is populated for all project conversations.
-   * Never does its own disk I/O.
+   * given conversation. Non-deletion callers hydrate context.profiles first;
+   * deletion callers supply a fresh Store lineage snapshot instead. This
+   * resolver never performs disk I/O.
    *
    * Returns { rootConversationId, depth } or throws on cycle/inconsistency/
    * missing parent (implicit lineage only).
@@ -4182,8 +4207,10 @@ export class ProjectSessionCoordinator {
   private resolveOrchestration(
     context: ProjectContext,
     conversationId: string,
-    profile: ConversationMeta | undefined,
+    profile: ConversationMeta | ConversationLineage | undefined,
     visited?: Set<string>,
+    lineages?: ReadonlyMap<string, ConversationLineage>,
+    lineageIds?: ReadonlySet<string>,
   ): { rootConversationId: string; depth: number } {
     const chain = visited ?? new Set<string>();
     if (chain.has(conversationId)) {
@@ -4193,14 +4220,17 @@ export class ProjectSessionCoordinator {
     }
     chain.add(conversationId);
 
-    const knownIds = new Set(
-      context.project.listConversations().map((s) => s.id),
-    );
+    const knownIds = lineageIds ?? new Set(lineages
+      ? lineages.keys()
+      : context.project.listConversations().map((s) => s.id));
 
-    // Resolve profile: passed in, from live actor, or from cached profiles.
+    // Deletion uses only the fresh Store lineage snapshot; non-deletion
+    // callers retain their existing warm actor/profile resolution.
     const resolvedProfile = profile
-      ?? context.actors.get(conversationId)?.profile
-      ?? context.profiles.get(conversationId);
+      ?? (lineages
+        ? lineages.get(conversationId)
+        : context.actors.get(conversationId)?.profile
+          ?? context.profiles.get(conversationId));
 
     if (!resolvedProfile) {
       throw new Error(
@@ -4229,14 +4259,16 @@ export class ProjectSessionCoordinator {
 
       // createdBy.kind === "conversation"
       const parentId = createdBy.conversationId;
-      const parentProfile = context.actors.get(parentId)?.profile
-        ?? context.profiles.get(parentId);
+      const parentProfile = lineages
+        ? lineages.get(parentId)
+        : context.actors.get(parentId)?.profile
+          ?? context.profiles.get(parentId);
       const parentExists = parentProfile !== undefined
         || knownIds.has(parentId);
 
       if (parentExists) {
         const parent = this.resolveOrchestration(
-          context, parentId, parentProfile, chain,
+          context, parentId, parentProfile, chain, lineages, knownIds,
         );
         if (parent.rootConversationId !== orchestration.rootConversationId) {
           throw new Error(
@@ -4265,8 +4297,10 @@ export class ProjectSessionCoordinator {
 
     // createdBy.kind === "conversation", no orchestration.
     const parentId = createdBy.conversationId;
-    const parentProfile = context.actors.get(parentId)?.profile
-      ?? context.profiles.get(parentId);
+    const parentProfile = lineages
+      ? lineages.get(parentId)
+      : context.actors.get(parentId)?.profile
+        ?? context.profiles.get(parentId);
 
     if (!parentProfile) {
       throw new Error(
@@ -4278,7 +4312,7 @@ export class ProjectSessionCoordinator {
     }
 
     const parent = this.resolveOrchestration(
-      context, parentId, parentProfile, chain,
+      context, parentId, parentProfile, chain, lineages, knownIds,
     );
     return {
       rootConversationId: parent.rootConversationId,
@@ -5869,11 +5903,10 @@ export class ProjectSessionCoordinator {
       const durableDeletionTargets = new Set(
         await context.inbox.listDeletedTargets(),
       );
-      const targetExists = context.actors.has(targetConversationId)
-        || context.project.listConversations().some(
-          ({ id }) => id === targetConversationId,
-        );
-      return durableDeletionTargets.has(targetConversationId) || !targetExists;
+      if (durableDeletionTargets.has(targetConversationId)) return true;
+      if (context.actors.has(targetConversationId)) return false;
+      return !(await context.project.readConversationIds())
+        .includes(targetConversationId);
     };
     const finishAsDeleted = () => {
       context.processingBatches.delete(key);
@@ -6824,128 +6857,83 @@ export class ProjectSessionCoordinator {
   private collectCascadeDeletionIds(
     context: ProjectContext,
     conversationId: string,
+    lineages: ReadonlyMap<string, ConversationLineage>,
   ): string[] {
-    const knownIds = new Set([
-      ...context.project.listConversations().map(({ id }) => id),
-      ...context.actors.keys(),
-    ]);
-    this.validateConversationLineageGraph(context, knownIds);
+    const knownIds = new Set(lineages.keys());
+    for (const candidateId of lineages.keys()) {
+      this.resolveOrchestration(
+        context, candidateId, lineages.get(candidateId),
+        undefined, lineages, knownIds,
+      );
+    }
     return [...knownIds]
       .filter((candidateId) =>
         candidateId === conversationId
         || this.isCascadeDescendant(
-          context,
-          candidateId,
-          conversationId,
-          knownIds,
+          lineages, candidateId, conversationId,
         )
       )
       .sort((left, right) => {
         const depth = this.cascadeDeletionDepth(
-          context,
-          right,
-          conversationId,
-          knownIds,
+          lineages, right, conversationId,
         ) - this.cascadeDeletionDepth(
-          context,
-          left,
-          conversationId,
-          knownIds,
+          lineages, left, conversationId,
         );
         return depth === 0 ? left.localeCompare(right) : depth;
       });
   }
 
-  private validateConversationLineageGraph(
-    context: ProjectContext,
-    conversationIds: ReadonlySet<string>,
-  ): void {
-    for (const candidateId of conversationIds) {
-      const profile = context.actors.get(candidateId)?.profile
-        ?? context.profiles.get(candidateId);
-      if (profile === undefined) {
-        throw new Error(`Conversation ${candidateId} profile metadata is missing`);
-      }
-      this.resolveOrchestration(context, candidateId, profile);
-    }
-  }
-
   private isCascadeDescendant(
-    context: ProjectContext,
+    lineages: ReadonlyMap<string, ConversationLineage>,
     conversationId: string,
     ancestorConversationId: string,
-    knownIds: ReadonlySet<string>,
     visited: Set<string> = new Set(),
   ): boolean {
     if (conversationId === ancestorConversationId) return true;
     if (visited.has(conversationId)) {
-      throw new Error(
-        `Orchestration parent cycle detected at ${conversationId}`,
-      );
+      throw new Error(`Orchestration parent cycle detected at ${conversationId}`);
     }
     visited.add(conversationId);
 
-    const profile = context.actors.get(conversationId)?.profile
-      ?? context.profiles.get(conversationId);
-    if (profile === undefined) {
-      throw new Error(`Conversation ${conversationId} profile metadata is missing`);
+    const lineage = lineages.get(conversationId);
+    if (lineage === undefined || lineage.createdBy.kind !== "conversation") {
+      return false;
     }
-    if (profile.createdBy.kind !== "conversation") return false;
-
-    const parentId = profile.createdBy.conversationId;
+    const parentId = lineage.createdBy.conversationId;
     if (parentId === ancestorConversationId) return true;
-    if (knownIds.has(parentId)) {
+    if (lineages.has(parentId)) {
       return this.isCascadeDescendant(
-        context,
-        parentId,
-        ancestorConversationId,
-        knownIds,
-        visited,
+        lineages, parentId, ancestorConversationId, visited,
       );
     }
-
-    return profile.orchestration?.rootConversationId === ancestorConversationId;
+    return lineage.orchestration?.rootConversationId === ancestorConversationId;
   }
 
   private cascadeDeletionDepth(
-    context: ProjectContext,
+    lineages: ReadonlyMap<string, ConversationLineage>,
     conversationId: string,
     rootConversationId: string,
-    knownIds: ReadonlySet<string>,
     visited: Set<string> = new Set(),
   ): number {
     if (conversationId === rootConversationId) return 0;
     if (visited.has(conversationId)) return 0;
     visited.add(conversationId);
 
-    const profile = context.actors.get(conversationId)?.profile
-      ?? context.profiles.get(conversationId);
-    if (profile === undefined) {
-      throw new Error(`Conversation ${conversationId} profile metadata is missing`);
-    }
-    if (profile.createdBy.kind === "conversation") {
-      const parentId = profile.createdBy.conversationId;
+    const lineage = lineages.get(conversationId);
+    if (lineage?.createdBy.kind === "conversation") {
+      const parentId = lineage.createdBy.conversationId;
       if (parentId === rootConversationId) return 1;
       if (
-        knownIds.has(parentId)
-        && this.isCascadeDescendant(
-          context,
-          parentId,
-          rootConversationId,
-          knownIds,
-        )
+        lineages.has(parentId)
+        && this.isCascadeDescendant(lineages, parentId, rootConversationId)
       ) {
         return 1 + this.cascadeDeletionDepth(
-          context,
-          parentId,
-          rootConversationId,
-          knownIds,
-          visited,
+          lineages, parentId, rootConversationId, visited,
         );
       }
     }
-    if (profile.orchestration?.rootConversationId === rootConversationId) {
-      return profile.orchestration.depth;
+    if (lineage?.orchestration?.rootConversationId === rootConversationId) {
+      return lineage.orchestration.depth;
     }
     return 1;
   }
@@ -6957,6 +6945,7 @@ export class ProjectSessionCoordinator {
     protectedConversationId?: string,
     reservedByDurableTombstone = false,
     knownDurableFenceIds?: ReadonlySet<string>,
+    lineageSnapshot?: ConversationLineageSnapshot,
   ): Promise<boolean> {
     const ownedReservationIds = new Set<string>();
     const durableFenceIds = new Set<string>();
@@ -6976,40 +6965,43 @@ export class ProjectSessionCoordinator {
       ownedReservationIds.add(conversationId);
     }
 
-    const known = context.project.listConversations()
-      .some(({ id }) => id === conversationId);
-    if (!known && !context.actors.has(conversationId)) {
-      if (reservedByDurableTombstone) {
-        // Durable recovery batches missing targets through
-        // clearFullyDeletedTargetFences(), which verifies exact captured
-        // tombstones instead of clearing one potentially replaced sidecar.
-        return false;
-      }
-      const durableFenceIds = new Set(await context.inbox.listDeletedTargets());
-      if (durableFenceIds.has(conversationId)) {
-        // A normal idempotent delete can race an older durable intent. Resume
-        // its captured batch rather than clearing this one fence out of order.
-        await this.retryDurableDeletions(context, durableFenceIds);
-        return false;
-      }
-      context.deleting.delete(conversationId);
-      return false;
-    }
-
-    const preexistingDurableFenceIds = reservedByDurableTombstone
-      ? new Set(
-        knownDurableFenceIds ?? await context.inbox.listDeletedTargets(),
-      )
-      : new Set<string>();
-    for (const durableId of preexistingDurableFenceIds) {
-      durableFenceIds.add(durableId);
-    }
-
-    let cascadeIds = [conversationId];
     const startedDeletionIds = new Set<string>();
     try {
-      await this.hydrateConversationProfiles(context);
-      cascadeIds = this.collectCascadeDeletionIds(context, conversationId);
+      const known = lineageSnapshot?.lineages.has(conversationId)
+        ?? (await context.project.readConversationIds()).includes(conversationId);
+      if (!known) {
+        if (context.actors.has(conversationId)) {
+          throw new Error("Active conversation disappeared from the disk namespace");
+        }
+        if (reservedByDurableTombstone) {
+          // Durable recovery clears absent targets only through captured
+          // sidecars and a separate fresh namespace membership proof.
+          return false;
+        }
+        const existingFences = new Set(await context.inbox.listDeletedTargets());
+        if (existingFences.has(conversationId)) {
+          // Resume an older captured intent rather than clearing one fence.
+          durableFenceIds.add(conversationId);
+          await this.retryDurableDeletions(context, existingFences);
+          return false;
+        }
+        this.releaseDeletionReservation(context, conversationId);
+        return false;
+      }
+
+      const preexistingDurableFenceIds = reservedByDurableTombstone
+        ? new Set(
+          knownDurableFenceIds ?? await context.inbox.listDeletedTargets(),
+        )
+        : new Set<string>();
+      for (const durableId of preexistingDurableFenceIds) {
+        durableFenceIds.add(durableId);
+      }
+
+      const snapshot = lineageSnapshot ?? await context.project.readConversationLineages();
+      const cascadeIds = this.collectCascadeDeletionIds(
+        context, conversationId, snapshot.lineages,
+      );
       if (
         protectedConversationId !== undefined
         && cascadeIds.includes(protectedConversationId)
@@ -7108,6 +7100,7 @@ export class ProjectSessionCoordinator {
         inboxBatch,
         deletionPreflights,
         cascadeIds,
+        snapshot,
       );
       await this.retryBlockedDeletions(context);
       return true;
@@ -7148,6 +7141,7 @@ export class ProjectSessionCoordinator {
     inboxBatch: InboxTargetDeletionBatch,
     deletionPreflights: Map<string, DeletionLeasePreflight>,
     deletionConversationIds: readonly string[],
+    lineageSnapshot: ConversationLineageSnapshot,
   ): Promise<void> {
     const deletionIds = new Set(deletionConversationIds);
     if (
@@ -7205,13 +7199,13 @@ export class ProjectSessionCoordinator {
         deletionLeases.push(preflight.lease);
       }
 
-      // Keep the project catalog proof independent of P. It also supplies
-      // explicit evidence for an external source which is already absent and
-      // therefore has no transcript that could record a terminal card.
-      const finalCatalog = await context.project.deleteConversations(
+      // Store rechecks the frozen lineage and returns fresh strict namespace
+      // membership; unrelated transcript tails are not deletion authority.
+      const finalNamespace = await context.project.deleteConversations(
         deletionConversationIds,
+        lineageSnapshot,
       );
-      const presentIds = new Set(finalCatalog.remainingConversationIds);
+      const presentIds = new Set(finalNamespace.remainingConversationIds);
       for (const envelope of inboxBatch.pending) {
         // A source inside this frozen delete set will be physically removed;
         // an external absent source is allowed only by this final proof.
@@ -7233,6 +7227,9 @@ export class ProjectSessionCoordinator {
         }
       }
       await context.inbox.deleteCapturedTargetMessages(inboxBatch);
+      await this.assertDeletionTargetsStillAbsent(
+        context, inboxBatch.conversationIds,
+      );
       try {
         await context.inbox.clearTargetDeletionBatch(inboxBatch);
       } catch (error) {

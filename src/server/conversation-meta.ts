@@ -988,6 +988,16 @@ export function parseConversationMetaEntry(
   return conversationMetaEntrySchema.parse(value);
 }
 
+/** Validate only deletion lineage, not the mutable role/profile projection. */
+export function parseConversationLineage(
+  value: unknown,
+): Pick<ConversationMeta, "createdBy" | "orchestration"> {
+  return conversationMetaSchema.pick({
+    createdBy: true,
+    orchestration: true,
+  }).strip().parse(value);
+}
+
 export function createConversationMetaEntry(
   data: ConversationMeta,
 ): ConversationMetaEntry {
