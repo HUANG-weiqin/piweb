@@ -1,5 +1,7 @@
 # UI 开发与验证流程
 
+`updated: 2026-10-06`
+
 ## SOP
 
 1. 从干净的 `main` 创建 feature 分支/worktree；不要直接修改 `main`。
@@ -12,7 +14,7 @@
    ```
 
    fixture 不连接 WebSocket，也不读写真实 `.piweb` 状态。真实会话流程另做生产状态测试或人工验收。
-4. 检查桌面、移动端、弹窗/焦点/Escape、响应式和 reduced-motion；详细命令见 `kb-visual-validation.md`。
+4. 检查桌面、移动端、弹窗/焦点/Escape、响应式和 reduced-motion；详细命令与证明范围见[视觉校验](kb-visual-validation.md)。
 5. 提交前运行：
 
    ```bash

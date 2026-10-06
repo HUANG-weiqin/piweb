@@ -1,6 +1,6 @@
 # 工具权限
 
-`updated: 2026-09-30`
+`updated: 2026-10-06`
 
 ## 这个模块是干什么的
 
@@ -15,11 +15,10 @@ conversation role snapshot
 → project extension tool_call hook
 → stable JSON validation + recursive freeze
 → workbench ToolPolicy
-→ run-scoped edit-budget check（仅 builtin edit/write）
+→ exact-run 首次写入 LoopList 门（仅 builtin edit/write；先持久化 marker）
 → allow 或 hard deny
 → 宿主 read_only bash 的有界词法与逐命令查询审查
-→ SDK block result 或 tool.execute
-→ 成功 mutation 的 completion accounting
+→ SDK block result 或 tool.execute（不做 completion accounting）
 ```
 
 权限层本身没有通用的逐工具询问或一次性许可；唯一的命令白名单是宿主 `read_only` Bash 包装器内固定的查询 shell 文本目录。`propose_role_revision` 是另一项工具语义内的窄例外，必须等待 conversation-scoped editor 返回用户提交文本后才写角色 prompt。
@@ -43,7 +42,7 @@ conversation role snapshot
 
 Actor-owned 会话由 `PiRuntime` 在 session services 解析完成后注入 `source=sdk` 的 `bash / bash_output / bash_stop`，用同一 `SettingsManager` 的有效 `shellPath`，替代 Pi builtin Bash。`read_only` 的启动工具仍在任何执行前审查最终 `command`，通过后才委托公开的 Pi `createBashToolDefinition` 与 local operations，保留原生输出、截断、全文临时文件和失败语义；它不接受或追加 `shellCommandPrefix`，避免审查后再改变文本。`full_access` 使用同一有界生命周期，但允许有效配置中的原生 command prefix。没有 Actor ownership 的独立 runtime 兼容路径仍保留原生同步 Bash。
 
-`bash.timeout` 是整数毫秒，上限 600000；前台默认 120000，后台未显式给出时不设期限；默认前台阻塞到结束，直接返回原生结果，不发布 id。只有显式 `run_in_background:true` 才立即发布当前逻辑 run 的独立 UUID `task_id`；`bash_output` 默认阻塞读取 30000ms（上限 600000），超时或 `block:false` 返回非消费快照，无 id 时立即列有界摘要。`bash_stop({task_id})` 是停止请求，不是停止证明。两个后续工具不能提交命令、cwd 或其它 run 的 id，所以不会扩大查询审查目录。SDK signal 只取消当前等待；真正执行使用独立 controller，预先 aborted 的启动调用仍必须在任何准入/执行前拒绝。权限 gate 保持 sequential；可并发的是已经准入的有限命令，不是工具预检。详见 [kb-server-runtime.md](kb-server-runtime.md) 的 Bash 执行边界。
+`bash.timeout` 是整数毫秒，上限 600000；前台默认 120000，后台未显式给出时不设期限；默认前台阻塞到结束，直接返回原生结果，不发布 id。只有显式 `run_in_background:true` 才立即发布当前逻辑 run 的独立 UUID `task_id`；`bash_output` 默认阻塞读取 30000ms（上限 600000），超时或 `block:false` 返回非消费快照，无 id 时立即列有界摘要。`bash_stop({task_id})` 是停止请求，不是停止证明。两个后续工具只控制本 conversation registry 的 task_id，不接收新命令/cwd；句柄跨普通 run 结算仍可用，不扩大查询审查目录。SDK signal 只取消当前等待；真正执行使用独立 controller，预先 aborted 的启动调用仍必须在任何准入/执行前拒绝。权限 gate 保持 sequential；可并发的是已经准入的有限命令，不是工具预检。详见 [kb-server-runtime.md](kb-server-runtime.md) 的 Bash 执行边界。
 
 审查只接受有长度上限、整串锚定的安全词法子集。每个程序名都必须是字面量并属于固定查询目录：受约束的 Git 查询、`rg`，以及目录/文件查看和纯 stdout 变换工具。未引用且处于 word 起始的 `~`（包括 `~/…`、`~user`、`~+`、`~-`）属于 shell expansion，必须在执行前拒绝；引用或 token 中间的字面 `~` 不因此拒绝。 受审查命令可以用 `|` 或 `&&` 组合；每个 segment 都独立复核。`cd [--] path` 只能位于同一次调用的后续查询之前，不能持久改变下一次工具调用的 cwd。换行、`; / || / &`、重定向、Shell 展开、环境赋值、命令路径和未知程序一律拒绝。`find` 的删除/执行/文件输出 action、`rg` 的 preprocessor/hostname program、Git 外部 filter/pager/output、`sort` 文件输出/外部 compressor/显式临时目录、`uniq` 输出文件、`tail` follow 和 `file` 解压/compile 等命令级副作用入口及其实际可用长选项缩写另行拒绝。允许安全的裸参数、单引号字面量，以及不含展开或转义的双引号字面量。
 
@@ -76,12 +75,15 @@ all roles: lsp_symbols / lsp_definition / lsp_references（已配置启用的本
 all roles: todo_read / todo_write / todo_pause
 all roles: request_context_compaction
 all roles: list_roles / read_role / propose_role_revision
-canManageSessions only: list_sessions / current_session / peek_session
-canManageSessions only: start_session / send_session_message
-canManageSessions only: wait_for_session / abort_session / delete_session
+full_access only: computer（截图与坐标授权见运行时）
+full_access + canManageSessions: list_sessions / current_session / peek_session
+full_access + canManageSessions: start_session / send_session_message
+full_access + canManageSessions: wait_for_session / abort_session / delete_session
 ```
 
 这些宿主 schema 同样避免 `anyOf/oneOf`，以兼容对工具 schema 子集较严格的 provider。`current_time` 在单次调用中读取本机 civil clock，返回带 offset 的 RFC 3339 `localTime` 和 IANA `timeZone`；它不从模型知识推测时间、不持久化，也不扩大浏览器协议。
+
+`computer` 的截图持久化、坐标几何与 exact next-decision 授权见[运行时](kb-server-runtime.md#桌面截图与坐标授权)；LoopList 状态、计时重放与续跑见[Actor owner](kb-agent-collaboration.md#looplist-状态与续跑)。
 
 ### 首次写入 LoopList 门控
 

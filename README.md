@@ -20,8 +20,8 @@
 - 每个项目在 `.piweb/` 中持久保存项目清单、Pi JSONL 对话和跨会话 inbox
 - 可收缩的左侧会话栏是唯一会话控制面，按根会话分组展示持久会话的角色、稳定句柄、最后活跃时间、运行 spinner、等待沙漏、attention 和未读
 - 支持恢复最近对话、新建、切换观察、重命名和永久删除 idle 对话；切换焦点或断线不会中止后台 Agent
-- 损坏、crash 截断或结构上不是 Pi entry tree 的 JSONL，以及畸形 inbox/角色元数据，在索引与打开前 fail closed
-- 每个 Agent 都有 `list_roles / read_role / propose_role_revision` 三个角色工具；允许管理会话的角色另有 9 个项目内编排工具，可列出会话、查看自身与近期消息、创建 peer、互发消息、精确等待/中止 run 和删除 idle peer
+- 完整审计和目标打开拒绝损坏、crash 截断或非法 Pi entry tree；浏览器目录发现只证明安全唯一的成员集合，不冒充全部正文审计
+- 每个 Agent 都有 `list_roles / read_role / propose_role_revision` 三个角色工具；允许管理会话且全部授权的角色另有 8 个项目内编排工具，可列出会话、查看自身与近期消息、创建 peer、互发消息、精确等待/中止 run 和删除 idle peer
 - Agent 创建会话默认不挂起调用者；它可以继续并行、显式等待，或让另一会话稍后主动回信
 - Agent 创建的 peer 会话也是持久会话；创建者根据结果自行继续、等待、终止活动 run 或删除 idle 目标
 - 跨会话消息是目标 Agent 的一等输入，并在双方 transcript 中显示可打开相关会话的独立消息卡片；busy 目标在当前工具调用结束后于同一 run 接收 durable steering，不会被强制中断
@@ -37,8 +37,8 @@
 - 消息只有在服务端明确接收后才进入对话并清空输入框；确认前断线会保留草稿、恢复历史后提示核对，不会自动重复执行
 - 流式输出只在用户位于底部时自动跟随；向上阅读时可一键回到最新消息，输入框会随内容有界增长
 - 角色模板的工具权限只保留“全部授权”和“只读”，每个 conversation 使用创建或切换角色时固化的权限快照
-- 全部授权模式下所有工具和命令直接执行，也可以修改项目外文件
-- 只读模式只允许 Pi 原生 `read/grep/find/ls`、宿主 Git/Notebook/LoopList 工具，以及由用户编辑器确认的角色提示词查看/提案工具；命令、项目写入、会话编排、扩展和未知工具由服务端直接阻止
+- 全部授权模式广泛允许工具调用，仍受宿主生命周期与首次写入门控约束：每个逻辑 run 首次 builtin `edit/write` 前需有 active LoopList 项；它不是 OS sandbox，也可以修改项目外文件
+- 只读模式只允许 Pi 原生 `read/grep/find/ls`、宿主受审查的查询 Bash（含限定 Git 查询）、本会话后台任务控制、Notebook/LoopList、本机时间、LSP、压缩请求和角色查看/人工确认提案工具；其它命令、项目写入、会话编排、扩展和未知工具由服务端直接阻止
 - OAuth request/progress/response/cancel 使用 authFlowId 关联，取消后的迟到帧不会复活旧流程
 - 展示累计计费 token，并区分上下文 token 的 measured / estimated / unknown 来源
 - 始终只监听 `127.0.0.1`；可显式通过 Tailscale Serve 向自己的 tailnet 提供 HTTPS 访问
@@ -169,10 +169,10 @@ Pi 会话格式与 SDK 用法可参考官方 [SDK 文档](https://pi.dev/docs/la
 
 - 刷新或断线后会用新观察/focus 身份恢复当前项目；coordinator-owned 后台 run 不因浏览器离开而停止。服务进程重启会中止内存中的运行，但从 durable settlement/inbox 恢复明确状态。
 - 会话运行时彼此独立且持久；浏览器按 `rootConversationId` 将 Agent 创建的 peer 投影为“根任务 + Agent 成员”组。该分组只服务导航，不创建组级生命周期或持久层级。
-- 第一版支持新建、最近恢复、切换、重命名和单条永久删除；尚无 archive、批量删除、分支、导入、附件或多设备同步。
+- 支持新建、最近恢复、切换、重命名、当前 leaf fork 和目标及其 metadata descendants 的永久删除；支持 prompt 图片，尚无 archive、任意分支管理、导入、通用文件附件或多设备同步。
 - busy 对话不能删除；Agent 还不能删除自身。用户界面会要求先切换/确认，Agent 必须先精确 abort、等待结算再 delete。
 - 浏览器限制单次历史和卡片投影大小；完整 JSONL 不会因 UI 截断而删除。Agent 的 list/peek 同样有独立上限。
-- 项目索引当前会完整验证全部 JSONL，并与 Pi 的索引结果一一核对；超长生命周期项目的增量 catalog 与分页留到下一阶段一起设计。
+- 浏览器列表与启动恢复发现复用文件版本绑定的 catalog；Agent 完整列表/audit 仍验证全部 JSONL 并与 Pi 索引一一核对。目标 open 与级联删除有独立证明 scope，不能用展示缓存授权；公开历史分页仍未提供。
 - 同一服务进程内会独占一个 conversation writer；尚无跨进程文件锁，不要让两个 Pi Web 服务同时写同一个对话。
 - Pi JSONL 使用同步 append 但不执行 `fsync`；它保证正常进程生命周期内可恢复，不承诺断电级 durability。
 - `.piweb` 可能包含敏感对话内容。是否提交版本控制由项目决定；本仓库已忽略自身的 `.piweb/`，嵌入其他项目时也建议按需加入忽略规则。
@@ -192,7 +192,7 @@ Pi 会话格式与 SDK 用法可参考官方 [SDK 文档](https://pi.dev/docs/la
 
 ## 项目导航
 
-未来修改先读 [AGENTS.md](AGENTS.md) 和 [`.knowledge/INDEX.md`](.knowledge/INDEX.md)。多 Agent 的角色、actor、inbox、持久 peer 会话、3 个角色工具和 9 个会话编排工具集中记录在 [Agent 协作知识页](.knowledge/kb-agent-collaboration.md)。
+未来修改先读 [AGENTS.md](AGENTS.md) 和 [`.knowledge/INDEX.md`](.knowledge/INDEX.md)。多 Agent 的角色、actor、inbox、持久 peer 会话、3 个角色工具和 8 个会话编排工具集中记录在 [Agent 协作知识页](.knowledge/kb-agent-collaboration.md)。
 
 ## 验证
 

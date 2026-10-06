@@ -1,6 +1,6 @@
 # 仓库总览
 
-`updated: 2026-09-05`
+`updated: 2026-10-06`
 
 ## 这个模块是干什么的
 
@@ -17,14 +17,15 @@ Pi Web = 项目持久状态 + WebSocket 控制循环 + Pi SDK 工具循环 + 本
 最小执行循环：
 
 ```text
-while 连接存在:
-  校验浏览器命令
-  按控制语义串行或中断执行
-  打开项目内持久 conversation
-  由 conversation actor 更新唯一 active run
-  将 SDK 事件投影成稳定事件
-  发布带 sessionId/runId 的状态与增量
-  客户端过滤旧身份并按 run 更新视图
+输入 = 用户 prompt / durable inbox / 已接受的 continuation
+→ ProjectSessionCoordinator 定位唯一 ConversationActor
+→ actor 持有 conversation、writer lease 与唯一 activeRun
+→ Pi SDK 执行工具/模型循环，宿主持久化精确交付与结算
+→ SessionEventProjector 生成稳定事件
+→ PiConnection 仅向当前 observation/focus 发布投影
+→ 客户端过滤迟到身份并恢复快照
+
+浏览器连接消失只解除观察；后台 actor/run 继续。
 ```
 
 状态分五层：
@@ -71,7 +72,7 @@ while 连接存在:
 
 ## 坑点
 
-- 不要把浏览器连接等同于持久对话；projectId/conversationId 是 durable 身份，sessionId/runId 只是关联 epoch。
+- 不要把浏览器连接等同于持久对话；projectId/conversationId 是 durable 身份，sessionId/focusId 是观察 epoch，runId 是可恢复的一次逻辑执行 identity；它们不能互代。
 - 不要把完整会话索引塞进高频 PublicState；项目索引与历史分别走有界快照。
 - 不要在 client/shared 中重新引入 `AgentSessionEvent`。
 - 不要在认证变更时新建第二份 `CredentialStore` 或绕过 `PiRuntime`。
