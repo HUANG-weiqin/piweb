@@ -43,7 +43,43 @@ const transitionDiagnostics = {
 
 describe("parseClientCommand", () => {
   it("uses the run-correlated protocol version", () => {
-    expect(PROTOCOL_VERSION).toBe(68);
+    expect(PROTOCOL_VERSION).toBe(69);
+  });
+
+  it("correlates workspace maintenance before initialize and requires explicit tail-loss consent", () => {
+    expect(parseClientCommand({ type: "inspect_workspace_sessions", commandId, cwd: "E:/project" }))
+      .toEqual({ type: "inspect_workspace_sessions", commandId, cwd: "E:/project" });
+    const repair = {
+      type: "repair_workspace_sessions", commandId, cwd: "E:/project",
+      files: [{ fileName: "session.jsonl", expectedRevision: "a".repeat(64) }],
+      allowDiscardIncompleteTail: false,
+    };
+    expect(parseClientCommand(repair)).toEqual(repair);
+    expect(() => parseClientCommand({ ...repair, allowDiscardIncompleteTail: undefined })).toThrow();
+    expect(() => parseClientCommand({ ...repair, files: [...repair.files, ...repair.files] })).toThrow();
+    for (const fileName of ["../session.jsonl", "..\\session.jsonl", "session.jsonl\u0000"]) {
+      expect(() => parseClientCommand({ ...repair, files: [{ fileName, expectedRevision: "a".repeat(64) }] })).toThrow();
+    }
+    expect(parseClientCommand({ ...repair, files: [] })).toMatchObject({ files: [] });
+  });
+
+  it("bounds workspace repair diagnostics and preserves partial-commit backup evidence", () => {
+    const event = {
+      type: "workspace_sessions_inspected", commandId, cwd: "E:/project", checkedFiles: 1,
+      issues: [{ fileName: "session.jsonl", conversationId, revision: "a".repeat(64),
+        error: "Trailing zeros", repair: { kind: "remove_zero_tail", removedBytes: 32, retainedEntries: 4 } }],
+      truncated: false,
+    };
+    expect(parseServerEvent(event)).toEqual(event);
+    expect(() => parseServerEvent({ ...event, issues: Array(101).fill(event.issues[0]) })).toThrow();
+    expect(() => parseServerEvent({ ...event, issues: [{ ...event.issues[0], repair: { ...event.issues[0]!.repair, removedBytes: -1 } }] })).toThrow();
+    const partial = { type: "workspace_sessions_repaired", commandId, cwd: "E:/project",
+      backups: [{ fileName: "session.jsonl", backupPath: "E:/project/.piweb/session-repair-backups/original.bak" }],
+      error: "Next file changed; the first repair remains committed",
+    };
+    expect(parseServerEvent(partial)).toEqual(partial);
+    expect(parseServerEvent({ type: "error", scope: "command", operation: "repair_workspace_sessions", commandId, message: "stale" }))
+      .toMatchObject({ commandId, operation: "repair_workspace_sessions" });
   });
 
   it("correlates withdrawal commands, broadcasts, and receipts by exact identity", () => {

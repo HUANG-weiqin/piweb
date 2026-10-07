@@ -6,6 +6,10 @@ interface WorkspacePlaceholderProps {
   unavailable: boolean;
   hidden?: boolean;
   announceOpening?: boolean;
+  initializationError?: string;
+  repairUnknown?: boolean;
+  onReviewRepair?(): void;
+  onInspectSessions?(): void;
   onOpen(): void;
   onClose(): void;
   onRetry(): void;
@@ -16,6 +20,10 @@ export function WorkspacePlaceholder({
   unavailable,
   hidden,
   announceOpening,
+  initializationError,
+  repairUnknown,
+  onReviewRepair,
+  onInspectSessions,
   onOpen,
   onClose,
   onRetry,
@@ -42,6 +50,10 @@ export function WorkspacePlaceholder({
           <strong>{workspaceName(cwd)}</strong> 的目录可能已移动、重命名或删除。
         </p>
         <code>{cwd}</code>
+        {repairUnknown && <div className="workspace-session-diagnostic" role="alert">
+          <span>修复结果未知；不会自动重试或进入工作区。已确认备份仍可查看。</span>
+          <button type="button" onClick={onReviewRepair}>查看备份并重新检查</button>
+        </div>}
         <div className="workspace-placeholder-actions">
           <button type="button" onClick={onRetry}>重试打开工作区</button>
           <button type="button" className="ghost" onClick={onOpen}>
@@ -56,6 +68,26 @@ export function WorkspacePlaceholder({
   }
 
   const name = workspaceName(cwd);
+  if (initializationError) {
+    return <main className="workspace-placeholder" hidden={hidden}>
+      <div className="workspace-placeholder-content">
+        <div className="workspace-placeholder-mark warning">!</div>
+        <p className="eyebrow">WORKSPACE OPEN FAILED</p>
+        <h1>工作区打开失败</h1>
+        <p>{initializationError}</p>
+        <code>{cwd}</code>
+        {repairUnknown && <div className="workspace-session-diagnostic" role="alert">
+          <span>修复结果未知；不会自动重试或进入工作区。已确认备份仍可查看。</span>
+          <button type="button" onClick={onReviewRepair}>查看备份并重新检查</button>
+        </div>}
+        <div className="workspace-placeholder-actions">
+          {onInspectSessions && <button type="button" onClick={onInspectSessions}>检查与修复</button>}
+          <button type="button" className="ghost" onClick={onOpen}>选择其它目录</button>
+          <button type="button" className="ghost" onClick={onRetry}>重试打开工作区</button>
+        </div>
+      </div>
+    </main>;
+  }
   return <main className="workspace-placeholder" hidden={hidden}>
     <div
       className="workspace-placeholder-content"
@@ -67,6 +99,10 @@ export function WorkspacePlaceholder({
       <h1>正在打开工作区</h1>
       <p>{name}</p>
       <code>{cwd}</code>
+      {repairUnknown && <div className="workspace-session-diagnostic" role="alert">
+        <span>修复结果未知；不会自动重试或进入工作区。已确认备份仍可查看。</span>
+        <button type="button" onClick={onReviewRepair}>查看备份并重新检查</button>
+      </div>}
     </div>
   </main>;
 }

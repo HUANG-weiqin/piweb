@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -19,6 +19,8 @@ import {
 } from "../shared/protocol.js";
 import type { CustomProviderSnapshotView } from "./custom-provider-store.js";
 import type { DirectoryBrowser } from "./directory-browser.js";
+import { ProjectStore } from "./project-store.js";
+import { RoleCatalog } from "./role-catalog.js";
 import type {
   CreatedPiSession,
   CredentialChangeIntent,
@@ -286,6 +288,96 @@ describe("isAllowedOrigin", () => {
         server.close((error) => error ? reject(error) : resolve());
       }),
     ]);
+  });
+
+  it("inspects and repairs corrupt sessions through correlated control commands before initialize", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "piweb-socket-session-repair-"));
+    const requestedCwd = `${cwd}/.`;
+    const store = await ProjectStore.open(cwd);
+    const sessionPath = join(store.sessionDir, "damaged.jsonl");
+    const valid = `${JSON.stringify({ type: "session", version: 3, id: randomUUID(),
+      timestamp: "2026-10-07T12:00:00.000Z", cwd })}\n`;
+    const damaged = Buffer.concat([Buffer.from(valid), Buffer.alloc(128)]);
+    await writeFile(sessionPath, damaged);
+    const runtime = new SocketTestRuntime();
+    Object.assign(runtime.modelRegistry, { getAvailable: () => [] });
+    const originalOpen = RoleCatalog.open;
+    const rolesOpen = vi.spyOn(RoleCatalog, "open").mockImplementation((source) =>
+      originalOpen(source, join(cwd, "user", "roles.json")));
+    const modelCatalog = vi.spyOn(runtime, "createProjectModelCatalog");
+    const server = createServer();
+    const socketServer = attachSocketServer(server, cwd, runtime);
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("server did not bind a TCP port");
+    const socket = new WebSocket(`ws://127.0.0.1:${address.port}/ws`, {
+      origin: `http://127.0.0.1:${address.port}`,
+    });
+    let resumeRepair!: () => void;
+    const repairResumed = new Promise<void>((resolve) => { resumeRepair = resolve; });
+    let signalRepairStarted!: () => void;
+    const repairStarted = new Promise<void>((resolve) => { signalRepairStarted = resolve; });
+    const originalRepair = ProjectStore.prototype.repairSessionFiles;
+    const repairMock = vi.spyOn(ProjectStore.prototype, "repairSessionFiles")
+      .mockImplementation(async function(this: ProjectStore, ...args) {
+        signalRepairStarted();
+        await repairResumed;
+        return originalRepair.apply(this, args);
+      });
+    try {
+      await nextEvent(socket);
+      const inspectId = randomUUID();
+      const inspecting = nextEvent(socket);
+      socket.send(JSON.stringify({ type: "inspect_workspace_sessions", commandId: inspectId, cwd: requestedCwd }));
+      const report = await inspecting;
+      expect(report).toMatchObject({ type: "workspace_sessions_inspected", commandId: inspectId, cwd: requestedCwd,
+        checkedFiles: 1, truncated: false, issues: [{ fileName: "damaged.jsonl", repair: { kind: "remove_zero_tail" } }] });
+      expect(await readFile(sessionPath)).toEqual(damaged);
+      expect(modelCatalog).not.toHaveBeenCalled();
+      if (report.type !== "workspace_sessions_inspected") throw new Error("Expected inspection report");
+      const issue = report.issues[0]!;
+      const reused = nextEvent(socket);
+      socket.send(JSON.stringify({ type: "repair_workspace_sessions", commandId: inspectId, cwd: requestedCwd,
+        files: [{ fileName: issue.fileName, expectedRevision: issue.revision }], allowDiscardIncompleteTail: false }));
+      expect(await reused).toMatchObject({ type: "error", scope: "command", operation: "repair_workspace_sessions", commandId: inspectId });
+      expect(await readFile(sessionPath)).toEqual(damaged);
+      const repairId = randomUUID();
+      const repairing = nextEvent(socket);
+      socket.send(JSON.stringify({ type: "repair_workspace_sessions", commandId: repairId, cwd: requestedCwd,
+        files: [{ fileName: issue.fileName, expectedRevision: issue.revision }], allowDiscardIncompleteTail: false }));
+      await repairStarted;
+      let reloadAccepted = false;
+      const reloading = socketServer.prepareReload(false, () => { reloadAccepted = true; });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(reloadAccepted).toBe(false);
+      expect(await readFile(sessionPath)).toEqual(damaged);
+      resumeRepair();
+      const result = await repairing;
+      await reloading;
+      expect(reloadAccepted).toBe(true);
+      expect(result).toMatchObject({ type: "workspace_sessions_repaired", commandId: repairId, cwd: requestedCwd,
+        backups: [{ fileName: "damaged.jsonl" }] });
+      if (result.type !== "workspace_sessions_repaired") throw new Error("Expected repair result");
+      expect(result.error).toBeUndefined();
+      expect(await readFile(join(cwd, result.backups[0]!.backupPath))).toEqual(damaged);
+      expect(await readFile(sessionPath, "utf8")).toBe(valid);
+      expect(modelCatalog).not.toHaveBeenCalled();
+      const rejected = nextEvent(socket);
+      const frozenId = randomUUID();
+      socket.send(JSON.stringify({ type: "repair_workspace_sessions", commandId: frozenId, cwd: requestedCwd,
+        files: [], allowDiscardIncompleteTail: false }));
+      expect(await rejected).toMatchObject({ type: "error", scope: "command", operation: "repair_workspace_sessions", commandId: frozenId });
+    } finally {
+      resumeRepair();
+      const clientClosed = socket.readyState === WebSocket.CLOSED
+        ? Promise.resolve() : new Promise<void>((resolve) => socket.once("close", () => resolve()));
+      await socketServer.close();
+      await clientClosed;
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+      rolesOpen.mockRestore();
+      repairMock.mockRestore();
+      await rm(cwd, { recursive: true, force: true });
+    }
   });
 
   it("returns a correlated read-only directory listing", async () => {

@@ -86,6 +86,8 @@ type ConnectionCommand = Exclude<
   {
     type:
       | "browse_directory"
+      | "inspect_workspace_sessions"
+      | "repair_workspace_sessions"
       | "set_color_scheme"
       | "save_custom_provider"
       | "refresh_custom_providers"

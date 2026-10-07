@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
-import { appendFile, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import type {
@@ -334,6 +334,109 @@ describe("ProjectSessionCoordinator", () => {
       conversationId: targetId, disposition: "retry",
     }]);
     expect(runtime.control(targetId).received).toEqual([]);
+  });
+
+  it("repairs a corrupt tail with an exact backup and reopens the failed recovery foundation", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "piweb-session-tail-recovery-"));
+    temporaryDirectories.push(cwd);
+    const runtime = new FakeRuntime();
+    const roles = await RoleCatalog.open(runtime, join(cwd, "user", "roles.json"));
+    const store = await ProjectStore.open(cwd);
+    const targetId = randomUUID();
+    const manager = await store.createConversation(targetId, defaultProfile(roles));
+    const path = manager.getSessionFile()!;
+    const valid = await readFile(path);
+    const damaged = Buffer.concat([valid, Buffer.alloc(128)]);
+    await writeFile(path, damaged);
+    const registry = new ProjectStoreRegistry();
+    const coordinator = new ProjectSessionCoordinator(runtime, roles, registry);
+    const handle = await coordinator.acquireProject(cwd);
+    const fixture = { cwd, runtime, roles, registry, coordinator, handle };
+    fixtures.push(fixture);
+    await settleFixtureRecovery(fixture);
+    expect((handle as unknown as { context: { foundationReady: boolean } }).context.foundationReady).toBe(false);
+    const report = await coordinator.inspectWorkspaceSessions(cwd);
+    expect(report.recoveryError).toMatch(/newline|JSON/i);
+    const issue = report.issues[0]!;
+    expect(issue.repair?.kind).toBe("remove_zero_tail");
+    const result = await coordinator.repairWorkspaceSessions(cwd, [{
+      fileName: issue.fileName, expectedRevision: issue.revision,
+    }], false);
+    expect(result.error).toBeUndefined();
+    expect(result.backups).toHaveLength(1);
+    expect(await readFile(join(cwd, result.backups[0]!.backupPath))).toEqual(damaged);
+    expect(await readFile(path)).toEqual(valid);
+    expect(await coordinator.inspectWorkspaceSessions(cwd)).toMatchObject({ issues: [], truncated: false });
+    expect((handle as unknown as { context: { foundationReady: boolean } }).context.foundationReady).toBe(true);
+    await coordinator.openConversation(handle, targetId, { updateRecent: false });
+    runtime.control(targetId).enqueue(completesWith("after repair"));
+    await coordinator.prompt(handle, targetId, randomUUID(), "runs now");
+    expect(runtime.control(targetId).promptTexts).toContain("runs now");
+  });
+
+  it("never rewrites a corrupt file while its actor still owns the writer lease", async () => {
+    const fixture = await createFixture();
+    await settleFixtureRecovery(fixture);
+    const actor = await fixture.coordinator.createUserConversation(fixture.handle, { roleId: "default" });
+    const path = actor.sessionManager.getSessionFile()!;
+    const damaged = Buffer.concat([await readFile(path), Buffer.alloc(16)]);
+    await writeFile(path, damaged);
+    const report = await fixture.coordinator.inspectWorkspaceSessions(fixture.cwd);
+    const issue = report.issues[0]!;
+    await expect(fixture.coordinator.repairWorkspaceSessions(fixture.cwd, [{
+      fileName: issue.fileName, expectedRevision: issue.revision,
+    }], false)).rejects.toThrow(/leased/i);
+    expect(await readFile(path)).toEqual(damaged);
+    await expect(readdir(join(fixture.cwd, ".piweb", "session-repair-backups"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("does not treat an empty issue list as proof when the namespace inspection failed", async () => {
+    const fixture = await createFixture();
+    await settleFixtureRecovery(fixture);
+    await mkdir(join(fixture.handle.project.sessionDir, "not-a-file.jsonl"));
+    expect(await fixture.coordinator.inspectWorkspaceSessions(fixture.cwd)).toMatchObject({
+      issues: [], recoveryError: expect.any(String),
+    });
+    await expect(fixture.coordinator.repairWorkspaceSessions(fixture.cwd, [], false))
+      .rejects.toThrow(/regular|directory|file/i);
+  });
+
+  it("keeps a concurrent project acquisition behind the complete repair batch", async () => {
+    const fixture = await createFixture();
+    await settleFixtureRecovery(fixture);
+    const id = randomUUID();
+    const manager = await fixture.handle.project.createConversation(id, defaultProfile(fixture.roles));
+    await appendFile(manager.getSessionFile()!, Buffer.alloc(16));
+    const report = await fixture.coordinator.inspectWorkspaceSessions(fixture.cwd);
+    const issue = report.issues[0]!;
+    const entered = deferred();
+    const release = deferred();
+    const original = fixture.handle.project.repairSessionFiles.bind(fixture.handle.project);
+    vi.spyOn(fixture.handle.project, "repairSessionFiles").mockImplementation(async (...args) => {
+      entered.resolve();
+      await release.promise;
+      return original(...args);
+    });
+    const repaired = fixture.coordinator.repairWorkspaceSessions(fixture.cwd, [{
+      fileName: issue.fileName, expectedRevision: issue.revision,
+    }], false);
+    await entered.promise;
+    let acquired = false;
+    const acquiring = fixture.coordinator.acquireProject(fixture.cwd).then((handle) => {
+      acquired = true;
+      return handle;
+    });
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(acquired).toBe(false);
+    } finally {
+      release.resolve();
+    }
+    expect((await repaired).error).toBeUndefined();
+    const handle = await acquiring;
+    expect(acquired).toBe(true);
+    expect(await fixture.coordinator.inspectWorkspaceSessions(fixture.cwd)).toMatchObject({ issues: [] });
+    handle.release();
   });
 
   it("keeps the foundation closed when an exact recovery candidate scan fails", async () => {

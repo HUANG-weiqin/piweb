@@ -11,6 +11,7 @@ export const MAX_MODEL_REFERENCE_BYTES = 1024;
 const MAX_ROLE_UNAVAILABLE_REASON_CHARACTERS = 4096;
 export const MAX_PROJECT_CONVERSATIONS = 100;
 export const MAX_PROJECT_ACTIVITY_SUMMARIES = 100;
+export const MAX_WORKSPACE_SESSION_REPAIR_FILES = 100;
 export const MAX_PROJECT_CONVERSATION_NAME_CHARACTERS = 24;
 export const MAX_PROJECT_CONVERSATION_PREVIEW_CHARACTERS = 500;
 /** 用户可见的跨会话消息摘要：有界载荷，但可写成短段落。 */
@@ -112,7 +113,9 @@ export const MAX_TRANSITION_DIAGNOSTIC_PHASE_MS = 60 * 60 * 1_000;
 // their OpenAI-compatible model list before saving.
 // v59: idle current-leaf fork copies LLM-effective context into a fresh host
 // lifecycle via `fork_conversation`; history anchors stay unsupported.
-export const PROTOCOL_VERSION = 68;
+// v69: connection-scoped session-file inspection and backed-up tail repair,
+// available even when workspace initialization fails; no validation bypass.
+export const PROTOCOL_VERSION = 69;
 export const OBSERVATION_FATAL_CLOSE_CODE = 4002;
 export const COLOR_SCHEMES = ["quiet-rebel", "classic-rebel"] as const;
 export type ColorScheme = typeof COLOR_SCHEMES[number];
@@ -574,7 +577,62 @@ const extensionUIResponseSchema = z.discriminatedUnion("kind", [
 export type ExtensionUIRequest = z.infer<typeof extensionUIRequestSchema>;
 export type ExtensionUIResponse = z.infer<typeof extensionUIResponseSchema>;
 
+const sessionRepairFileNameSchema = z.string().min(1).max(255)
+  .regex(/^[^/\\\x00]+\.jsonl$/);
+const sessionRepairRevisionSchema = z.string().regex(/^[a-f0-9]{64}$/);
+const sessionRepairRequestSchema = z.object({
+  fileName: sessionRepairFileNameSchema,
+  expectedRevision: sessionRepairRevisionSchema,
+}).strict();
+export type WorkspaceSessionRepairRequest = z.infer<typeof sessionRepairRequestSchema>;
+
+const sessionRepairPlanSchema = z.object({
+  kind: z.enum(["remove_zero_tail", "append_newline", "discard_incomplete_tail"]),
+  removedBytes: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  retainedEntries: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+}).strict();
+const sessionRepairIssueSchema = z.object({
+  fileName: sessionRepairFileNameSchema,
+  conversationId: conversationIdSchema.nullable(),
+  revision: sessionRepairRevisionSchema,
+  error: z.string().max(4096),
+  repair: sessionRepairPlanSchema.nullable(),
+}).strict();
+export type WorkspaceSessionRepairIssue = z.infer<typeof sessionRepairIssueSchema>;
+const sessionRepairBackupSchema = z.object({
+  fileName: sessionRepairFileNameSchema,
+  backupPath: z.string().min(1).max(4096),
+}).strict();
+export type WorkspaceSessionRepairBackup = z.infer<typeof sessionRepairBackupSchema>;
+export interface WorkspaceSessionRepairReport {
+  cwd: string;
+  checkedFiles: number;
+  issues: WorkspaceSessionRepairIssue[];
+  truncated: boolean;
+  recoveryError?: string;
+}
+export interface WorkspaceSessionRepairResult {
+  cwd: string;
+  backups: WorkspaceSessionRepairBackup[];
+  /** Files already committed remain repaired and backed up when a later step fails. */
+  error?: string;
+}
+
 const clientCommandUnionSchema = z.discriminatedUnion("type", [
+  z.object({
+    type: z.literal("inspect_workspace_sessions"),
+    commandId: commandIdSchema,
+    cwd: required.max(4096),
+  }).strict(),
+  z.object({
+    type: z.literal("repair_workspace_sessions"),
+    commandId: commandIdSchema,
+    cwd: required.max(4096),
+    files: z.array(sessionRepairRequestSchema).max(MAX_WORKSPACE_SESSION_REPAIR_FILES)
+      .refine((files) => new Set(files.map(({ fileName }) => fileName)).size === files.length,
+        "Repair file names must be unique"),
+    allowDiscardIncompleteTail: z.boolean(),
+  }).strict(),
   z.object({
     type: z.literal("browse_directory"),
     commandId: commandIdSchema,
@@ -1299,6 +1357,8 @@ export type ServerEvent =
       /** 端点返回的模型多于有界上限。 */
       truncated: boolean;
     }
+  | ({ type: "workspace_sessions_inspected"; commandId: string } & WorkspaceSessionRepairReport)
+  | ({ type: "workspace_sessions_repaired"; commandId: string } & WorkspaceSessionRepairResult)
   | ({ type: "directory_listing"; commandId: string } & DirectoryListing)
   | { type: "state"; state: PublicState }
   | {
@@ -1658,6 +1718,8 @@ const sessionEventSchema: z.ZodType<SessionEvent> = z.discriminatedUnion("type",
   }),
 ]);
 const commandTypeSchema = z.enum([
+  "inspect_workspace_sessions",
+  "repair_workspace_sessions",
   "browse_directory",
   "set_color_scheme",
   "save_custom_provider",
@@ -2034,6 +2096,22 @@ const transitionDiagnosticsSchema: z.ZodType<TransitionDiagnostics> = z.object({
 }).strict();
 
 const serverEventUnionSchema = z.discriminatedUnion("type", [
+  z.object({
+    type: z.literal("workspace_sessions_inspected"),
+    commandId: commandIdSchema,
+    cwd: required.max(4096),
+    checkedFiles: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    issues: z.array(sessionRepairIssueSchema).max(MAX_WORKSPACE_SESSION_REPAIR_FILES),
+    truncated: z.boolean(),
+    recoveryError: z.string().max(4096).optional(),
+  }).strict(),
+  z.object({
+    type: z.literal("workspace_sessions_repaired"),
+    commandId: commandIdSchema,
+    cwd: required.max(4096),
+    backups: z.array(sessionRepairBackupSchema).max(MAX_WORKSPACE_SESSION_REPAIR_FILES),
+    error: z.string().max(4096).optional(),
+  }).strict(),
   z.object({
     type: z.literal("hello"),
     protocolVersion: z.number().int().nonnegative(),

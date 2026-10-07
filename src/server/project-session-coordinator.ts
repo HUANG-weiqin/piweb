@@ -14,6 +14,9 @@ import {
   type ServiceTier,
   type ThinkingLevel,
   type ToolMode,
+  type WorkspaceSessionRepairReport,
+  type WorkspaceSessionRepairRequest,
+  type WorkspaceSessionRepairResult,
 } from "../shared/protocol.js";
 import { MAX_PEER_SESSIONS } from "./collaboration-limits.js";
 import {
@@ -89,6 +92,7 @@ import {
 import {
   ProjectStoreRegistry,
   type ConversationDeletionLease,
+  type ConversationLease,
   type ProjectStoreHandle,
 } from "./project-store-registry.js";
 import {
@@ -248,6 +252,12 @@ type DeletionLeasePreflight =
   | { kind: "actor"; actor: ConversationActor }
   | { kind: "cold"; lease: ConversationDeletionLease };
 
+interface ProjectRecoveryFoundation {
+  pending: InboxEnvelope[];
+  blockedTargets: Set<string>;
+  actorIds: Set<string>;
+}
+
 interface ProjectContext {
   readonly key: string;
   readonly project: ProjectStore;
@@ -283,6 +293,8 @@ interface ProjectContext {
   readonly abortRecoveryFailed: Set<string>;
   /** No run may start until startup discovery and every abort intent are resolved. */
   foundationReady: boolean;
+  /** Original failure remains available to the workspace maintenance view. */
+  foundationError?: string;
   readonly reloadAdoptions: Map<string, ReloadAdoption>;
   readonly extensionUIRouters: Map<string, ConversationExtensionUIRouter>;
   readonly lifecycle: SerialTaskQueue;
@@ -526,6 +538,8 @@ function sessionMessageBatchTargetKey(
 export class ProjectSessionCoordinator {
   private readonly contexts = new Map<string, ProjectContext>();
   private readonly contextOpenings = new Map<string, Promise<ProjectContext>>();
+  /** Prevent a new project context from discovering half of a repair batch. */
+  private readonly workspaceRepairTasks = new Map<string, Promise<WorkspaceSessionRepairResult>>();
   private readonly projectAcquisitions = new Set<Promise<ProjectSessionHandle>>();
   private readonly projectAcquisitionCwds =
     new Map<Promise<ProjectSessionHandle>, string>();
@@ -562,15 +576,112 @@ export class ProjectSessionCoordinator {
     }
   }
 
+  /** Storage-only maintenance: no actor, model catalog or recovery is started by inspection. */
+  async inspectWorkspaceSessions(cwd: string): Promise<WorkspaceSessionRepairReport> {
+    this.assertOpen();
+    const handle = await this.projects.acquireProject(cwd, { existingOnly: true });
+    try {
+      const context = this.contexts.get(contextKey(handle.store.cwd));
+      const inspect = async (): Promise<WorkspaceSessionRepairReport> => {
+        this.assertOpen();
+        const report = await handle.store.inspectSessionRepairs();
+        if (context?.foundationError !== undefined) {
+          report.recoveryError ??= context.foundationError;
+        }
+        return report;
+      };
+      return await (context ? this.runLifecycle(context, inspect) : inspect());
+    } finally {
+      handle.release();
+    }
+  }
+
+  async repairWorkspaceSessions(
+    cwd: string,
+    files: readonly WorkspaceSessionRepairRequest[],
+    allowDiscardIncompleteTail: boolean,
+  ): Promise<WorkspaceSessionRepairResult> {
+    this.assertOpen();
+    const handle = await this.projects.acquireProject(cwd, { existingOnly: true });
+    const key = contextKey(handle.store.cwd);
+    const previous = this.workspaceRepairTasks.get(key);
+    const task = (async (): Promise<WorkspaceSessionRepairResult> => {
+      await previous?.catch(() => undefined);
+      await this.contextOpenings.get(key);
+      const context = this.contexts.get(key);
+      const repair = async (): Promise<WorkspaceSessionRepairResult> => {
+        this.assertOpen();
+        const report = await handle.store.inspectSessionRepairs();
+        if (report.recoveryError !== undefined) {
+          throw new Error(report.recoveryError);
+        }
+        const leases: ConversationLease[] = [];
+        let result: WorkspaceSessionRepairResult;
+        try {
+          // Resolve from fresh host evidence, never from a client-supplied ID.
+          // Acquire every target before the first disk write; an open actor or
+          // another pending writer makes repair fail fast without changing it.
+          for (const request of files) {
+            const issue = report.issues.find(({ fileName }) => fileName === request.fileName);
+            if (!issue?.repair || issue.conversationId === null) {
+              throw new Error(`会话文件不能安全修复，请重新检查：${request.fileName}`);
+            }
+            if (issue.revision !== request.expectedRevision) {
+              throw new Error(`会话文件已变化，请重新检查：${request.fileName}`);
+            }
+            leases.push(this.projects.acquireConversation(handle.store.cwd, issue.conversationId));
+          }
+          result = await handle.store.repairSessionFiles(files, allowDiscardIncompleteTail);
+        } finally {
+          for (const lease of leases.reverse()) lease.release();
+        }
+        if (result.error !== undefined) return result;
+        try {
+          const remaining = await handle.store.inspectSessionRepairs();
+          if (remaining.recoveryError !== undefined) {
+            throw new Error(remaining.recoveryError);
+          }
+          if (remaining.issues.length > 0 || remaining.truncated) {
+            throw new Error("仍有会话文件损坏；已完成的修复和备份已保留，请继续检查与修复。");
+          }
+          // A disk repair cannot implicitly release a failed recovery gate.
+          // Replay its original foundation under the same lifecycle lane and
+          // only mark it ready after the existing strict recovery proof passes.
+          if (context) {
+            context.foundationReady = false;
+            const foundation = await this.recoverProjectFoundation(context);
+            if (foundation === undefined) throw new Error("工作区正在关闭，请重新检查恢复状态。");
+            this.trackBackground(context, this.continueProjectRecovery(context, foundation));
+            this.emit(context, { type: "project_changed" });
+          }
+        } catch (error) {
+          const message = (error instanceof Error ? error.message : String(error)).slice(0, 4096);
+          if (context && !context.foundationReady) context.foundationError = message;
+          return { ...result, error: message };
+        }
+        return result;
+      };
+      return await (context ? this.runLifecycle(context, repair) : repair());
+    })();
+    this.workspaceRepairTasks.set(key, task);
+    try {
+      return await task;
+    } finally {
+      if (this.workspaceRepairTasks.get(key) === task) this.workspaceRepairTasks.delete(key);
+      handle.release();
+    }
+  }
+
   private async acquireProjectInternal(
     cwd: string,
   ): Promise<ProjectSessionHandle> {
     const acquired = await this.projects.acquireProject(cwd);
+    const key = contextKey(acquired.store.cwd);
+    await this.workspaceRepairTasks.get(key)?.catch(() => undefined);
     if (this.disposed) {
       acquired.release();
       this.assertOpen();
     }
-    const key = contextKey(acquired.store.cwd);
     const existing = this.contexts.get(key);
     if (existing) {
       acquired.release();
@@ -6145,9 +6256,22 @@ export class ProjectSessionCoordinator {
    * the run-start gate stays closed even after the lifecycle lane advances.
    */
   private async recoverProject(context: ProjectContext): Promise<void> {
-    const foundation = await this.runLifecycle(context, () =>
-      this.recoverProjectFoundation(context));
+    const foundation = await this.runLifecycle(context, async () => {
+      try {
+        return await this.recoverProjectFoundation(context);
+      } catch (error) {
+        context.foundationError = (error instanceof Error ? error.message : String(error)).slice(0, 4096);
+        throw error;
+      }
+    });
     if (foundation === undefined || context.closing) return;
+    await this.continueProjectRecovery(context, foundation);
+  }
+
+  private async continueProjectRecovery(
+    context: ProjectContext,
+    foundation: ProjectRecoveryFoundation,
+  ): Promise<void> {
     const { pending, blockedTargets, actorIds } = foundation;
 
     for (const envelope of pending) {
@@ -6184,14 +6308,7 @@ export class ProjectSessionCoordinator {
    */
   private async recoverProjectFoundation(
     context: ProjectContext,
-  ): Promise<
-    | {
-      pending: InboxEnvelope[];
-      blockedTargets: Set<string>;
-      actorIds: Set<string>;
-    }
-    | undefined
-  > {
+  ): Promise<ProjectRecoveryFoundation | undefined> {
     if (context.closing) return undefined;
     // A durable deletion fence is the only startup case that still needs a
     // complete catalog proof. Its batch cleanup must precede discovery.
@@ -6267,6 +6384,7 @@ export class ProjectSessionCoordinator {
       if (context.closing) return undefined;
       try {
         await this.recoverStartedAbortOperation(context, recovery);
+        context.abortRecoveryFailed.delete(recovery.operation.targetConversationId);
         unsettledReceiptRuns.get(recovery.operation.targetConversationId)
           ?.delete(recovery.operation.runId);
       } catch (error) {
@@ -6280,7 +6398,7 @@ export class ProjectSessionCoordinator {
           recovery.operation.targetConversationId,
           error,
         );
-        // This exact target remains fenced for the process lifetime.
+        // Only a later explicit recovery that proves this intent can release the fence.
         context.abortRecoveryFailed.add(recovery.operation.targetConversationId);
         actorIds.delete(recovery.operation.targetConversationId);
       }
@@ -6298,6 +6416,7 @@ export class ProjectSessionCoordinator {
     await this.recoverPendingSourceCards(context, pendingSourceCards);
     if (context.closing) return undefined;
     context.foundationReady = true;
+    delete context.foundationError;
     return { pending, blockedTargets, actorIds };
   }
 
@@ -6571,7 +6690,7 @@ export class ProjectSessionCoordinator {
     conversationId: string,
   ): void {
     if (!context.foundationReady) {
-      throw new Error("Project recovery foundation is not ready to start runs");
+      throw new Error(`Project recovery foundation is not ready to start runs. 请使用工作区“检查会话数据”重试恢复。${context.foundationError ? ` 原因：${context.foundationError}` : ""}`);
     }
     if (context.abortRecoveryFailed.has(conversationId)) {
       throw new Error(

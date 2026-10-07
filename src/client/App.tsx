@@ -28,6 +28,9 @@ import {
   type ServerEvent,
   type ServiceTier,
   type ThinkingLevel,
+  type WorkspaceSessionRepairBackup,
+  type WorkspaceSessionRepairReport,
+  type WorkspaceSessionRepairRequest,
 } from "../shared/protocol";
 import {
   chatReducer,
@@ -48,6 +51,10 @@ import {
 } from "./components/SettingsDrawer";
 import { ConversationSidebar } from "./components/ConversationSidebar";
 import { DirectoryBrowserDialog } from "./components/DirectoryBrowserDialog";
+import {
+  WorkspaceSessionRepairDialog,
+  type WorkspaceSessionRepairPending,
+} from "./components/WorkspaceSessionRepairDialog";
 import {
   ExtensionDialog,
   type PendingExtensionUI,
@@ -333,6 +340,43 @@ interface DirectoryBrowserState {
   error: string;
 }
 
+interface WorkspaceSessionRepairDialogState {
+  dialogId: string;
+  cwd: string;
+  report?: WorkspaceSessionRepairReport;
+  reportFresh: boolean;
+  backups: WorkspaceSessionRepairBackup[];
+  pending?: WorkspaceSessionRepairPending;
+  phase?: "report" | "entering" | "ready";
+  error?: string;
+  repairError?: string;
+  needsRecheck?: boolean;
+  enterSessionId?: string;
+  enterCommandId?: string;
+  enterFocus?: ActiveFocus;
+  enterEmptyProjectId?: string;
+  enterStateSeen?: boolean;
+  enterSnapshotSeen?: boolean;
+  dismissed?: boolean;
+}
+
+interface WorkspaceSessionRepairArchive {
+  backups: WorkspaceSessionRepairBackup[];
+  needsRecheck: boolean;
+  error?: string;
+  repairError?: string;
+}
+
+interface PendingWorkspaceSessionCommand {
+  socket: PiSocket;
+  connectionEpoch: number;
+  dialogId: string;
+  cwd: string;
+  commandId: string;
+  operation: WorkspaceSessionRepairPending;
+  purpose: "inspect" | "repair" | "retry-recovery" | "enter";
+}
+
 interface ActiveFocus {
   sessionId: string;
   projectId: string;
@@ -615,7 +659,9 @@ export function App() {
   const backgroundedAtRef = useRef<number | undefined>(undefined);
   const hasCompletedInitialHandshakeRef = useRef(false);
   const [transportOnline, setTransportOnline] = useState(false);
+  const transportOnlineRef = useRef(false);
   const [protocolReady, setProtocolReady] = useState(false);
+  const protocolReadyRef = useRef(false);
   const [protocolError, setProtocolError] = useState("");
   const [workspaces, setWorkspaces] = useState(initialWorkspaces.workspaces);
   const workspacesRef = useRef(initialWorkspaces.workspaces);
@@ -758,6 +804,19 @@ export function App() {
     useRef<PendingConversationRoleSwitch | undefined>(undefined);
   const [directoryBrowser, setDirectoryBrowserState] = useState<DirectoryBrowserState>();
   const directoryBrowserRef = useRef<DirectoryBrowserState | undefined>(undefined);
+  const [workspaceSessionRepair, setWorkspaceSessionRepairState] =
+    useState<WorkspaceSessionRepairDialogState>();
+  const workspaceSessionRepairRef = useRef<
+    WorkspaceSessionRepairDialogState | undefined
+  >(undefined);
+  const workspaceSessionRepairArchiveRef = useRef(
+    new Map<string, WorkspaceSessionRepairArchive>(),
+  );
+  const pendingWorkspaceSessionCommandRef = useRef<
+    PendingWorkspaceSessionCommand | undefined
+  >(undefined);
+  const [workspaceInitializationFailure, setWorkspaceInitializationFailure] =
+    useState<{ cwd: string; message: string }>();
   const [promptNotice, setPromptNotice] = useState("");
   const [outstandingRunId, setOutstandingRunId] = useState("");
   const outstandingRunIdRef = useRef("");
@@ -1291,6 +1350,63 @@ export function App() {
   const updateDirectoryBrowser = (next: DirectoryBrowserState | undefined) => {
     directoryBrowserRef.current = next;
     setDirectoryBrowserState(next);
+  };
+  const updateWorkspaceSessionRepair = (
+    next: WorkspaceSessionRepairDialogState | undefined,
+  ) => {
+    workspaceSessionRepairRef.current = next;
+    if (next) {
+      const key = workspaceKey(next.cwd);
+      if (next.backups.length > 0 || next.needsRecheck) {
+        workspaceSessionRepairArchiveRef.current.set(key, {
+          backups: next.backups,
+          needsRecheck: Boolean(next.needsRecheck),
+          error: next.error,
+          repairError: next.repairError,
+        });
+      } else {
+        workspaceSessionRepairArchiveRef.current.delete(key);
+      }
+    }
+    setWorkspaceSessionRepairState(next);
+  };
+  const invalidateWorkspaceSessionRepair = (reason: string) => {
+    const pending = pendingWorkspaceSessionCommandRef.current;
+    if (pending) pendingWorkspaceSessionCommandRef.current = undefined;
+    const dialog = workspaceSessionRepairRef.current;
+    if (!dialog) return;
+    const ownsPending = pending?.dialogId === dialog.dialogId;
+    const entering = dialog.phase === "entering" && Boolean(dialog.enterSessionId);
+    if (!ownsPending && !entering && !dialog.reportFresh) return;
+    updateWorkspaceSessionRepair({
+      ...dialog,
+      pending: undefined,
+      phase: "report",
+      enterSessionId: undefined,
+      enterCommandId: undefined,
+      enterFocus: undefined,
+      enterEmptyProjectId: undefined,
+      enterStateSeen: false,
+      enterSnapshotSeen: false,
+      reportFresh: false,
+      error: reason,
+      needsRecheck: Boolean(entering || (ownsPending && pending.operation === "repair"))
+        || Boolean(dialog.needsRecheck),
+    });
+  };
+  const closeWorkspaceSessionRepair = () => {
+    const dialog = workspaceSessionRepairRef.current;
+    if (!dialog) return;
+    const pending = pendingWorkspaceSessionCommandRef.current;
+    if (pending?.dialogId === dialog.dialogId && pending.operation === "repair") return;
+    if (pending?.dialogId === dialog.dialogId) {
+      pendingWorkspaceSessionCommandRef.current = undefined;
+    }
+    if (dialog.needsRecheck || dialog.backups.length > 0) {
+      updateWorkspaceSessionRepair({ ...dialog, dismissed: true });
+    } else {
+      updateWorkspaceSessionRepair(undefined);
+    }
   };
   const updatePendingFocus = (pending: PendingFocus | undefined) => {
     if (pending) {
@@ -1870,6 +1986,87 @@ export function App() {
         transitionEvents.push(event);
         return;
       }
+      if (event.type === "workspace_sessions_inspected") {
+        const owner = pendingWorkspaceSessionCommandRef.current;
+        const dialog = workspaceSessionRepairRef.current;
+        if (
+          !owner
+          || owner.operation !== "inspect"
+          || owner.commandId !== event.commandId
+          || owner.socket !== socketRef.current
+          || owner.connectionEpoch !== epoch
+          || !dialog
+          || dialog.dialogId !== owner.dialogId
+          || workspaceKey(owner.cwd) !== workspaceKey(event.cwd)
+        ) return;
+        pendingWorkspaceSessionCommandRef.current = undefined;
+        updateWorkspaceSessionRepair({
+          ...dialog,
+          cwd: event.cwd,
+          report: event,
+          reportFresh: true,
+          pending: undefined,
+          phase: "report",
+          error: "",
+          needsRecheck: false,
+        });
+        return;
+      }
+      if (event.type === "workspace_sessions_repaired") {
+        const owner = pendingWorkspaceSessionCommandRef.current;
+        const dialog = workspaceSessionRepairRef.current;
+        if (
+          !owner
+          || owner.operation !== "repair"
+          || owner.commandId !== event.commandId
+          || owner.socket !== socketRef.current
+          || owner.connectionEpoch !== epoch
+          || !dialog
+          || dialog.dialogId !== owner.dialogId
+          || workspaceKey(owner.cwd) !== workspaceKey(event.cwd)
+        ) return;
+        pendingWorkspaceSessionCommandRef.current = undefined;
+        const updated: WorkspaceSessionRepairDialogState = {
+          ...dialog,
+          cwd: event.cwd,
+          backups: [...dialog.backups, ...event.backups],
+          pending: undefined,
+          reportFresh: owner.purpose === "enter" && !event.error
+            ? dialog.reportFresh
+            : false,
+          phase: "report",
+          repairError: event.error ?? "",
+          error: event.error
+            ? "服务端返回修复错误；已提交部分可能已经生效。正在重新检查。"
+            : "",
+          needsRecheck: owner.purpose !== "enter" || Boolean(event.error),
+        };
+        updateWorkspaceSessionRepair(updated);
+        if (owner.purpose === "enter" && !event.error) {
+          const started = initialize(
+            event.cwd,
+            { kind: "recent" },
+            undefined,
+            socket,
+            "user",
+            owner.dialogId,
+          );
+          if (!started) {
+            const current = workspaceSessionRepairRef.current;
+            if (current?.dialogId === owner.dialogId) {
+              updateWorkspaceSessionRepair({
+                ...current,
+                phase: "report",
+                reportFresh: true,
+                error: "服务端检查请求已响应，但工作区初始化请求未发送。"
+              });
+            }
+          }
+        } else {
+          inspectWorkspaceSessionFiles(owner.dialogId, socket, epoch);
+        }
+        return;
+      }
       if ((event.type === "prompt_admitted" || event.type === "prompt_delivered" || event.type === "prompt_withdrawn")
         && matchesFocus(event.sessionId, event.conversationId, event.focusId)) {
         const focus = focusRef.current!;
@@ -1882,7 +2079,12 @@ export function App() {
       if (event.type === "hello") {
         if (event.protocolVersion !== PROTOCOL_VERSION) {
           const message = `协议版本不兼容：服务端 ${event.protocolVersion}，客户端 ${PROTOCOL_VERSION}`;
+          invalidateWorkspaceSessionRepair(
+            "协议版本失配；检查/修复结果不可确认，请在协议恢复后重新检查。",
+          );
           transitionTiming.cancel("protocol-error");
+          protocolReadyRef.current = false;
+          transportOnlineRef.current = false;
           setProtocolReady(false);
           setTransportOnline(false);
           setProjectActivityByWorkspace(new Map());
@@ -1920,6 +2122,7 @@ export function App() {
           ? "reconnect"
           : "restore";
         hasCompletedInitialHandshakeRef.current = true;
+        protocolReadyRef.current = true;
         setProtocolReady(true);
         setSetupCwd((current) => current || event.startupCwd);
         beginCustomProvidersRefresh(socket);
@@ -2142,6 +2345,48 @@ export function App() {
           if (pending) pendingFocusedStateRef.current = event.state;
           return;
         }
+        const repairDialog = workspaceSessionRepairRef.current;
+        if (
+          repairDialog?.phase === "entering"
+          && repairDialog.enterSessionId === event.state.sessionId
+          && !event.state.conversationId
+          && !event.state.focusId
+        ) {
+          const attached = repairDialog.enterEmptyProjectId === event.state.projectId;
+          updateWorkspaceSessionRepair({
+            ...repairDialog,
+            phase: attached ? "ready" : "entering",
+            enterEmptyProjectId: event.state.projectId,
+            enterStateSeen: true,
+            ...(attached ? {
+              enterSessionId: undefined,
+              enterCommandId: undefined,
+              enterEmptyProjectId: undefined,
+              enterStateSeen: false,
+              enterSnapshotSeen: false,
+              needsRecheck: false,
+              error: "",
+            } : {}),
+          });
+        } else if (
+          repairDialog?.phase === "entering"
+          && repairDialog.enterFocus
+          && stateMatchesFocus(event.state, repairDialog.enterFocus)
+        ) {
+          const ready = Boolean(repairDialog.enterSnapshotSeen);
+          updateWorkspaceSessionRepair({
+            ...repairDialog,
+            phase: ready ? "ready" : "entering",
+            enterStateSeen: true,
+            ...(ready ? {
+              enterSessionId: undefined,
+              enterCommandId: undefined,
+              enterFocus: undefined,
+              needsRecheck: false,
+              error: "",
+            } : {}),
+          });
+        }
         applyPublicState(event.state);
       } else if (event.type === "conversation_preview") {
         const pending = pendingFocusRef.current;
@@ -2303,6 +2548,48 @@ export function App() {
               || event.focusId === undefined
             ))
         ) return;
+        const repairDialog = workspaceSessionRepairRef.current;
+        if (
+          event.operation === "initialize"
+          && repairDialog?.enterSessionId === event.sessionId
+          && repairDialog.enterCommandId === event.commandId
+          && workspaceKey(repairDialog.cwd) === currentWorkspaceKey()
+        ) {
+          if (event.conversationId && event.focusId) {
+            const enterFocus: ActiveFocus = {
+              sessionId: event.sessionId,
+              projectId: event.projectId,
+              conversationId: event.conversationId,
+              focusId: event.focusId,
+            };
+            const pendingState = pendingFocusedStateRef.current;
+            updateWorkspaceSessionRepair({
+              ...repairDialog,
+              phase: "entering",
+              enterFocus,
+              enterEmptyProjectId: undefined,
+              enterStateSeen: Boolean(pendingState && stateMatchesFocus(pendingState, enterFocus)),
+              enterSnapshotSeen: false,
+            });
+          } else {
+            const stateSeen = repairDialog.enterStateSeen
+              && repairDialog.enterEmptyProjectId === event.projectId;
+            updateWorkspaceSessionRepair({
+              ...repairDialog,
+              phase: stateSeen ? "ready" : "entering",
+              enterFocus: undefined,
+              enterEmptyProjectId: stateSeen ? undefined : event.projectId,
+              enterStateSeen: false,
+              enterSnapshotSeen: false,
+              ...(stateSeen ? {
+                enterSessionId: undefined,
+                enterCommandId: undefined,
+                needsRecheck: false,
+                error: "",
+              } : {}),
+            });
+          }
+        }
         if (
           event.conversationId
           && event.focusId
@@ -2706,6 +2993,30 @@ export function App() {
         }
         if (!matchesFocus(event.sessionId, event.conversationId, event.focusId)) return;
         applyConversationSnapshot(event);
+        const repairDialog = workspaceSessionRepairRef.current;
+        const enteredFocus = repairDialog?.enterFocus;
+        // Attached identity survives state normalizing an alias cwd.
+        if (
+          repairDialog?.phase === "entering"
+          && enteredFocus
+          && enteredFocus.sessionId === event.sessionId
+          && enteredFocus.conversationId === event.conversationId
+          && enteredFocus.focusId === event.focusId
+        ) {
+          const ready = Boolean(repairDialog.enterStateSeen);
+          updateWorkspaceSessionRepair({
+            ...repairDialog,
+            phase: ready ? "ready" : "entering",
+            enterSnapshotSeen: true,
+            ...(ready ? {
+              enterSessionId: undefined,
+              enterCommandId: undefined,
+              enterFocus: undefined,
+              needsRecheck: false,
+              error: "",
+            } : {}),
+          });
+        }
       } else if (event.type === "session_event") {
         if (event.event.type === "run_queued") {
           for (const input of retainedInputsRef.current.values()) {
@@ -3048,6 +3359,41 @@ export function App() {
           [result.operation]: result,
         }));
       } else if (event.type === "error") {
+        if (
+          event.scope === "command"
+          && event.commandId
+          && (event.operation === "inspect_workspace_sessions"
+            || event.operation === "repair_workspace_sessions")
+        ) {
+          const owner = pendingWorkspaceSessionCommandRef.current;
+          const dialog = workspaceSessionRepairRef.current;
+          if (
+            !owner
+            || owner.commandId !== event.commandId
+            || owner.socket !== socketRef.current
+            || owner.connectionEpoch !== epoch
+            || !dialog
+            || dialog.dialogId !== owner.dialogId
+            || (owner.operation === "inspect"
+              ? event.operation !== "inspect_workspace_sessions"
+              : event.operation !== "repair_workspace_sessions")
+          ) return;
+          pendingWorkspaceSessionCommandRef.current = undefined;
+          updateWorkspaceSessionRepair({
+            ...dialog,
+            pending: undefined,
+            reportFresh: false,
+            error: owner.operation === "repair"
+              ? `修复请求失败：${event.message}。结果可能部分提交，正在重新检查。`
+              : `检查失败：${event.message}`,
+            repairError: owner.operation === "repair" ? event.message : dialog.repairError,
+            needsRecheck: owner.operation === "repair" || dialog.needsRecheck,
+          });
+          if (owner.operation === "repair") {
+            inspectWorkspaceSessionFiles(owner.dialogId, socket, epoch);
+          }
+          return;
+        }
         const pendingImageOpen = event.operation === "open_image" && event.commandId
           ? pendingImageOpensRef.current.get(event.commandId)
           : undefined;
@@ -3408,6 +3754,27 @@ export function App() {
             updateConversationReady(true);
           }
           if (event.operation === "initialize") {
+            setWorkspaceInitializationFailure({
+              cwd: activeCwdRef.current,
+              message: event.message,
+            });
+            const repairDialog = workspaceSessionRepairRef.current;
+            if (
+              repairDialog
+              && repairDialog.enterSessionId === event.sessionId
+              && repairDialog.enterCommandId === event.commandId
+            ) {
+              updateWorkspaceSessionRepair({
+                ...repairDialog,
+                phase: "report",
+                enterSessionId: undefined,
+                enterCommandId: undefined,
+                enterFocus: undefined,
+                reportFresh: false,
+                needsRecheck: true,
+                error: `工作区初始化失败：${event.message}。请重新检查后再尝试进入。`,
+              });
+            }
             clearTemporaryConversationPresentation();
             if (pending.cachedProjectId) discardCachedWorkspacePresentation();
             conversationIdRef.current = "";
@@ -3519,10 +3886,21 @@ export function App() {
     socketEventHandlerRef.current = handleSocketEvent;
     const socket = new PiSocket(handleSocketEvent, (connected) => {
       if (!isCurrentSocket()) return;
+      transportOnlineRef.current = connected;
       setTransportOnline(connected);
       if (!connected) {
+        const repairOwner = pendingWorkspaceSessionCommandRef.current;
+        const repairDialog = workspaceSessionRepairRef.current;
+        if (repairOwner || repairDialog) {
+          invalidateWorkspaceSessionRepair(
+            repairOwner?.operation === "repair"
+              ? "连接已断开，修复结果未确认；请重新检查。不会自动重试修复。"
+              : "连接已断开，进入状态未确认；请重新检查后手动继续。不会自动重新进入。",
+          );
+        }
         closePendingImageOpens();
         transitionTiming.cancel("disconnect");
+        protocolReadyRef.current = false;
         setProtocolReady(false);
         setProjectActivityByWorkspace(new Map());
         setProjectActivityTruncated(false);
@@ -3953,6 +4331,225 @@ export function App() {
     const path = setupCwd.trim();
     browseDirectory(path || undefined);
   };
+  const inspectWorkspaceSessionFiles = (
+    dialogId: string,
+    socket = socketRef.current,
+    connectionEpoch = socketEpochRef.current,
+  ): boolean => {
+    const dialog = workspaceSessionRepairRef.current;
+    if (!dialog || dialog.dialogId !== dialogId) return false;
+    if (!socket || !transportOnlineRef.current || !protocolReadyRef.current) {
+      updateWorkspaceSessionRepair({
+        ...dialog,
+        pending: undefined,
+        reportFresh: false,
+        error: "本地服务未连接；请连接后重新检查。",
+      });
+      return false;
+    }
+    if (pendingWorkspaceSessionCommandRef.current) return false;
+    const owner: PendingWorkspaceSessionCommand = {
+      socket,
+      connectionEpoch,
+      dialogId,
+      cwd: dialog.cwd,
+      commandId: crypto.randomUUID(),
+      operation: "inspect",
+      purpose: "inspect",
+    };
+    pendingWorkspaceSessionCommandRef.current = owner;
+    updateWorkspaceSessionRepair({
+      ...dialog,
+      pending: "inspect",
+      reportFresh: false,
+      error: "",
+      needsRecheck: dialog.needsRecheck,
+    });
+    if (!socket.send({
+      type: "inspect_workspace_sessions",
+      commandId: owner.commandId,
+      cwd: owner.cwd,
+    })) {
+      if (pendingWorkspaceSessionCommandRef.current === owner) {
+        pendingWorkspaceSessionCommandRef.current = undefined;
+        const current = workspaceSessionRepairRef.current;
+        if (current?.dialogId === dialogId) {
+          updateWorkspaceSessionRepair({
+            ...current,
+            pending: undefined,
+            reportFresh: false,
+            error: "检查请求未发送；请确认本地服务连接后重试。",
+          });
+        }
+      }
+      return false;
+    }
+    return true;
+  };
+  const repairWorkspaceSessionFiles = (
+    dialogId: string,
+    files: WorkspaceSessionRepairRequest[],
+    allowDiscardIncompleteTail: boolean,
+  ): boolean => {
+    const dialog = workspaceSessionRepairRef.current;
+    const socket = socketRef.current;
+    const report = dialog?.report;
+    if (
+      !dialog
+      || dialog.dialogId !== dialogId
+      || !report
+      || !dialog.reportFresh
+      || !socket
+      || !transportOnlineRef.current
+      || !protocolReadyRef.current
+      || pendingWorkspaceSessionCommandRef.current
+      || files.length === 0
+    ) return false;
+    const issuesByFile = new Map(report.issues.map((issue) => [issue.fileName, issue]));
+    const selectedIssues = files.map((file) => issuesByFile.get(file.fileName));
+    if (selectedIssues.some((issue, index) => (
+      !issue
+      || issue.revision !== files[index]?.expectedRevision
+      || issue.repair === null
+      || (issue.repair.kind === "discard_incomplete_tail" && !allowDiscardIncompleteTail)
+    ))) return false;
+    const owner: PendingWorkspaceSessionCommand = {
+      socket,
+      connectionEpoch: socketEpochRef.current,
+      dialogId,
+      cwd: report.cwd,
+      commandId: crypto.randomUUID(),
+      operation: "repair",
+      purpose: "repair",
+    };
+    pendingWorkspaceSessionCommandRef.current = owner;
+    updateWorkspaceSessionRepair({
+      ...dialog,
+      pending: "repair",
+      reportFresh: false,
+      error: "",
+      needsRecheck: true,
+    });
+    if (!socket.send({
+      type: "repair_workspace_sessions",
+      commandId: owner.commandId,
+      cwd: owner.cwd,
+      files,
+      allowDiscardIncompleteTail,
+    })) {
+      if (pendingWorkspaceSessionCommandRef.current === owner) {
+        pendingWorkspaceSessionCommandRef.current = undefined;
+        const current = workspaceSessionRepairRef.current;
+        if (current?.dialogId === dialogId) {
+          updateWorkspaceSessionRepair({
+            ...current,
+            pending: undefined,
+            reportFresh: true,
+            error: "修复请求未发送；尚未提交修复，请确认连接后重试。",
+            needsRecheck: false,
+          });
+        }
+      }
+      return false;
+    }
+    return true;
+  };
+  const sendEmptyWorkspaceSessionRepair = (
+    dialogId: string,
+    purpose: "retry-recovery" | "enter",
+  ): boolean => {
+    const dialog = workspaceSessionRepairRef.current;
+    const report = dialog?.report;
+    const socket = socketRef.current;
+    if (
+      !dialog
+      || dialog.dialogId !== dialogId
+      || !report
+      || !dialog.reportFresh
+      || !socket
+      || !transportOnlineRef.current
+      || !protocolReadyRef.current
+      || pendingWorkspaceSessionCommandRef.current
+      || report.truncated
+      || report.issues.length > 0
+      || (purpose === "enter" && report.recoveryError !== undefined)
+      || (purpose === "retry-recovery" && !report.recoveryError)
+    ) return false;
+    const owner: PendingWorkspaceSessionCommand = {
+      socket,
+      connectionEpoch: socketEpochRef.current,
+      dialogId,
+      cwd: report.cwd,
+      commandId: crypto.randomUUID(),
+      operation: "repair",
+      purpose,
+    };
+    pendingWorkspaceSessionCommandRef.current = owner;
+    updateWorkspaceSessionRepair({
+      ...dialog,
+      pending: "repair",
+      reportFresh: purpose === "enter",
+      error: "",
+      needsRecheck: true,
+    });
+    if (!socket.send({
+      type: "repair_workspace_sessions",
+      commandId: owner.commandId,
+      cwd: owner.cwd,
+      files: [],
+      allowDiscardIncompleteTail: false,
+    })) {
+      if (pendingWorkspaceSessionCommandRef.current === owner) {
+        pendingWorkspaceSessionCommandRef.current = undefined;
+        const current = workspaceSessionRepairRef.current;
+        if (current?.dialogId === dialogId) {
+          updateWorkspaceSessionRepair({
+            ...current,
+            pending: undefined,
+            reportFresh: true,
+            error: "重新校验请求未发送；工作区尚未重新打开。",
+            needsRecheck: false,
+          });
+        }
+      }
+      return false;
+    }
+    return true;
+  };
+  const openWorkspaceSessionRepair = (cwd: string) => {
+    const path = cwd.trim();
+    if (!path || pendingWorkspaceSessionCommandRef.current?.operation === "repair") return;
+    pendingWorkspaceSessionCommandRef.current = undefined;
+    const dialogId = crypto.randomUUID();
+    const key = workspaceKey(path);
+    const current = workspaceSessionRepairRef.current;
+    const currentForKey = current && workspaceKey(current.cwd) === key ? current : undefined;
+    const previous = currentForKey ?? workspaceSessionRepairArchiveRef.current.get(key);
+    setSetupOpen(false);
+    updateDirectoryBrowser(undefined);
+    updateWorkspaceSessionRepair({
+      dialogId,
+      cwd: path,
+      report: currentForKey?.report,
+      reportFresh: false,
+      backups: previous?.backups ?? [],
+      pending: undefined,
+      phase: "report",
+      dismissed: false,
+      error: previous?.needsRecheck ? previous.error : "",
+      repairError: previous?.repairError,
+      needsRecheck: previous?.needsRecheck,
+    });
+    if (!inspectWorkspaceSessionFiles(dialogId)) {
+      const current = workspaceSessionRepairRef.current;
+      if (current?.dialogId === dialogId && !transportOnlineRef.current) {
+        updateWorkspaceSessionRepair({
+          ...current,
+          error: "本地服务未连接；请连接后重新检查。",
+        });
+      }
+    }
+  };
   function initialize(
     cwd: string,
     conversation: Extract<ClientCommand, { type: "initialize" }>["conversation"] = {
@@ -3961,6 +4558,7 @@ export function App() {
     cached?: CachedWorkspaceProjection,
     transport?: PiSocket,
     origin: TransitionOrigin = "user",
+    repairDialogId?: string,
   ) {
     const normalizedCwd = cwd.trim();
     const sessionId = crypto.randomUUID();
@@ -3990,6 +4588,34 @@ export function App() {
       return false;
     }
     transitionTiming.promote(timingAttempt);
+    const repairDialog = workspaceSessionRepairRef.current;
+    if (
+      repairDialog
+      && workspaceKey(repairDialog.cwd) !== workspaceKey(normalizedCwd)
+    ) {
+      invalidateWorkspaceSessionRepair(
+        "工作区已切换；原工作区修复结果未确认，请重新检查。不会自动重试修复。",
+      );
+    }
+    setWorkspaceInitializationFailure(undefined);
+    if (repairDialogId) {
+      const currentRepairDialog = workspaceSessionRepairRef.current;
+      if (currentRepairDialog?.dialogId === repairDialogId) {
+        updateWorkspaceSessionRepair({
+          ...currentRepairDialog,
+          phase: "entering",
+          enterSessionId: sessionId,
+          enterCommandId: commandId,
+          enterFocus: undefined,
+          enterEmptyProjectId: undefined,
+          enterStateSeen: false,
+          enterSnapshotSeen: false,
+          reportFresh: true,
+          needsRecheck: true,
+          error: "",
+        });
+      }
+    }
     // Directory browsing is connection-scoped, not a project transition.
     // A new initialize replaces its local observation scope, so any late
     // listing must find no live browser to update.
@@ -4905,6 +5531,11 @@ export function App() {
 
     const sessionId = sessionIdRef.current;
     if (sessionId) send({ type: "close_session", sessionId });
+    if (workspaceKey(workspaceSessionRepairRef.current?.cwd ?? "") === key) {
+      invalidateWorkspaceSessionRepair(
+        "工作区已关闭；旧检查/进入观察失效，请重新打开后手动检查。",
+      );
+    }
     transitionTiming.cancel("destroyed");
     activeCwdRef.current = "";
     sessionIdRef.current = "";
@@ -5060,8 +5691,14 @@ export function App() {
   // chain, but only the top surface may remain an accessible modal.
   const externalModalVisible = Boolean(authModalVisible || extensionPending);
   const directoryBrowserCovered = externalModalVisible;
-  const workspaceSetupCovered = Boolean(directoryBrowser || externalModalVisible);
-  const blockingModalVisible = Boolean(externalModalVisible || setupOpen);
+  const workspaceSetupCovered = Boolean(
+    directoryBrowser || externalModalVisible
+    || (workspaceSessionRepair && !workspaceSessionRepair.dismissed),
+  );
+  const blockingModalVisible = Boolean(
+    externalModalVisible || setupOpen
+    || (workspaceSessionRepair && !workspaceSessionRepair.dismissed),
+  );
   const workspaceSetupFocusRef = useModalFocus<HTMLElement>(
     setupOpen,
     setupOpen ? "workspace-setup" : "",
@@ -5183,6 +5820,38 @@ export function App() {
       updateDirectoryBrowser(undefined);
     }}
     onClose={() => updateDirectoryBrowser(undefined)}
+  />;
+
+  const workspaceSessionRepairDialog = workspaceSessionRepair
+    && !workspaceSessionRepair.dismissed
+    && <WorkspaceSessionRepairDialog
+    open
+    cwd={workspaceSessionRepair.cwd}
+    online={online}
+    covered={externalModalVisible}
+    report={workspaceSessionRepair.report}
+    reportFresh={workspaceSessionRepair.reportFresh}
+    backups={workspaceSessionRepair.backups}
+    pending={workspaceSessionRepair.pending}
+    phase={workspaceSessionRepair.phase}
+    error={workspaceSessionRepair.error}
+    repairError={workspaceSessionRepair.repairError}
+    needsRecheck={workspaceSessionRepair.needsRecheck}
+    onInspect={() => inspectWorkspaceSessionFiles(workspaceSessionRepair.dialogId)}
+    onRepair={(files, allowDiscard) => repairWorkspaceSessionFiles(
+      workspaceSessionRepair.dialogId,
+      files,
+      allowDiscard,
+    )}
+    onRetryRecovery={() => sendEmptyWorkspaceSessionRepair(
+      workspaceSessionRepair.dialogId,
+      "retry-recovery",
+    )}
+    onRevalidateAndEnter={() => sendEmptyWorkspaceSessionRepair(
+      workspaceSessionRepair.dialogId,
+      "enter",
+    )}
+    onClose={closeWorkspaceSessionRepair}
   />;
 
   const transitioning = workspaceSyncing || conversationSyncing;
@@ -5463,6 +6132,17 @@ export function App() {
         hidden={phoneViewport ? mobileScene !== "conversations" : false}
         announceOpening={phoneViewport && mobileScene === "conversations"}
         onOpen={openWorkspaceDialog}
+        initializationError={workspaceInitializationFailure
+          && workspaceKey(workspaceInitializationFailure.cwd) === workspaceKey(activeCwd)
+          ? workspaceInitializationFailure.message
+          : undefined}
+        repairUnknown={Boolean(
+          workspaceSessionRepair?.dismissed
+          && workspaceSessionRepair.needsRecheck
+          && workspaceKey(workspaceSessionRepair.cwd) === workspaceKey(activeCwd)
+        )}
+        onReviewRepair={() => openWorkspaceSessionRepair(activeCwd)}
+        onInspectSessions={() => openWorkspaceSessionRepair(activeCwd)}
         onClose={() => closeWorkspace(activeCwd)}
         onRetry={() => switchWorkspace(activeCwd)}
       />
@@ -5470,6 +6150,7 @@ export function App() {
     {retainedInputsFallback}
     {workspaceSetupDialog}
     {directoryBrowserDialog}
+    {workspaceSessionRepairDialog}
     {extensionDialog}
     {feedback}
   </>;
@@ -5596,6 +6277,15 @@ export function App() {
         className="workbench-main"
         hidden={phoneViewport && mobileScene !== "chat"}
       >
+        {workspaceSessionRepair?.dismissed
+          && workspaceSessionRepair.needsRecheck
+          && workspaceKey(workspaceSessionRepair.cwd) === currentWorkspaceKey()
+          && <div className="banner workspace-session-diagnostic" role="alert">
+            <span>修复结果未知；不会自动重试或进入工作区。已确认的备份仍可查看。</span>
+            <button type="button" onClick={() => openWorkspaceSessionRepair(workspaceSessionRepair.cwd)}>
+              查看备份并重新检查
+            </button>
+          </div>}
         {workspaceSyncing && <div
           className="banner transition-status-overlay"
           role="status"
@@ -5891,6 +6581,7 @@ export function App() {
     />
     {workspaceSetupDialog}
     {directoryBrowserDialog}
+    {workspaceSessionRepairDialog}
     <AuthDialog {...auth} visible={authModalVisible} onRespond={(requestId, response) => {
       const authFlowId = authFlowIdRef.current;
       if (authFlowId) send({ type: "auth_response", authFlowId, requestId, ...response });

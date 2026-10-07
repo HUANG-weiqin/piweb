@@ -1,6 +1,6 @@
 # 项目与持久会话
 
-`updated: 2026-10-06`
+`updated: 2026-10-07`
 
 ## 这个模块是干什么的
 
@@ -130,6 +130,16 @@ Project store handle 按 canonical cwd 引用计数；ProjectSessionCoordinator 
 
 涉及这些旧数据时应先补齐实现与兼容测试，或由用户明确修订合同；不要手工删除旧 sidecar、凭正文去重或追加猜测性的 profile 来绕过。新格式保持无持久 browser prompt 队列。
 
+## 工作区会话数据修复
+
+普通 initialize/open/audit 继续严格校验，不能边读边静默改写损坏数据。初始化失败和工作区打开对话框另提供“检查会话数据”入口：连接级 `inspect_workspace_sessions` / `repair_workspace_sessions` 只用 `cwd + commandId` 关联，在没有有效 focus 时也可操作，不创建空项目状态、加载项目扩展或启动 Agent。
+
+- 诊断重新读取安全目录及会话文件；纯零尾、合法最后记录缺换行可保留全部有效记录。仅不以换行结束、仍未闭合的最后一个 JSON 对象 fragment，可在用户明确同意后丢弃。已经闭合的完整 JSON 后附垃圾、完整 JSON 的语义错误、中段损坏、非法 UTF-8、身份碰撞、header/tree/reserved ledger 错误不猜测修复，不静默删除或隔离会话。
+- 修复计划绑定规范路径、完整 fingerprint 与内容摘要；服务端 fresh 复核且 fail-fast 取得全部目标 writer lease，已有 actor/writer 的文件拒绝覆盖。批次与既有 project lifecycle、Store 会话串行边界排序，新项目 context 不得看到半个修复批次。
+- 原始字节先以独占新文件保存到 `.piweb/session-repair-backups/` 并完成 sync，再写同目录独占临时文件、sync、复核源路径/指纹并原子替换；修复后再次严格校验。备份不放入 `.piweb/sessions`，避免变成重复 conversation claim。多文件不是磁盘事务：后续失败仍返回已提交文件的备份路径和错误，不声称全批回滚。
+- 修复不等于恢复门闩成功。存在失败 context 时，在原 lifecycle 内重跑既有 foundation，完成精确恢复证明后才允许 run；失败原因为诊断所见保留，不靠直接设 ready 或补造 receipt/settlement。空修复请求用于明确重试已无文件损坏的恢复流程。修复界面重新检查后仍通过普通 initialize 和权威 snapshot 进入，不取得额外执行权限。
+- 默认 reload/close 等待已准入的修复控制命令。既有 `reload --force` 仍可中断处理，不能承诺回执、批次 exactly-once 或所有临时 artifact 已清理；备份在源替换前完成，临时文件校验后才原子替换。连接丢失只能进入“结果未确认”并 fresh 检查，不自动重发。
+
 ## 持久 inbox 与恢复
 
 `.piweb/inbox/<messageId>.json` 是 transport sidecar，目标 JSONL 的 immutable delivery receipt 才是永久交付 authority：receipt 持久后即可释放 sidecar；delegation card 的 terminal outcome 另等 exact run settlement。发送/claim/FIFO/配额/wait attempt 详见[持久通信](kb-agent-collaboration.md#持久通信)，不在此维护第二套流程。
@@ -195,7 +205,7 @@ browser prompt 没有持久队列；live admission、raw-message 对象身份和
 
 - actor 创建、extension activation 或固定模型校验失败时必须 dispose 新 runtime、释放 lease，并清理半创建 conversation。
 - focus change/reinitialize/disconnect 只使浏览器观察 epoch 和 UI route 失效；后台 run 与 actor 保留。真正 server close 才统一取消、settle、dispose 并释放 conversation lease。
-- 项目清单无效、状态目录是链接、JSONL 是链接、日志截断/损坏、非有限 JSON 数值、畸形 entry/tree、Pi 索引遗漏/错配或身份在 open 时变化都会 fail closed，原文件不被“修复”覆盖，也不能静默回退到另一条 recent 对话或新建对话。
+- 项目清单无效、状态目录是链接、JSONL 是链接、日志截断/损坏、非有限 JSON 数值、畸形 entry/tree、Pi 索引遗漏/错配或身份在 open 时变化都会 fail closed。普通读取不覆盖原件，也不能静默回退到另一条 recent 对话或新建对话；用户明确进入的会话数据修复流程仅按上述窄范围、备份与复核合同改写。
 - 断线不会停止 coordinator-owned run；重连用新 sessionId/focusId 重新观察同一 conversation，并从 durable JSONL hydrate。coordinated `initialize/open` 会直接发送当前 focus 的 `conversation_snapshot`，即使 actor 仍在 `waiting`；因此 `wait_for_session` 已持久化 toolCall 但尚未持久化 result 时，恢复快照必须显示 `pending`。普通 `refresh_view` 则只在 actor idle 且未 compacting 时发送 focused snapshot。
 - `lastConversationId` 只是恢复提示；索引是派生状态，丢失/陈旧时可从 sessionDir 重建。focus 已成功但该提示后台保存失败时不回滚 focus，并只向仍匹配原 focusId 的当前观察报告错误。
 

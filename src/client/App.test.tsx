@@ -460,6 +460,23 @@ function startFromSetup(): string {
   return latestSessionId();
 }
 
+function openFailedWorkspaceRepair(): string {
+  const initialize = latestCommand("initialize");
+  act(() => socketMock.rawEmit?.({
+    type: "error",
+    scope: "command",
+    operation: "initialize",
+    commandId: initialize.commandId,
+    sessionId: initialize.sessionId,
+    message: "Session file must end with a newline",
+  }));
+  expect(screen.getByRole("heading", { name: "工作区打开失败" })).toBeInTheDocument();
+  expect(within(screen.getByRole("navigation", { name: "工作区" }))
+    .queryByRole("button", { name: /检查/ })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "检查与修复" }));
+  return initialize.cwd;
+}
+
 function conversationSummary(
   id: string,
   name: string,
@@ -1395,6 +1412,213 @@ describe("App", () => {
     fireEvent.click(newConversation);
     expect(screen.getByRole("heading", { name: "新建会话" }).closest("header"))
       .toHaveFocus();
+  });
+
+  it("allows leaving an unknown workspace repair result and reopening its backup details without retrying", () => {
+    socketMock.autoFocus = false;
+    render(<App />);
+    startFromSetup();
+    const cwd = openFailedWorkspaceRepair();
+    const inspect = latestCommand("inspect_workspace_sessions");
+    const revision = "a".repeat(64);
+    act(() => socketMock.emit?.({
+      type: "workspace_sessions_inspected",
+      commandId: inspect.commandId,
+      cwd,
+      checkedFiles: 1,
+      truncated: false,
+      issues: [{
+        fileName: "session.jsonl",
+        conversationId: CONVERSATION_ID,
+        revision,
+        error: "incomplete final line",
+        repair: { kind: "append_newline", removedBytes: 0, retainedEntries: 1 },
+      }],
+    }));
+
+    fireEvent.click(screen.getByRole("button", { name: "备份并修复无损项（1 项）" }));
+    const repair = latestCommand("repair_workspace_sessions");
+    const backupPath = `${cwd}\\.piweb\\backups\\session.jsonl.bak`;
+    act(() => socketMock.emit?.({
+      type: "workspace_sessions_repaired",
+      commandId: repair.commandId,
+      cwd,
+      backups: [{ fileName: "session.jsonl", backupPath }],
+      error: "partial commit",
+    }));
+    expect(latestCommand("inspect_workspace_sessions").commandId).not.toBe(inspect.commandId);
+
+    act(() => socketMock.status?.(false));
+    const close = screen.getByRole("button", { name: "关闭会话数据检查" });
+    expect(close).toBeEnabled();
+    fireEvent.click(close);
+    expect(screen.getByText(/修复结果未知/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "查看备份并重新检查" }));
+    expect(screen.getByText(backupPath)).toBeInTheDocument();
+    expect(screen.getByText(/修复结果尚未确认/)).toBeInTheDocument();
+    expect(socketMock.send.mock.calls.filter(([command]) =>
+      command.type === "repair_workspace_sessions",
+    )).toHaveLength(1);
+  });
+
+  it.each(["state", "snapshot"] as const)("completes repair entry from an alias cwd only after matching state and history (%s first)", (first) => {
+    socketMock.autoFocus = false;
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "开启工作区" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "项目目录" }), {
+      target: { value: "E:\\work\\." },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "进入项目" }));
+    const cwd = openFailedWorkspaceRepair();
+    const inspect = latestCommand("inspect_workspace_sessions");
+    act(() => socketMock.rawEmit?.({
+      type: "workspace_sessions_inspected",
+      commandId: inspect.commandId,
+      cwd,
+      checkedFiles: 1,
+      truncated: false,
+      issues: [],
+    }));
+    fireEvent.click(screen.getByRole("button", { name: "重新校验并进入工作区" }));
+    const repair = latestCommand("repair_workspace_sessions");
+    act(() => socketMock.rawEmit?.({
+      type: "workspace_sessions_repaired",
+      commandId: repair.commandId,
+      cwd,
+      backups: [],
+    }));
+    const entering = latestCommand("initialize");
+    expect(entering.cwd).toBe("E:\\work\\.");
+    act(() => socketMock.rawEmit?.({
+      type: "focus_attached",
+      operation: "initialize",
+      commandId: entering.commandId,
+      sessionId: entering.sessionId,
+      projectId: PROJECT_ID,
+      conversationId: CONVERSATION_ID,
+      focusId: FOCUS_A,
+    }));
+    const stateEvent: TestServerEvent = {
+      type: "state",
+      state: {
+        sessionId: entering.sessionId,
+        projectId: PROJECT_ID,
+        conversationId: CONVERSATION_ID,
+        focusId: FOCUS_A,
+        cwd: "E:\\work",
+        busy: false,
+        thinkingLevel: "off",
+        toolMode: "read_only",
+        availableThinkingLevels: ["off"],
+        selectedModel: { provider: "provider", id: "model" },
+        providers: [],
+      },
+    };
+    const snapshotEvent: TestServerEvent = {
+      type: "conversation_snapshot",
+      sessionId: entering.sessionId,
+      conversationId: CONVERSATION_ID,
+      focusId: FOCUS_A,
+      items: snapshotItems([{
+        id: "retained-history",
+        role: "assistant",
+        text: "retained repair history",
+        thinking: "",
+        tools: [],
+      }]),
+      window: { omittedBefore: false, startsMidTurn: false, contentTruncated: false },
+    };
+    act(() => socketMock.rawEmit?.({ ...snapshotEvent, focusId: FOCUS_A_SECOND }));
+    expect(screen.queryByText("工作区已重新打开。备份位置仍保留在下方。"))
+      .not.toBeInTheDocument();
+    act(() => socketMock.rawEmit?.(first === "state" ? stateEvent : snapshotEvent));
+    expect(screen.queryByText("工作区已重新打开。备份位置仍保留在下方。"))
+      .not.toBeInTheDocument();
+    expect(screen.getByText("正在重试服务端恢复并进入工作区…")).toBeInTheDocument();
+    act(() => socketMock.rawEmit?.(first === "state" ? snapshotEvent : stateEvent));
+    expect(screen.getByText("工作区已重新打开。备份位置仍保留在下方。"))
+      .toBeInTheDocument();
+    expect(screen.queryByText("正在重试服务端恢复并进入工作区…"))
+      .not.toBeInTheDocument();
+  });
+
+  it("invalidates an in-progress repair entry on disconnect and does not re-enter after reconnect", () => {
+    socketMock.autoFocus = false;
+    render(<App />);
+    startFromSetup();
+    const cwd = openFailedWorkspaceRepair();
+    const inspect = latestCommand("inspect_workspace_sessions");
+    act(() => socketMock.emit?.({
+      type: "workspace_sessions_inspected",
+      commandId: inspect.commandId,
+      cwd,
+      checkedFiles: 0,
+      truncated: false,
+      issues: [],
+    }));
+
+    fireEvent.click(screen.getByRole("button", { name: "重新校验并进入工作区" }));
+    const repair = latestCommand("repair_workspace_sessions");
+    act(() => socketMock.emit?.({
+      type: "workspace_sessions_repaired",
+      commandId: repair.commandId,
+      cwd,
+      backups: [],
+    }));
+    const enteringInitialize = latestCommand("initialize");
+    expect(enteringInitialize.conversation).toEqual({ kind: "recent" });
+
+    act(() => socketMock.status?.(false));
+    expect(screen.getByText(/进入状态未确认/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "关闭会话数据检查" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "关闭会话数据检查" }));
+
+    act(() => {
+      socketMock.status?.(true);
+      socketMock.emit?.({
+        type: "hello",
+        protocolVersion: PROTOCOL_VERSION,
+        startupCwd: "E:\\default",
+      });
+    });
+    expect(socketMock.send.mock.calls.filter(([command]) => command.type === "initialize"))
+      .toHaveLength(3);
+    expect(latestCommand("initialize").commandId).not.toBe(enteringInitialize.commandId);
+    expect(socketMock.send.mock.calls.filter(([command]) =>
+      command.type === "repair_workspace_sessions",
+    )).toHaveLength(1);
+    expect(screen.getByText(/修复结果未知/)).toBeInTheDocument();
+  });
+
+  it("offers workspace inspection only after opening fails, not in Setup or a healthy workspace", () => {
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "开启工作区" }));
+    expect(screen.queryByRole("button", { name: /检查/ })).not.toBeInTheDocument();
+    const sessionId = startFromSetup();
+    act(() => socketMock.emit?.({
+      type: "state",
+      state: {
+        sessionId,
+        cwd: "E:\\work",
+        busy: false,
+        thinkingLevel: "off",
+        toolMode: "read_only",
+        availableThinkingLevels: ["off"],
+        selectedModel: { provider: "provider", id: "model" },
+        providers: [],
+      },
+    }));
+    expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /检查/ })).not.toBeInTheDocument();
+    socketMock.autoFocus = false;
+    fireEvent.click(screen.getByRole("button", { name: "添加工作区" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "项目目录" }), {
+      target: { value: "E:\\broken" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "进入项目" }));
+    expect(openFailedWorkspaceRepair()).toBe("E:\\broken");
+    expect(latestCommand("inspect_workspace_sessions").cwd).toBe("E:\\broken");
   });
 
   it("shows an empty workbench before the first workspace is opened", () => {

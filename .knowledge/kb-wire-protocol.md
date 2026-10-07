@@ -1,6 +1,6 @@
 # 线协议
 
-`updated: 2026-10-06`
+`updated: 2026-10-07`
 
 ## 这个模块是干什么的
 
@@ -51,6 +51,7 @@ ClientCommand
 - `conversation_snapshot` 携带有界 `pendingPrompts`（当前 focus 的 admitted 项，`promptId + text` FIFO），断线/多窗口据此恢复等待中列表；它不是 transcript，不进入高频 PublicState。客户端不得自建队列、重发或按正文去重；单条撤回只走服务端 `withdraw_prompt` 权威控制。focused snapshot 始终显式带该数组，空 FIFO 也必须发出，不能用字段缺失表达“没有变化”。
 - v39 的 `conversation_snapshot.loopList` 与 `loop_list_update` 使用严格三态 item：`status` 只能是 `pending | active | completed`，不接受 `checked`。新持久写入只使用 `piweb.loop_list.v2` / `piweb.loop_list_continue.v2`；服务端可严格读取 canonical v1 `checked` history，并仅在内部规范化成 v2（`checked=true → completed`、`false → pending`），不改写既有 JSONL，也绝不推导 active。未知版本、非 canonical v1 或混用字段均 fail closed。列表允许多个 active，数组顺序只用于稳定展示；active 是持久关注状态，不能作为 `activeRun` 或 busy 的替代证明。完整有界 LoopList 仍只进入 focused snapshot 与匹配 `sessionId + conversationId + focusId` 的 live event，不进入高频 `PublicState`、`project_snapshot`、无 focus preview 或 presentation cache；切换 observation 时客户端先清空，后续匹配 snapshot 才恢复权威值。
 - `browse_directory` 是 initialize 前的连接级只读控制命令，使用连接内一次性 commandId 关联 `directory_listing` 或 command error；`path` 是临时浏览位置，不是已提交项目 cwd。列表同时受项数和序列化字节数限制，迟到或不匹配的结果必须忽略。
+- v69 的 `inspect_workspace_sessions / repair_workspace_sessions` 同属连接级 socket control，以 `cwd + 一次性 commandId` 关联 `workspace_sessions_inspected / workspace_sessions_repaired` 或 command error，不依赖 initialize/focus 成功。回执的 `cwd` 原样关联请求拼写，磁盘/租约所有权仍按 canonical cwd 处理；目录别名不能让正确回执被丢弃。诊断返回最多 100 个坏文件及 `truncated`；修复仅接受 basename 与当前诊断的 `expectedRevision`，每条计划绑定文件版本而非客户端 conversationId。丢弃不完整尾 fragment 必须显式携带用户同意；空 files 用于重新证明恢复 foundation。修复结果可同时有已提交 `backups` 和后续 `error`，不能按 transport send 或普通 state/snapshot 推导成功。写入控制命令参与 reload/close drain，冻结后拒绝新修复；结果失效后只能 fresh 检查，不自动重发。磁盘范围见[会话数据修复](kb-project-sessions.md#工作区会话数据修复)。
 - `set_color_scheme` 同样属于 socket control，而非 project/session/actor 命令：只携带连接内一次性 commandId 与严格枚举值。服务端必须先在用户级 store 完成串行原子持久化，再广播最终 `UiPreferences`；写失败只给来源连接返回匹配 `operation + commandId` 的 command error，不能改变内存权威或向其它连接广播。`ui_preferences_changed.commandId` 仅是来源提交回执，缺失时只是跨连接 authority 更新，浏览器不能据此清除自己的未保存预览。
 - v60 的 `save_custom_provider / delete_custom_provider / refresh_custom_providers / probe_custom_provider_models` 也是 socket control（无 sessionId），因为 `models.json` 是进程级用户配置而与会话无关。写盘必须回传上次快照的 `expectedRevision`（文件字节 sha256，文件缺失为 `"absent"`）并在共享配置队列内完成，成功后向所有连接广播 `custom_providers_snapshot`（仅来源带 commandId）；`refresh_custom_providers` 的读取失败不算命令失败，而是同一快照事件里的 `error` 字段。`custom_provider_models_probe` 只由发起来源以 commandId 关联。快照只暴露 `storedAuth` 形态、`authEnvNames`、`extraFields`、`editable` 与 `builtinOverride`，永不携带 apiKey 值。详细语义见 [kb-custom-providers.md](kb-custom-providers.md)。
 - OAuth login/request/progress/response/cancel/complete 显式携带 authFlowId；浏览器不得接收非当前 flow 的帧。

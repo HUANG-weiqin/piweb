@@ -1,6 +1,6 @@
 # 客户端状态
 
-`updated: 2026-10-06`
+`updated: 2026-10-07`
 
 ## 这个模块是干什么的
 
@@ -59,6 +59,8 @@ ServerEvent
 - 页面从后台或休眠恢复以及网络重新 online 时，把同一短时 burst 内的 `focus/pageshow/visibilitychange/online` 合并为一次 transport resume：若异常断开正处于退避等待则立即重连；若页面已 hidden 至少 30 秒或从 bfcache 恢复，则主动替换可能半开的旧 WebSocket；否则保留健康连接并发送一次 `refresh_view`。刷新命令读取发送时最新的 project/focus 身份，pending focus、prompt 尚未确认、hidden、离线或握手未完成时不发送。重建连接继续走新 observation sessionId、exact conversation open 和权威 snapshot hydrate；恢复刷新本身不创建新 observation epoch，也不改变 transcript ownership。服务端专用 fatal observation close 仍禁止自动重连。
 - 工作区窄栏是浏览器本地的快速入口，只把最近目录列表与最后使用目录保存在 localStorage，不成为项目身份、信任或会话真相。服务端 `project_activity_snapshot` 只为这些本地入口补充跨项目 busy/attention 徽标，并与当前项目的详细 snapshot 分开保存；项目/会话切换不清除该目录，断线和协议失配必须清除，避免永久显示陈旧活动。目录截断时，未出现在快照中的本地工作区必须显示“活动状态未知”，不能被误画成 idle。首次没有记录时仍渲染完整工作台空态；握手后自动 initialize 最后工作区。A→B 切换直接生成新 observation epoch 并发送 `initialize`，不先发 `close_session`；服务端 coordinated initialization 自行 detach 旧 view，后台 actor/run 保持运行。当前工作区图标左上角的低干扰关闭按钮在桌面悬停或键盘聚焦时出现，在无 hover 设备上保持可见；关闭只从浏览器最近目录列表移除当前入口、detach 当前 observation 并回到持久空态，即使仍有其它入口也不自动选择，绝不删除目录、`.piweb`、会话或 Git 数据。
 - 开启工作区对话框的目录输入由 App 受控；内置目录浏览器只展示服务端确认过的临时浏览位置，不自动 initialize。导航结果按一次性 commandId 与仍存活的本地 browse state 匹配；initialize、focus/create 会使该 connection-level control scope 失效，迟到 listing/error 不得重开或改写它。只有用户点击“选择当前文件夹”才替换输入，取消保留原值，错误可回到服务启动目录，断线会关闭临时浏览状态。
+- 检查/修复入口由“工作区打开失败”页面拥有；正常侧栏、目录表单和已打开工作区不提供常驻检查按钮，不要求会话先成功打开。诊断/修复另有连接级 owner：发送前登记 `socket + connectionEpoch + dialogId + cwd + commandId`，只接收精确匹配回执，不使用 focus/state 证明磁盘修复。断线、协议失配或工作区切换使在途观察失效；未知写入结果要求 fresh 检查，不能自动重发、丢弃备份提示或打开新工作区。界面展示保留记录/丢弃字节和原件备份，丢弃不完整尾记录需显式同意；部分错误也保留已确认备份。进入动作先显式重试服务端证明，再走正常 initialize，并等待匹配 state/history；initialize 回执绑定后按冻结的 focus 身份关联，不能再用请求路径别名与 state 规范化后的 cwd 比较；不自动发送原 prompt。文件健康不等于恢复 foundation 已完成，范围与限制见[会话数据修复](kb-project-sessions.md#工作区会话数据修复)。
+
 ### 模态焦点
 
 - 模态框初始焦点只由 `useModalFocus` 拥有：组件用 `data-modal-autofocus` 标记首选目标，不得再使用 JSX `autoFocus`。React 会在 commit 阶段先执行原生 autofocus，而 hook 要到 effect 阶段才保存 launcher；两者并存会让 hook 错把新挂载的输入当成 previous focus，关闭后因该节点已断开而无法恢复真实 launcher。可关闭 backdrop 的 `mousedown` 只在事件目标就是 backdrop 自身时生效，并必须先 `preventDefault()` 再关闭；否则浏览器会在同步卸载和 hook 恢复之后执行默认聚焦，把焦点再次改成 `body`。不可关闭的 pending 模态仍拦截该 backdrop 默认聚焦并保持焦点域。嵌套或被高优先级 Auth/Extension 覆盖时，父层必须保留挂载和 focus-return scope，却移除自身 `role=dialog` / `aria-modal` 并标记 `aria-hidden`；全局 modal stack 已让后注册的子层成为唯一键盘 owner。若为了子层而停用或卸载父层，子层关闭时父层会重跑初始聚焦或丢失本地输入/外部 launcher。关闭时只有仍连接、可聚焦且实际接住焦点的 previous launcher 才是精确返回点；若 launcher 已断开、被禁用或浏览器拒绝聚焦，hook 只回退到 modal stack 中仍存活的最上层父 scope，并复用 `data-modal-autofocus` → 首个启用控件 → 容器的安全顺序。没有存活父 scope 时不得任意选择页面控件。

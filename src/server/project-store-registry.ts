@@ -51,10 +51,13 @@ export class ProjectStoreRegistry {
   private readonly stores = new Map<string, ProjectStoreRegistryEntry>();
   private readonly leases = new Map<string, ConversationLeaseState>();
 
-  async acquireProject(cwd: string): Promise<ProjectStoreHandle> {
+  async acquireProject(
+    cwd: string,
+    options: { existingOnly?: boolean } = {},
+  ): Promise<ProjectStoreHandle> {
     const canonicalCwd = await canonicalDirectory(cwd);
     const key = pathIdentity(canonicalCwd);
-    const entry = this.getOrCreateProjectEntry(key, canonicalCwd);
+    const entry = this.getOrCreateProjectEntry(key, canonicalCwd, options);
     entry.references += 1;
 
     let store: ProjectStore;
@@ -161,12 +164,13 @@ export class ProjectStoreRegistry {
   private getOrCreateProjectEntry(
     key: string,
     canonicalCwd: string,
+    options: { existingOnly?: boolean },
   ): ProjectStoreRegistryEntry {
     const existing = this.stores.get(key);
     if (existing !== undefined) return existing;
 
     const entry: ProjectStoreRegistryEntry = {
-      opening: ProjectStore.open(canonicalCwd),
+      opening: ProjectStore.open(canonicalCwd, options),
       references: 0,
     };
     this.stores.set(key, entry);

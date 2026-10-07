@@ -1,0 +1,108 @@
+.workspace-session-repair-dialog {
+  width: min(760px, 96vw);
+  max-height: min(88dvh, 900px);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  overflow: auto;
+}
+
+.workspace-session-repair-cwd,
+.workspace-session-repair-summary,
+.workspace-session-repair-issue-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.workspace-session-repair-cwd code,
+.workspace-session-repair-issue-heading code,
+.workspace-session-repair-backups code {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.workspace-session-repair-report,
+.workspace-session-repair-backups {
+  display: grid;
+  gap: 10px;
+}
+
+.workspace-session-repair-issues,
+.workspace-session-repair-backups ul {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.workspace-session-repair-issues li,
+.workspace-session-repair-backups li {
+  display: grid;
+  gap: 6px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.workspace-session-repair-issue-heading span,
+.workspace-session-repair-summary span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.workspace-session-repair-issue-heading code,
+.workspace-session-repair-backups strong {
+  font-weight: 700;
+}
+
+.workspace-session-repair-consent {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--danger, #b44);
+}
+
+.workspace-session-repair-consent input {
+  width: 20px;
+  height: 20px;
+  flex: 0 0 auto;
+}
+
+.workspace-session-repair-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 8px;
+}
+
+.workspace-session-repair-error { color: var(--danger, #b44); }
+.workspace-session-repair-warning { color: var(--warning, #9a6800); }
+.workspace-session-repair-success { color: var(--success, #28704a); }
+.workspace-session-diagnostic {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.workspace-session-diagnostic button { min-height: 36px; }
+
+@media (max-width: 600px) {
+  .workspace-session-repair-dialog {
+    width: min(100%, 100vw);
+    max-height: 94dvh;
+  }
+  .workspace-session-repair-cwd,
+  .workspace-session-repair-summary,
+  .workspace-session-repair-issue-heading {
+    flex-direction: column;
+  }
+  .workspace-session-repair-actions {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+}

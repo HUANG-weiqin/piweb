@@ -30,10 +30,15 @@ import {
 import type {
   ConversationSummary,
   PeerPresenceResolution,
+  WorkspaceSessionRepairIssue,
+  WorkspaceSessionRepairReport,
+  WorkspaceSessionRepairRequest,
+  WorkspaceSessionRepairResult,
 } from "../shared/protocol.js";
 import {
   MAX_PROJECT_CONVERSATION_NAME_CHARACTERS,
   MAX_PROJECT_CONVERSATION_PREVIEW_CHARACTERS,
+  MAX_WORKSPACE_SESSION_REPAIR_FILES,
 } from "../shared/protocol.js";
 import {
   CONVERSATION_META_CUSTOM_TYPE,
@@ -57,6 +62,11 @@ import {
   type PiSessionFilePresentationInspection,
   type ReadonlySessionEntry,
 } from "./session-file.js";
+import {
+  formatRepairError,
+  inspectSessionFileRepair,
+  type SessionFileRepairAnalysis,
+} from "./session-file-repair.js";
 
 const MANIFEST_VERSION = 2;
 const CONVERSATION_CATALOG_VERSION = 3;
@@ -65,6 +75,7 @@ const PROJECT_STATE_DIRECTORY = ".piweb";
 const PROJECT_MANIFEST_FILE = "project.json";
 const CONVERSATION_CATALOG_FILE = "conversation-catalog.json";
 const SESSION_DIRECTORY = "sessions";
+const SESSION_REPAIR_BACKUP_DIRECTORY = "session-repair-backups";
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const SESSION_ID_PATTERN =
@@ -187,6 +198,117 @@ interface VerifiedSessionReadBatch {
 interface SessionInspectionCapture {
   requestedIds: ReadonlySet<string>;
   reads: Map<string, InspectedSessionFileRead>;
+}
+
+interface SessionRepairScan {
+  files: readonly SessionFileFingerprint[];
+  analyses: readonly SessionFileRepairAnalysis[];
+  duplicateIds: ReadonlySet<string>;
+  checkedFiles: number;
+  failure?: unknown;
+}
+
+interface CreatedRepairFileIdentity {
+  dev: bigint;
+  ino: bigint;
+}
+
+interface RegularFileObservation extends CreatedRepairFileIdentity {
+  size: bigint;
+  mtimeNs: bigint;
+  ctimeNs: bigint;
+}
+
+function sameRegularFileObservation(
+  first: Readonly<RegularFileObservation>,
+  second: Readonly<RegularFileObservation>,
+): boolean {
+  return first.dev === second.dev
+    && first.ino === second.ino
+    && first.size === second.size
+    && first.mtimeNs === second.mtimeNs
+    && first.ctimeNs === second.ctimeNs;
+}
+
+async function observeOwnedRegularFile(path: string): Promise<RegularFileObservation> {
+  const lexicalPath = resolve(path);
+  const entry = await lstat(lexicalPath, { bigint: true });
+  if (entry.isSymbolicLink() || !entry.isFile()) {
+    throw new Error(`Repair artifact must be a regular file: ${lexicalPath}`);
+  }
+  const canonicalPath = await realpath(lexicalPath);
+  if (!pathsAreIdentical(lexicalPath, canonicalPath)) {
+    throw new Error(`Repair artifact resolves outside its directory: ${lexicalPath}`);
+  }
+  const information = await stat(canonicalPath, { bigint: true });
+  if (!information.isFile()) {
+    throw new Error(`Repair artifact must be a regular file: ${canonicalPath}`);
+  }
+  return {
+    dev: information.dev,
+    ino: information.ino,
+    size: information.size,
+    mtimeNs: information.mtimeNs,
+    ctimeNs: information.ctimeNs,
+  };
+}
+
+async function unlinkCreatedRepairFile(
+  path: string,
+  identity: Readonly<CreatedRepairFileIdentity>,
+): Promise<void> {
+  let current: RegularFileObservation;
+  try {
+    current = await observeOwnedRegularFile(path);
+  } catch (error) {
+    if (isNodeError(error, "ENOENT")) return;
+    throw error;
+  }
+  if (current.dev !== identity.dev || current.ino !== identity.ino) {
+    throw new Error(`Repair artifact identity changed before cleanup: ${path}`);
+  }
+  await unlink(path);
+}
+
+async function writeExclusiveSyncedRepairFile(
+  path: string,
+  bytes: Buffer,
+): Promise<CreatedRepairFileIdentity> {
+  const handle = await openFile(path, "wx");
+  let identity: CreatedRepairFileIdentity | undefined;
+  let closed = false;
+  try {
+    const created = await handle.stat({ bigint: true });
+    identity = { dev: created.dev, ino: created.ino };
+    await handle.writeFile(bytes);
+    await handle.sync();
+    await handle.close();
+    closed = true;
+
+    const beforeRead = await observeOwnedRegularFile(path);
+    if (
+      beforeRead.dev !== identity.dev
+      || beforeRead.ino !== identity.ino
+      || beforeRead.size !== BigInt(bytes.length)
+    ) {
+      throw new Error(`Repair artifact changed after it was written: ${path}`);
+    }
+    const persisted = await readFile(path);
+    const afterRead = await observeOwnedRegularFile(path);
+    if (
+      !sameRegularFileObservation(beforeRead, afterRead)
+      || !persisted.equals(bytes)
+    ) {
+      throw new Error(`Repair artifact did not persist exact bytes: ${path}`);
+    }
+    return identity;
+  } catch (error) {
+    if (!closed) await handle.close().catch(() => undefined);
+    if (identity !== undefined) {
+      await unlinkCreatedRepairFile(path, identity).catch(() => undefined);
+    }
+    throw error;
+  }
 }
 
 /**
@@ -1168,19 +1290,30 @@ export class ProjectStore {
     this.manifest = manifest;
   }
 
-  static async open(cwd: string): Promise<ProjectStore> {
+  static async open(
+    cwd: string,
+    options: { existingOnly?: boolean } = {},
+  ): Promise<ProjectStore> {
     const canonicalCwd = await canonicalDirectory(cwd);
     const stateDir = join(canonicalCwd, PROJECT_STATE_DIRECTORY);
     const sessionDir = join(stateDir, SESSION_DIRECTORY);
     const manifestPath = join(stateDir, PROJECT_MANIFEST_FILE);
-    await mkdir(stateDir, { recursive: true });
-    await assertCanonicalOwnedDirectory(stateDir, "Project state directory");
+    if (options.existingOnly === true) {
+      await assertCanonicalOwnedDirectory(stateDir, "Project state directory");
+      await assertCanonicalOwnedDirectory(sessionDir, "Project session directory");
+    } else {
+      await mkdir(stateDir, { recursive: true });
+    }
+    if (options.existingOnly !== true) {
+      await assertCanonicalOwnedDirectory(stateDir, "Project state directory");
+    }
 
     let manifest: ProjectManifest;
     try {
       manifest = parseManifest(await readFile(manifestPath, "utf8"), manifestPath);
     } catch (error) {
       if (!isNodeError(error, "ENOENT")) throw error;
+      if (options.existingOnly === true) throw error;
       await mkdir(sessionDir, { recursive: true });
       await assertCanonicalOwnedDirectory(stateDir, "Project state directory");
       await assertCanonicalOwnedDirectory(
@@ -1195,7 +1328,9 @@ export class ProjectStore {
       await writeManifestAtomically(manifestPath, manifest);
     }
 
-    await mkdir(sessionDir, { recursive: true });
+    if (options.existingOnly !== true) {
+      await mkdir(sessionDir, { recursive: true });
+    }
     await assertCanonicalOwnedDirectory(stateDir, "Project state directory");
     await assertCanonicalOwnedDirectory(
       sessionDir,
@@ -1208,7 +1343,9 @@ export class ProjectStore {
       manifestPath,
       manifest,
     );
-    await store.recoverAbandonedSessionQuarantines();
+    if (options.existingOnly !== true) {
+      await store.recoverAbandonedSessionQuarantines();
+    }
     store.conversationCatalog = await readConversationCatalog(
       store.conversationCatalogPath,
     );
@@ -1319,6 +1456,248 @@ export class ProjectStore {
     recoveryConversationIds: string[];
   }> {
     return this.enqueueConversationOperation(() => this.scanConversationDiscovery());
+  }
+
+  inspectSessionRepairs(): Promise<WorkspaceSessionRepairReport> {
+    return this.enqueueConversationOperation(async () => {
+      let scan: SessionRepairScan;
+      try {
+        scan = await this.readSessionRepairSnapshot();
+      } catch (error) {
+        return {
+          cwd: this.cwd,
+          checkedFiles: 0,
+          issues: [],
+          truncated: false,
+          recoveryError: formatRepairError(error),
+        };
+      }
+      const issues = scan.analyses.flatMap((analysis): WorkspaceSessionRepairIssue[] => {
+        if (analysis.diagnostic === undefined && analysis.repair === null) return [];
+        return [{
+          fileName: analysis.fileName,
+          conversationId: analysis.conversationId,
+          revision: analysis.revision,
+          error: analysis.diagnostic ?? "Duplicate conversation identity",
+          repair: scan.failure === undefined ? analysis.repair : null,
+        }];
+      });
+      return {
+        cwd: this.cwd,
+        checkedFiles: scan.checkedFiles,
+        issues: issues.slice(0, MAX_WORKSPACE_SESSION_REPAIR_FILES),
+        truncated: issues.length > MAX_WORKSPACE_SESSION_REPAIR_FILES,
+        ...(scan.failure === undefined ? {} : {
+          recoveryError: formatRepairError(scan.failure),
+        }),
+      };
+    });
+  }
+
+  repairSessionFiles(
+    files: readonly WorkspaceSessionRepairRequest[],
+    allowDiscardIncompleteTail: boolean,
+  ): Promise<WorkspaceSessionRepairResult> {
+    if (
+      !Array.isArray(files)
+      || files.length > MAX_WORKSPACE_SESSION_REPAIR_FILES
+      || typeof allowDiscardIncompleteTail !== "boolean"
+    ) {
+      throw new Error("Invalid workspace session repair request");
+    }
+    const requestedNames = new Set<string>();
+    const requestSnapshot: WorkspaceSessionRepairRequest[] = [];
+    for (const request of files) {
+      const { fileName, expectedRevision } = request;
+      if (
+        typeof fileName !== "string"
+        || fileName.length < 1
+        || fileName.length > 255
+        || !fileName.endsWith(".jsonl")
+        || fileName.includes("/")
+        || fileName.includes("\\")
+        || fileName.includes("\0")
+        || basename(fileName) !== fileName
+        || typeof expectedRevision !== "string"
+        || !/^[a-f0-9]{64}$/.test(expectedRevision)
+      ) {
+        throw new Error("Invalid workspace session repair file request");
+      }
+      const key = process.platform === "win32"
+        ? fileName.toLowerCase()
+        : fileName;
+      if (requestedNames.has(key)) {
+        throw new Error(`Duplicate session repair file: ${fileName}`);
+      }
+      requestedNames.add(key);
+      requestSnapshot.push({ fileName, expectedRevision });
+    }
+    return this.enqueueConversationOperation(async () => {
+      if (requestSnapshot.length === 0) return { cwd: this.cwd, backups: [] };
+      const scan = await this.readSessionRepairSnapshot();
+      if (scan.failure !== undefined) {
+        throw new Error(`Session repair preflight could not prove the workspace: ${formatRepairError(scan.failure)}`);
+      }
+      const analysesByName = new Map(
+        scan.analyses.map((analysis) => [analysis.fileName, analysis]),
+      );
+      const fileByName = new Map(
+        scan.files.map((file) => [basename(file.path), file]),
+      );
+      const candidates = requestSnapshot.map((request) => {
+        const analysis = analysesByName.get(request.fileName);
+        const file = fileByName.get(request.fileName);
+        if (analysis === undefined || file === undefined) {
+          throw new Error(`Session repair target is no longer present: ${request.fileName}`);
+        }
+        if (analysis.revision !== request.expectedRevision) {
+          throw new Error(`Session repair revision is stale: ${request.fileName}`);
+        }
+        if (
+          analysis.conversationId === null
+          || analysis.diagnostic === undefined
+          || analysis.repair === null
+          || scan.duplicateIds.has(analysis.conversationId)
+        ) {
+          throw new Error(`Session file has no safe repair proposal: ${request.fileName}`);
+        }
+        if (
+          analysis.repair.kind === "discard_incomplete_tail"
+          && !allowDiscardIncompleteTail
+        ) {
+          throw new Error(`Discarding an incomplete session tail requires explicit consent: ${request.fileName}`);
+        }
+        return { analysis, file, expectedRevision: request.expectedRevision };
+      });
+      const planned: Array<{
+        analysis: SessionFileRepairAnalysis;
+        file: SessionFileFingerprint;
+        replacement: Buffer;
+      }> = [];
+      for (const candidate of candidates) {
+        const bytes = await this.readSessionRepairSourceBytes(
+          candidate.file,
+          candidate.analysis.conversationId!,
+          candidate.expectedRevision,
+        );
+        const analysis = inspectSessionFileRepair(
+          candidate.analysis.fileName,
+          candidate.file.path,
+          candidate.file,
+          bytes,
+        );
+        if (
+          analysis.revision !== candidate.expectedRevision
+          || analysis.conversationId !== candidate.analysis.conversationId
+          || JSON.stringify(analysis.repair) !== JSON.stringify(candidate.analysis.repair)
+          || analysis.replacement === undefined
+        ) {
+          throw new SessionFileChangedError(candidate.analysis.conversationId!);
+        }
+        planned.push({
+          analysis,
+          file: candidate.file,
+          replacement: analysis.replacement,
+        });
+      }
+
+      const backups: WorkspaceSessionRepairResult["backups"] = [];
+      try {
+        for (const target of planned) {
+          await this.assertStateDirectorySafe();
+          await this.assertSessionDirectorySafe();
+          await this.assertSessionRepairSourceUnchanged(
+            target.file,
+            target.analysis.conversationId!,
+            target.analysis.revision,
+          );
+
+          const backupDirectory = join(this.stateDir, SESSION_REPAIR_BACKUP_DIRECTORY);
+          await mkdir(backupDirectory, { recursive: true });
+          await assertCanonicalOwnedDirectory(backupDirectory, "Session repair backup directory");
+          await this.assertSessionRepairSourceUnchanged(
+            target.file,
+            target.analysis.conversationId!,
+            target.analysis.revision,
+          );
+
+          const backupName = `${randomUUID()}.jsonl`;
+          const backupPath = join(backupDirectory, backupName);
+          await writeExclusiveSyncedRepairFile(
+            backupPath,
+            await this.readSessionRepairSourceBytes(
+              target.file,
+              target.analysis.conversationId!,
+              target.analysis.revision,
+            ),
+          );
+          backups.push({
+            fileName: target.analysis.fileName,
+            backupPath: relative(this.cwd, backupPath).split(sep).join("/"),
+          });
+
+          const temporaryPath = join(
+            this.sessionDir,
+            `.session-repair-${randomUUID()}.tmp`,
+          );
+          let temporaryIdentity: CreatedRepairFileIdentity | undefined;
+          let renamed = false;
+          try {
+            await this.assertSessionRepairSourceUnchanged(
+              target.file,
+              target.analysis.conversationId!,
+              target.analysis.revision,
+            );
+            temporaryIdentity = await writeExclusiveSyncedRepairFile(
+              temporaryPath,
+              target.replacement,
+            );
+            const temporary = await this.fingerprintSafeSessionPath(temporaryPath);
+            if (
+              temporary.dev !== temporaryIdentity.dev
+              || temporary.ino !== temporaryIdentity.ino
+              || temporary.size !== BigInt(target.replacement.length)
+            ) {
+              throw new SessionDirectoryChangedError("Session repair temporary file identity changed");
+            }
+            const temporaryBytes = await readFile(temporaryPath);
+            const temporaryAfterRead = await this.fingerprintSafeSessionPath(temporaryPath);
+            if (
+              !fingerprintsEqual(temporary, temporaryAfterRead)
+              || !temporaryBytes.equals(target.replacement)
+              || validatePiSessionFile(
+                new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(temporaryBytes),
+                temporaryPath,
+                target.analysis.conversationId!,
+              ) !== target.analysis.conversationId
+            ) {
+              throw new Error(`Session repair temporary file failed strict validation: ${target.analysis.fileName}`);
+            }
+            await this.assertSessionRepairSourceUnchanged(
+              target.file,
+              target.analysis.conversationId!,
+              target.analysis.revision,
+            );
+            await rename(temporaryPath, target.file.path);
+            renamed = true;
+            this.invalidateSessionRepairObservations(target.file.pathKey);
+            await this.verifyCommittedSessionRepair(
+              target.file.path,
+              target.analysis.conversationId!,
+              target.replacement,
+              temporaryIdentity,
+            );
+          } finally {
+            if (!renamed && temporaryIdentity !== undefined) {
+              await unlinkCreatedRepairFile(temporaryPath, temporaryIdentity).catch(() => undefined);
+            }
+          }
+        }
+        return { cwd: this.cwd, backups };
+      } catch (error) {
+        return { cwd: this.cwd, backups, error: formatRepairError(error) };
+      }
+    });
   }
 
   private async scanConversationDiscovery(): Promise<{
@@ -2699,6 +3078,162 @@ export class ProjectStore {
       this.sessionDir,
       "Project session directory",
     );
+  }
+
+  private async readSessionRepairSnapshot(): Promise<SessionRepairScan> {
+    const files = await this.listSafeSessionFiles();
+    const analyses: SessionFileRepairAnalysis[] = [];
+    let failure: unknown;
+    for (const file of files) {
+      try {
+        const beforeRead = await this.fingerprintSafeSessionPath(file.path);
+        if (!fingerprintsEqual(file, beforeRead)) {
+          throw new SessionDirectoryChangedError();
+        }
+        const bytes = await readFile(beforeRead.path);
+        const afterRead = await this.fingerprintSafeSessionPath(beforeRead.path);
+        if (!fingerprintsEqual(beforeRead, afterRead)) {
+          throw new SessionDirectoryChangedError();
+        }
+        analyses.push(inspectSessionFileRepair(
+          basename(afterRead.path),
+          afterRead.path,
+          afterRead,
+          bytes,
+          false,
+        ));
+      } catch (error) {
+        failure ??= error;
+      }
+    }
+    try {
+      const filesAfterRead = await this.listSafeSessionFiles();
+      if (!fingerprintSetsEqual(files, filesAfterRead)) {
+        failure ??= new SessionDirectoryChangedError();
+      }
+    } catch (error) {
+      failure ??= error;
+    }
+
+    const pathsById = new Map<string, string[]>();
+    for (const analysis of analyses) {
+      if (analysis.conversationId === null) continue;
+      const paths = pathsById.get(analysis.conversationId) ?? [];
+      paths.push(analysis.fileName);
+      pathsById.set(analysis.conversationId, paths);
+    }
+    const duplicateIds = new Set(
+      [...pathsById].flatMap(([conversationId, names]) =>
+        names.length > 1 ? [conversationId] : []
+      ),
+    );
+    const duplicateNames = new Map<string, string>();
+    for (const conversationId of duplicateIds) {
+      for (const fileName of pathsById.get(conversationId)!) {
+        duplicateNames.set(fileName, conversationId);
+      }
+    }
+    const safeAnalyses = analyses.map((analysis) => {
+      const duplicateId = duplicateNames.get(analysis.fileName);
+      if (duplicateId !== undefined) {
+        const duplicateError = `Duplicate conversation identity ${duplicateId}`;
+        return {
+          ...analysis,
+          diagnostic: formatRepairError(
+            analysis.diagnostic === undefined
+              ? duplicateError
+              : `${duplicateError}: ${analysis.diagnostic}`,
+          ),
+          repair: null,
+          replacement: undefined,
+        };
+      }
+      if (failure !== undefined && analysis.repair !== null) {
+        return {
+          ...analysis,
+          repair: null,
+          replacement: undefined,
+        };
+      }
+      return analysis;
+    });
+    return {
+      files,
+      analyses: safeAnalyses,
+      duplicateIds,
+      checkedFiles: analyses.length,
+      ...(failure === undefined ? {} : { failure }),
+    };
+  }
+
+  private async readSessionRepairSourceBytes(
+    file: Readonly<SessionFileFingerprint>,
+    conversationId: string,
+    expectedRevision: string,
+  ): Promise<Buffer> {
+    const beforeRead = await this.fingerprintSafeSessionPath(file.path);
+    if (!fingerprintsEqual(file, beforeRead)) {
+      throw new SessionFileChangedError(conversationId);
+    }
+    const bytes = await readFile(beforeRead.path);
+    const afterRead = await this.fingerprintSafeSessionPath(beforeRead.path);
+    if (
+      !fingerprintsEqual(beforeRead, afterRead)
+      || inspectSessionFileRepair(
+        basename(afterRead.path),
+        afterRead.path,
+        afterRead,
+        bytes,
+        false,
+      ).revision !== expectedRevision
+    ) {
+      throw new SessionFileChangedError(conversationId);
+    }
+    return bytes;
+  }
+
+  private async assertSessionRepairSourceUnchanged(
+    file: Readonly<SessionFileFingerprint>,
+    conversationId: string,
+    expectedRevision: string,
+  ): Promise<void> {
+    await this.readSessionRepairSourceBytes(file, conversationId, expectedRevision);
+  }
+
+  private invalidateSessionRepairObservations(pathKey: string): void {
+    this.verifiedCatalog = undefined;
+    this.validatedSessionReceipts.delete(pathKey);
+    this.conversationCatalog = undefined;
+  }
+
+  private async verifyCommittedSessionRepair(
+    path: string,
+    conversationId: string,
+    expectedBytes: Buffer,
+    createdIdentity: Readonly<CreatedRepairFileIdentity>,
+  ): Promise<void> {
+    await this.assertSessionDirectorySafe();
+    const beforeRead = await this.fingerprintSafeSessionPath(path);
+    if (
+      beforeRead.dev !== createdIdentity.dev
+      || beforeRead.ino !== createdIdentity.ino
+      || beforeRead.size !== BigInt(expectedBytes.length)
+    ) {
+      throw new SessionFileChangedError(conversationId);
+    }
+    const bytes = await readFile(beforeRead.path);
+    const afterRead = await this.fingerprintSafeSessionPath(beforeRead.path);
+    if (!fingerprintsEqual(beforeRead, afterRead) || !bytes.equals(expectedBytes)) {
+      throw new SessionFileChangedError(conversationId);
+    }
+    const validatedId = validatePiSessionFile(
+      new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes),
+      afterRead.path,
+      conversationId,
+    );
+    if (validatedId !== conversationId) {
+      throw new SessionFileChangedError(conversationId);
+    }
   }
 
   private async listSafeSessionInformation(): Promise<SessionInfo[]> {

@@ -271,6 +271,19 @@ export function attachSocketServer(
       }
       try {
         const command = parseClientCommand(data.toString("utf8"));
+        if (command.type === "inspect_workspace_sessions" || command.type === "repair_workspace_sessions") {
+          const task = handleWorkspaceSessionRepairCommand(
+            socket, command, socketControlState, coordination, !socketAdmissionFrozen,
+          );
+          if (command.type === "repair_workspace_sessions") {
+            activeDurableControlCommands.add(task);
+            void task.then(
+              () => activeDurableControlCommands.delete(task),
+              () => activeDurableControlCommands.delete(task),
+            );
+          }
+          return;
+        }
         if (command.type === "browse_directory") {
           void handleDirectoryBrowserCommand(
             socket,
@@ -468,6 +481,37 @@ export function attachSocketServer(
       return closePromise;
     },
   };
+}
+
+async function handleWorkspaceSessionRepairCommand(
+  socket: WebSocket,
+  command: Extract<ClientCommand, { type: "inspect_workspace_sessions" | "repair_workspace_sessions" }>,
+  state: SocketControlState,
+  coordination: () => Promise<PiConnectionCoordination>,
+  admissionAllowed: boolean,
+): Promise<void> {
+  try {
+    if (state.usedCommandIds.has(command.commandId)) throw new Error("命令标识不能重复使用");
+    state.usedCommandIds.add(command.commandId);
+    if (!admissionAllowed) throw new Error("服务正在重新加载，请稍后重新检查工作区数据。");
+    const { coordinator } = await coordination();
+    // Correlation uses the request spelling; storage ownership still uses canonical cwd.
+    if (command.type === "inspect_workspace_sessions") {
+      const report = await coordinator.inspectWorkspaceSessions(command.cwd);
+      safeSend(socket, { type: "workspace_sessions_inspected", commandId: command.commandId, ...report, cwd: command.cwd });
+    } else {
+      const result = await coordinator.repairWorkspaceSessions(
+        command.cwd, command.files, command.allowDiscardIncompleteTail,
+      );
+      safeSend(socket, { type: "workspace_sessions_repaired", commandId: command.commandId, ...result, cwd: command.cwd });
+    }
+  } catch (error) {
+    safeSend(socket, {
+      type: "error", scope: "command", operation: command.type,
+      commandId: command.commandId,
+      message: (error instanceof Error ? error.message : String(error)).slice(0, 4096),
+    });
+  }
 }
 
 async function handleDirectoryBrowserCommand(
