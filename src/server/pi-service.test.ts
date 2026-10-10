@@ -3898,8 +3898,8 @@ describe("PiConnection coordinated project view", () => {
         session.isStreaming = true;
         session.eventListener?.(nativeEvent({ type: "agent_start" }));
         const initialMessage = agentMessage({ role: "user", content: text, timestamp: 1 });
-        session.persistentManager?.appendMessage(initialMessage);
         session.eventListener?.(nativeEvent({ type: "message_end", message: initialMessage }));
+        session.persistentManager?.appendMessage(initialMessage);
         started.resolve();
         await finish.promise;
         session.isStreaming = false;
@@ -3983,8 +3983,8 @@ describe("PiConnection coordinated project view", () => {
       await expect(harness.connection.handle({
         ...command, commandId: randomUUID(), promptId: promptIds[2]!,
       })).rejects.toThrow("already left the SDK steering queue");
-      session.persistentManager?.appendMessage(drainedMessage);
       session.eventListener?.(nativeEvent({ type: "message_end", message: drainedMessage }));
+      session.persistentManager?.appendMessage(drainedMessage);
       await vi.waitFor(() => expect(harness.events).toContainEqual(expect.objectContaining({
         type: "prompt_delivered", promptId: promptIds[2]!, runId: RUN_A,
       })));
@@ -4004,15 +4004,10 @@ describe("PiConnection coordinated project view", () => {
       };
       await harness.connection.handle(abortCommand);
       await harness.connection.handle(abortCommand);
-      for (const [events, sessionId, focusId] of [
-        [harness.events, SESSION_A, focused.focusId!],
-        [observerEvents, SESSION_B, observerFocus.focusId!],
-      ] as const) {
-        expect(events.filter((event) => event.type === "prompt_withdrawn" && event.reason === "abort"))
-          .toEqual([{
-            type: "prompt_withdrawn", sessionId, conversationId: focused.conversationId!,
-            focusId, promptId: cancelledPromptId, runId: RUN_A, reason: "abort",
-          }]);
+      for (const events of [harness.events, observerEvents]) {
+        expect(events.filter((event) =>
+          event.type === "prompt_withdrawn" && event.reason === "abort"
+        )).toEqual([]);
       }
       finish.resolve();
       await running;
@@ -7937,9 +7932,9 @@ describe("PiConnection coordinated project view", () => {
         timestamp: 1,
       });
       session.eventListener?.(nativeEvent({ type: "message_start", message: raw }));
-      const messageId = manager.appendMessage(raw);
       const eventStart = harness.events.length;
       session.eventListener?.(nativeEvent({ type: "message_end", message: raw }));
+      const messageId = manager.appendMessage(raw);
 
       await vi.waitFor(() => expect(harness.events.slice(eventStart)).toContainEqual(
         expect.objectContaining({

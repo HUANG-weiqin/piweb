@@ -128,7 +128,7 @@ Project store handle 按 canonical cwd 引用计数；ProjectSessionCoordinator 
 | 旧会话快照的配置兼容：[AGENTS.md](../AGENTS.md) 要求缺 `compactionModel` 归 `null`；[线协议](kb-wire-protocol.md#决策) 也保留旧 defaultServiceTier 补 `null`、role-change 缺 selectedServiceTier 保留原选择的承诺 | RoleStore v1–v6 目录迁移已实现，保留 revision；但 [conversation-meta.ts](../src/server/conversation-meta.ts) 的 roleSnapshotSchema 仍严格必填，三个入口直接 parse，role-change 也要求 selectedServiceTier。[测试](../src/server/conversation-meta.test.ts) 明确拒绝这些缺字段形状。不能宣称旧 JSONL 配置已补值；整份 profile 缺失与单字段缺失是不同问题。 |
 | [AGENTS.md](../AGENTS.md) 要求存量 `.piweb/pending-prompts` 一次性迁移后删除目录 | 当前 `src/` 未见该目录迁移入口；[reserved parser 测试](../src/server/conversation-meta.test.ts) 拒绝旧 pending_prompt_delivery/batch carrier。不能宣称目录已迁移，或把“拒绝旧 carrier”当成目录迁移实现。 |
 
-涉及这些旧数据时应先补齐实现与兼容测试，或由用户明确修订合同；不要手工删除旧 sidecar、凭正文去重或追加猜测性的 profile 来绕过。新格式保持无持久 browser prompt 队列。
+涉及这些旧数据时应先补齐实现与兼容测试，或由用户明确修订合同；不要手工删除旧 sidecar、凭正文去重或追加猜测性的 profile 来绕过。新浏览器准入账本属于 conversation JSONL，不复用旧 sidecar 格式或迁移承诺。
 
 ## 工作区会话数据修复
 
@@ -156,7 +156,7 @@ Project store handle 按 canonical cwd 引用计数；ProjectSessionCoordinator 
 
 ## 浏览器消息投递
 
-browser prompt 没有持久队列；live admission、raw-message 对象身份和取消证明由[协作页](kb-agent-collaboration.md#浏览器消息准入)拥有，草稿/恢复原件由[客户端](kb-client-state.md#输入与恢复)拥有。旧数据迁移不能从这一新格式事实推导，见上面的兼容性合同差异。
+browser prompt 在会话 JSONL 中以严格 admission/delivery/withdrawal custom entries 建立持久待投递账本；不是独立 sidecar 队列。文件检查验证全部物理 ledger 记录，只有活动分支的未投递项进入 ProjectStore 恢复候选；discover 的候选仅供启动定位，真正续投仍经 fresh exact inspect、writer lease 与 project recovery foundation。Coordinator 在 durable inbox 工作之后自动续投，Stop 清 SDK 队列但保留已接收输入。live admission、对象身份与投递证明见[协作页](kb-agent-collaboration.md#浏览器消息准入)，易失未确认草稿见[客户端](kb-client-state.md#草稿持久等待与停止)。旧 sidecar 迁移不能从新格式推导，见上面的兼容性合同差异。
 
 ## 证明与发现
 

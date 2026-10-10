@@ -37,6 +37,9 @@ import type {
 import {
   aggregateReservedConversationEntries,
   appendReservedCustomEntry,
+  BROWSER_PROMPT_ADMISSION_CUSTOM_TYPE,
+  BROWSER_PROMPT_DELIVERY_CUSTOM_TYPE,
+  BROWSER_PROMPT_WITHDRAWAL_CUSTOM_TYPE,
   createConversationCardEntry,
   createConversationMetaEntry,
   createEditGateEntry,
@@ -44,6 +47,7 @@ import {
   createLoopListEntry,
   createRunSettlementEntry,
   createServiceTierSelectionEntry,
+  inspectBrowserPromptLedger,
   LOOP_LIST_CUSTOM_TYPE,
 } from "./conversation-meta.js";
 import { EDIT_BUDGET_CUSTOM_TYPE } from "./edit-budget.js";
@@ -85,6 +89,10 @@ const RUN_A = "ba39f161-b67f-47c9-9285-e391427ed7d0";
 const RUN_B = "65feacc3-00b4-45bd-80ee-5e18bc32f7dc";
 const RELOAD_REQUEST_ID = "a73ba106-664e-4915-85d8-f82d12ed9658";
 const OTHER_RELOAD_REQUEST_ID = "5e2e5f95-8434-4a25-a760-428d929e7d6a";
+
+function testPromptId(index: number): string {
+  return `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`;
+}
 
 interface Deferred<T> {
   promise: Promise<T>;
@@ -874,7 +882,10 @@ describe("ConversationActor Bash lifecycle", () => {
       runId: RUN_A,
       promptId: RUN_B,
       text: "pre-stream",
-    })).rejects.toThrow("not streaming yet");
+    })).resolves.toEqual({ outcome: "admitted" });
+    expect(fixture.actor.pendingPromptAdmissions()).toEqual([{
+      promptId: RUN_B, text: "pre-stream",
+    }]);
     (runtime.session as unknown as { isStreaming: boolean }).isStreaming = true;
     (runtime.session as unknown as { hasInputExtensionHandlers: boolean })
       .hasInputExtensionHandlers = true;
@@ -887,9 +898,10 @@ describe("ConversationActor Bash lifecycle", () => {
       .hasInputExtensionHandlers = false;
     await expect(fixture.actor.admitBrowserPrompt({
       runId: RUN_A,
-      promptId: RUN_B,
-      text: "rejected preflight",
-    })).rejects.toThrow("Prompt was handled, not queued for steering");
+      promptId: testPromptId(11),
+      text: "deferred behind pre-stream",
+    })).resolves.toEqual({ outcome: "admitted" });
+    expect(runtime.session.promptCalls).toHaveLength(1);
 
     runtime.session.nextSteeringMessage = agentMessage({
       role: "user",
@@ -2315,8 +2327,48 @@ describe("ConversationActor", () => {
     });
   });
 
+  it("rejects an initial browser prompt with input extensions before durable acceptance", async () => {
+    const fixture = await openActor();
+    fixture.runtime.session.hasInputExtensionHandlers = true;
+    expect(() => fixture.actor.startPrompt({
+      runId: RUN_A,
+      promptId: testPromptId(42),
+      text: "extension input",
+      origin: "browser",
+    })).toThrow("input extensions");
+    expect(inspectBrowserPromptLedger(fixture.manager.getEntries()).admissions).toEqual([]);
+    await fixture.actor.dispose();
+  });
+
+  it("does not withdraw an in-flight initial browser input as if it were queued steering", async () => {
+    const fixture = await openActor();
+    const started = deferred();
+    const finish = deferred();
+    const promptId = testPromptId(43);
+    fixture.runtime.session.promptImplementation = async () => {
+      fixture.runtime.session.eventListener?.(nativeEvent({ type: "agent_start" }));
+      fixture.runtime.session.isStreaming = true;
+      started.resolve();
+      await finish.promise;
+      fixture.runtime.session.eventListener?.(nativeEvent({ type: "agent_end" }));
+    };
+    const running = fixture.actor.startPrompt({
+      runId: RUN_A, promptId, text: "initial browser input", origin: "browser",
+    });
+    await started.promise;
+    expect(() => fixture.actor.withdrawBrowserPrompt(RUN_A, promptId))
+      .toThrow("Initial prompt cannot be withdrawn");
+    expect(inspectBrowserPromptLedger(fixture.manager.getEntries()).pending)
+      .toEqual([{ promptId, runId: RUN_A, text: "initial browser input" }]);
+    finish.resolve();
+    await running;
+    await fixture.actor.dispose();
+  });
+
   describe("browser prompt admission while busy (A')", () => {
     const PROMPT_ID = "3c5b3e7a-1f2a-4b6e-8d0c-9a1b2c3d4e5f";
+    const FIFO_PROMPT_IDS = [testPromptId(1), testPromptId(2), testPromptId(3)];
+    const ABORT_PROMPT_IDS = [testPromptId(4), testPromptId(5), testPromptId(6)];
 
     function busyRun(
       fixture: ActorFixture,
@@ -2345,6 +2397,111 @@ describe("ConversationActor", () => {
       });
       return { runStarted, finishRun, running };
     }
+
+    it("persists an idle admission before run_queued and proves its initial raw delivery", async () => {
+      const fixture = await openActor();
+      const promptId = testPromptId(12);
+      const raw = agentMessage({
+        role: "user", content: [{ type: "text", text: "initial input" }], timestamp: 1,
+      });
+      let admissionAtQueued: unknown;
+      fixture.actor.subscribe((event) => {
+        if (event.type === "session_event" && event.event.type === "run_queued") {
+          admissionAtQueued = inspectBrowserPromptLedger(fixture.manager.getEntries()).admissions;
+        }
+      });
+      fixture.runtime.session.promptImplementation = async () => {
+        fixture.runtime.session.eventListener?.(nativeEvent({ type: "agent_start" }));
+        // Real Pi emits message_end before appending the exact raw object.
+        fixture.runtime.session.eventListener?.(nativeEvent({ type: "message_end", message: raw }));
+        fixture.manager.appendMessage(raw);
+        fixture.runtime.session.eventListener?.(nativeEvent({ type: "agent_end" }));
+      };
+
+      await expect(fixture.actor.startPrompt({
+        runId: RUN_A, promptId, text: "initial input", origin: "browser",
+      })).resolves.toMatchObject({ runId: RUN_A, outcome: "completed" });
+      await vi.waitFor(() => expect(fixture.events).toContainEqual({
+        type: "prompt_delivered", conversationId: CONVERSATION_ID,
+        promptId, runId: RUN_A,
+      }));
+      expect(admissionAtQueued).toEqual([{ promptId, runId: RUN_A, text: "initial input" }]);
+      expect(fixture.events.some((event) => event.type === "prompt_admitted")).toBe(false);
+      const entries = fixture.manager.getEntries();
+      const entryCount = entries.length;
+      const markerIndex = entries.findIndex((entry) =>
+        entry.type === "custom" && entry.customType === BROWSER_PROMPT_DELIVERY_CUSTOM_TYPE
+      );
+      expect(markerIndex).toBeGreaterThanOrEqual(0);
+      expect(entries[markerIndex]).toMatchObject({ data: { promptId, runId: RUN_A } });
+      expect(entries[markerIndex + 1]).toMatchObject({
+        type: "message", parentId: entries[markerIndex]!.id, message: raw,
+      });
+      expect(inspectBrowserPromptLedger(entries)).toMatchObject({
+        pending: [], deliveries: [{ promptId, runId: RUN_A }],
+      });
+      const eventCount = fixture.events.length;
+      expect(fixture.actor.reconcileBrowserPrompt({ promptId, text: "initial input" })).toBe(true);
+      expect(fixture.events.slice(eventCount)).toEqual([{
+        type: "prompt_delivered", conversationId: CONVERSATION_ID,
+        promptId, runId: RUN_A,
+      }]);
+      expect(() => fixture.actor.reconcileBrowserPrompt({ promptId, text: "changed" }))
+        .toThrow("different content");
+      expect(fixture.manager.getEntries()).toHaveLength(entryCount);
+      await fixture.actor.dispose();
+    });
+
+    it("can withdraw a durably deferred busy input and reconcile its exact receipt", async () => {
+      const fixture = await openActor();
+      const { runStarted, finishRun, running } = busyRun(fixture);
+      await runStarted.promise;
+      const promptId = testPromptId(13);
+      fixture.runtime.session.isStreaming = false;
+      let pendingAtReceipt: unknown;
+      fixture.actor.subscribe((event) => {
+        if (event.type === "prompt_admitted" && event.promptId === promptId) {
+          pendingAtReceipt = inspectBrowserPromptLedger(fixture.manager.getEntries()).pending;
+        }
+      });
+      const eventCount = fixture.events.length;
+      await expect(fixture.actor.admitBrowserPrompt({
+        promptId, runId: RUN_B, text: "deferred input",
+      })).resolves.toEqual({ outcome: "admitted" });
+      expect(fixture.runtime.session.promptCalls).toHaveLength(1);
+      expect(fixture.events.slice(eventCount)).toContainEqual({
+        type: "prompt_admitted", conversationId: CONVERSATION_ID,
+        promptId, runId: RUN_A, text: "deferred input",
+      });
+      expect(pendingAtReceipt).toEqual([{ promptId, runId: RUN_A, text: "deferred input" }]);
+      expect(inspectBrowserPromptLedger(fixture.manager.getEntries()).pending)
+        .toEqual([{ promptId, runId: RUN_A, text: "deferred input" }]);
+      expect(fixture.actor.reconcileBrowserPrompt({ promptId, text: "deferred input" })).toBe(true);
+      expect(fixture.events.at(-1)).toEqual({
+        type: "prompt_admitted", conversationId: CONVERSATION_ID,
+        promptId, runId: RUN_A, text: "deferred input",
+      });
+      fixture.actor.withdrawBrowserPrompt(RUN_A, promptId);
+      expect(inspectBrowserPromptLedger(fixture.manager.getEntries())).toMatchObject({
+        pending: [], withdrawals: [{ promptId, runId: RUN_A }],
+      });
+      expect(fixture.manager.getEntries().filter((entry) =>
+        entry.type === "custom" && entry.customType === BROWSER_PROMPT_ADMISSION_CUSTOM_TYPE
+      )).toHaveLength(1);
+      expect(fixture.manager.getEntries().some((entry) =>
+        entry.type === "custom" && entry.customType === BROWSER_PROMPT_WITHDRAWAL_CUSTOM_TYPE
+      )).toBe(true);
+      expect(fixture.actor.reconcileBrowserPrompt({ promptId, text: "deferred input" })).toBe(true);
+      expect(fixture.events.at(-1)).toEqual({
+        type: "prompt_withdrawn", conversationId: CONVERSATION_ID,
+        promptId, runId: RUN_A, reason: "manual",
+      });
+      expect(() => fixture.actor.reconcileBrowserPrompt({ promptId, text: "other input" }))
+        .toThrow("different content");
+      finishRun.resolve();
+      await running;
+      await fixture.actor.dispose();
+    });
 
     it("admits via SDK steer while a run is active and emits prompt_admitted", async () => {
       const fixture = await openActor();
@@ -2388,17 +2545,17 @@ describe("ConversationActor", () => {
       const { runStarted, finishRun, running } = busyRun(fixture);
       await runStarted.promise;
       const emit = (message: AgentMessage) => {
-        fixture.manager.appendMessage(message);
         fixture.runtime.session.eventListener?.(nativeEvent({ type: "message_end", message }));
+        fixture.manager.appendMessage(message);
       };
       emit(agentMessage({ role: "user", content: [{ type: "text", text: "long task" }], timestamp: 1 }));
       const explicitDelivery = fixture.actor.steer(RUN_A, "follow up");
       const explicit = fixture.runtime.takeSteeringCapture("follow up");
-      for (const promptId of ["first", "second", "third"]) {
+      for (const promptId of FIFO_PROMPT_IDS) {
         await fixture.actor.admitBrowserPrompt({ promptId, runId: RUN_B, text: "follow up" });
       }
       const originals = fixture.runtime.session.steeringAgentMessages.slice();
-      const withdrawnId = ["first", "second", "third"][withdrawIndex]!;
+      const withdrawnId = FIFO_PROMPT_IDS[withdrawIndex]!;
       fixture.actor.withdrawBrowserPrompt(RUN_A, withdrawnId);
       const remaining = originals.filter((_, index) => index !== withdrawIndex + 1);
       expect(fixture.runtime.session.steeringAgentMessages).toHaveLength(remaining.length);
@@ -2406,7 +2563,7 @@ describe("ConversationActor", () => {
         expect(fixture.runtime.session.steeringAgentMessages[index]).toBe(message);
       });
       expect(fixture.actor.pendingPromptAdmissions().map(({ promptId }) => promptId))
-        .toEqual(["first", "second", "third"].filter((id) => id !== withdrawnId));
+        .toEqual(FIFO_PROMPT_IDS.filter((id) => id !== withdrawnId));
       expect(fixture.events).toContainEqual({
         type: "prompt_withdrawn", conversationId: CONVERSATION_ID, promptId: withdrawnId, runId: RUN_A, reason: "manual",
       });
@@ -2420,7 +2577,7 @@ describe("ConversationActor", () => {
         await Promise.resolve();
       }
       expect(fixture.events.filter((event) => event.type === "prompt_delivered").map((event) => event.promptId))
-        .toEqual(["first", "second", "third"].filter((id) => id !== withdrawnId));
+        .toEqual(FIFO_PROMPT_IDS.filter((id) => id !== withdrawnId));
       expect(fixture.actor.pendingPromptAdmissions()).toEqual([]);
       finishRun.resolve();
       await running;
@@ -2432,8 +2589,8 @@ describe("ConversationActor", () => {
       const { runStarted, finishRun, running } = busyRun(fixture);
       await runStarted.promise;
       const initial = agentMessage({ role: "user", content: [{ type: "text", text: "long task" }], timestamp: 1 });
-      fixture.manager.appendMessage(initial);
       fixture.runtime.session.eventListener?.(nativeEvent({ type: "message_end", message: initial }));
+      fixture.manager.appendMessage(initial);
       await fixture.actor.admitBrowserPrompt({ promptId: PROMPT_ID, runId: RUN_B, text: "follow up" });
       const pending = fixture.actor.pendingPromptAdmissions();
       expect(() => fixture.actor.withdrawBrowserPrompt(RUN_B, PROMPT_ID)).toThrow("exact agent run");
@@ -2445,8 +2602,8 @@ describe("ConversationActor", () => {
       expect(fixture.actor.pendingPromptAdmissions()).toEqual(pending);
       expect(fixture.runtime.session.steeringMessages).toEqual(["follow up"]);
       expect(fixture.events.filter((event) => event.type === "prompt_withdrawn")).toEqual([]);
-      fixture.manager.appendMessage(drained);
       fixture.runtime.session.eventListener?.(nativeEvent({ type: "message_end", message: drained }));
+      fixture.manager.appendMessage(drained);
       await Promise.resolve();
       expect(fixture.events).toContainEqual({
         type: "prompt_delivered", conversationId: CONVERSATION_ID, promptId: PROMPT_ID, runId: RUN_A,
@@ -2464,10 +2621,10 @@ describe("ConversationActor", () => {
       await runStarted.promise;
       const ownership = fixture.actor.currentRunOwnership(RUN_A)!;
       const targets = [{ conversationId: CONVERSATION_ID, runId: RUN_B }];
-      await fixture.actor.admitBrowserPrompt({ promptId: "before-wait", runId: RUN_B, text: "follow up" });
+      await fixture.actor.admitBrowserPrompt({ promptId: testPromptId(7), runId: RUN_B, text: "follow up" });
       const waitingAttempt = fixture.actor.installWaitAttempt(ownership, { targets });
       expect(fixture.actor.getActivity().kind).toBe("waiting");
-      fixture.actor.withdrawBrowserPrompt(RUN_A, "before-wait");
+      fixture.actor.withdrawBrowserPrompt(RUN_A, testPromptId(7));
       expect(fixture.actor.getActivity().kind).toBe("waiting");
       fixture.actor.cancelWaitAttempt(ownership, waitingAttempt);
 
@@ -2476,10 +2633,10 @@ describe("ConversationActor", () => {
         targets, onTerminal: (cause) => causes.push(cause),
       });
       fixture.actor.onWaitingSteerAdmitted(ownership, wokenAttempt, () => true);
-      await fixture.actor.admitBrowserPrompt({ promptId: "wakes-wait", runId: RUN_B, text: "follow up" });
+      await fixture.actor.admitBrowserPrompt({ promptId: testPromptId(8), runId: RUN_B, text: "follow up" });
       expect(causes).toEqual([{ kind: "guidance" }]);
       expect(fixture.actor.getActivity().kind).toBe("running");
-      fixture.actor.withdrawBrowserPrompt(RUN_A, "wakes-wait");
+      fixture.actor.withdrawBrowserPrompt(RUN_A, testPromptId(8));
       expect(causes).toEqual([{ kind: "guidance" }]);
       expect(fixture.actor.getActivity().kind).toBe("running");
       const nextAttempt = fixture.actor.installWaitAttempt(ownership, { targets });
@@ -2502,26 +2659,25 @@ describe("ConversationActor", () => {
       finishRun.resolve();
       await running;
       await aborting;
-      expect(fixture.actor.pendingPromptAdmissions()).toEqual([]);
-      expect(fixture.events.filter((event) => event.type === "prompt_withdrawn")).toEqual([{
-        type: "prompt_withdrawn", conversationId: CONVERSATION_ID,
-        promptId: PROMPT_ID, runId: RUN_A, reason: "abort",
+      expect(fixture.actor.pendingPromptAdmissions()).toEqual([{
+        promptId: PROMPT_ID, text: "follow up",
       }]);
+      expect(fixture.events.filter((event) => event.type === "prompt_withdrawn")).toEqual([]);
       await fixture.actor.dispose();
     });
 
-    it.each(["none", "clearQueue", "abort"] as const)("proves only exact queued cancellation and delivers the drained prefix (cleanup error: %s)", async (failure) => {
+    it.each(["none", "clearQueue", "abort"] as const)("retains queued inputs on Stop and delivers the drained prefix (cleanup error: %s)", async (failure) => {
       const fixture = await openActor();
       const { runStarted, finishRun, running } = busyRun(fixture);
       await runStarted.promise;
       const deliver = async (message: AgentMessage) => {
-        fixture.manager.appendMessage(message);
         fixture.runtime.session.eventListener?.(nativeEvent({ type: "message_end", message }));
+        fixture.manager.appendMessage(message);
         await Promise.resolve();
       };
       await deliver(agentMessage({ role: "user", content: "long task", timestamp: 1 }));
       const explicit = fixture.actor.steer(RUN_A, "follow up");
-      for (const promptId of ["drained", "queued-first", "queued-second"]) {
+      for (const promptId of ABORT_PROMPT_IDS) {
         await fixture.actor.admitBrowserPrompt({ promptId, runId: RUN_B, text: "follow up" });
       }
       const drained = fixture.runtime.session.steeringAgentMessages.splice(0, 2);
@@ -2543,20 +2699,21 @@ describe("ConversationActor", () => {
         await expect(repeated).rejects.toBe(cleanupError);
       }
       const proofs = fixture.events.filter((event) => event.type === "prompt_withdrawn");
-      expect(proofs).toEqual(["queued-first", "queued-second"].map((promptId) => ({
-        type: "prompt_withdrawn", conversationId: CONVERSATION_ID,
-        promptId, runId: RUN_A, reason: "abort",
-      })));
+      expect(proofs).toEqual([]);
       expect(fixture.runtime.session.clearQueueCalls).toBe(1);
       expect(fixture.runtime.session.steeringAgentMessages).toEqual([]);
-      expect(fixture.actor.pendingPromptAdmissions()).toEqual([{ promptId: "drained", text: "follow up" }]);
+      expect(fixture.actor.pendingPromptAdmissions()).toEqual(ABORT_PROMPT_IDS.map((promptId) => ({
+        promptId, text: "follow up",
+      })));
       await deliver(drained[0]!);
       await expect(explicit).resolves.toBeUndefined();
       await deliver(drained[1]!);
       expect(fixture.events).toContainEqual({
-        type: "prompt_delivered", conversationId: CONVERSATION_ID, promptId: "drained", runId: RUN_A,
+        type: "prompt_delivered", conversationId: CONVERSATION_ID, promptId: ABORT_PROMPT_IDS[0], runId: RUN_A,
       });
-      expect(fixture.actor.pendingPromptAdmissions()).toEqual([]);
+      expect(fixture.actor.pendingPromptAdmissions()).toEqual(ABORT_PROMPT_IDS.slice(1).map((promptId) => ({
+        promptId, text: "follow up",
+      })));
       if (failure === "none") await fixture.actor.abort(RUN_A);
       else await expect(fixture.actor.abort(RUN_A)).rejects.toBe(cleanupError);
       expect(fixture.events.filter((event) => event.type === "prompt_withdrawn")).toEqual(proofs);
@@ -2572,8 +2729,8 @@ describe("ConversationActor", () => {
         const { runStarted, finishRun, running } = busyRun(fixture);
         await runStarted.promise;
         const initial = agentMessage({ role: "user", content: "long task", timestamp: 1 });
-        fixture.manager.appendMessage(initial);
         fixture.runtime.session.eventListener?.(nativeEvent({ type: "message_end", message: initial }));
+        fixture.manager.appendMessage(initial);
         await Promise.resolve();
         const reachedCore = deferred<void>();
         const releaseAdmission = deferred<void>();
@@ -2590,20 +2747,17 @@ describe("ConversationActor", () => {
         void admission.catch(() => undefined);
         if (stage !== "uncaptured") await reachedCore.promise;
         await fixture.actor.abort(RUN_A);
-        expect(fixture.events.filter((event) => event.type === "prompt_admitted")).toEqual([]);
-        expect(fixture.events.filter((event) => event.type === "prompt_withdrawn")).toEqual(stage === "queued" ? [{
-          type: "prompt_withdrawn", conversationId: CONVERSATION_ID,
-          promptId: PROMPT_ID, runId: RUN_A, reason: "abort",
-        }] : []);
+        expect(fixture.events.filter((event) => event.type === "prompt_admitted"))
+          .toEqual([{ type: "prompt_admitted", conversationId: CONVERSATION_ID,
+            promptId: PROMPT_ID, runId: RUN_A, text: "follow up" }]);
+        expect(fixture.events.filter((event) => event.type === "prompt_withdrawn")).toEqual([]);
         releaseAdmission.resolve();
-        await expect(admission).rejects.toThrow(stage === "uncaptured"
-          ? "stopped accepting messages before enqueue"
-          : "stopped accepting messages before admission completed");
+        await expect(admission).resolves.toEqual({ outcome: "admitted" });
         expect(fixture.runtime.session.steeringAgentMessages).toEqual([]);
         if (stage === "drained") {
           expect(fixture.actor.pendingPromptAdmissions()).toHaveLength(1);
-          fixture.manager.appendMessage(raw!);
           fixture.runtime.session.eventListener?.(nativeEvent({ type: "message_end", message: raw! }));
+          fixture.manager.appendMessage(raw!);
           await Promise.resolve();
           expect(fixture.events).toContainEqual({
             type: "prompt_delivered", conversationId: CONVERSATION_ID, promptId: PROMPT_ID, runId: RUN_A,
@@ -2611,7 +2765,9 @@ describe("ConversationActor", () => {
         }
         finishRun.resolve();
         await running;
-        expect(fixture.actor.pendingPromptAdmissions()).toEqual([]);
+        expect(fixture.actor.pendingPromptAdmissions()).toEqual(stage === "drained" ? [] : [{
+          promptId: PROMPT_ID, text: "follow up",
+        }]);
         await fixture.actor.dispose();
       },
     );
@@ -2636,9 +2792,12 @@ describe("ConversationActor", () => {
         promptId: PROMPT_ID,
         runId: RUN_B,
         text: "race to idle",
-      })).rejects.toThrow("Prompt was started, not queued for steering");
+      })).resolves.toEqual({ outcome: "admitted" });
       expect(unownedRunStarts).toBe(0);
-      expect(fixture.events).not.toContainEqual(expect.objectContaining({
+      expect(fixture.actor.pendingPromptAdmissions()).toEqual([{
+        promptId: PROMPT_ID, text: "race to idle",
+      }]);
+      expect(fixture.events).toContainEqual(expect.objectContaining({
         type: "prompt_admitted",
         promptId: PROMPT_ID,
       }));
@@ -2648,7 +2807,7 @@ describe("ConversationActor", () => {
       await fixture.actor.dispose();
     });
 
-    it("does not admit a browser steer after the Pi agent loop has ended", async () => {
+    it("keeps the browser admission pending when the Pi agent loop has ended", async () => {
       const fixture = await openActor();
       const { runStarted, finishRun, running } = busyRun(fixture);
       await runStarted.promise;
@@ -2670,15 +2829,15 @@ describe("ConversationActor", () => {
       expect(fixture.runtime.session.isStreaming).toBe(true);
       releaseEnqueue.resolve();
 
-      await expect(admission).rejects.toThrow(
-        "The agent run stopped accepting messages before enqueue",
-      );
+      await expect(admission).resolves.toEqual({ outcome: "admitted" });
       expect(fixture.runtime.session.steeringMessages).toContain(
         "after low-level loop",
       );
       expect(fixture.runtime.session.steeringAgentMessages).toEqual([]);
-      expect(fixture.actor.pendingPromptAdmissions()).toEqual([]);
-      expect(fixture.events).not.toContainEqual(expect.objectContaining({
+      expect(fixture.actor.pendingPromptAdmissions()).toEqual([{
+        promptId: PROMPT_ID, text: "after low-level loop",
+      }]);
+      expect(fixture.events).toContainEqual(expect.objectContaining({
         type: "prompt_admitted",
         promptId: PROMPT_ID,
       }));
@@ -2775,7 +2934,7 @@ describe("ConversationActor", () => {
       await fixture.actor.dispose();
     });
 
-    it("does not admit a browser prompt after async capture outlives its run", async () => {
+    it("retains the browser admission when async capture outlives its run", async () => {
       const fixture = await openActor();
       const { runStarted, finishRun, running } = busyRun(fixture);
       await runStarted.promise;
@@ -2810,18 +2969,65 @@ describe("ConversationActor", () => {
       const promptCallsAtSettlement = fixture.runtime.session.promptCalls.slice();
       const steeringMessagesAtSettlement = fixture.runtime.session.steeringMessages.slice();
       allowPreEnqueue.resolve();
-      await expect(admission).rejects.toThrow(
-        "The agent run stopped accepting messages before enqueue",
-      );
+      await expect(admission).resolves.toEqual({ outcome: "admitted" });
 
       expect(promptCallsAtSettlement).toEqual(promptCallsBefore);
       expect(fixture.runtime.session.promptCalls).toEqual(promptCallsAtSettlement);
       expect(fixture.runtime.session.steeringMessages).toEqual(steeringMessagesAtSettlement);
-      expect(fixture.actor.pendingPromptAdmissions()).toEqual([]);
-      expect(fixture.events).not.toContainEqual(expect.objectContaining({
+      expect(fixture.actor.pendingPromptAdmissions()).toEqual([{
+        promptId: PROMPT_ID, text: "late browser prompt",
+      }]);
+      expect(fixture.events).toContainEqual(expect.objectContaining({
         type: "prompt_admitted",
         promptId: PROMPT_ID,
       }));
+      await fixture.actor.dispose();
+    });
+
+    it("does not let a later busy admission overtake an earlier asynchronous SDK enqueue", async () => {
+      const fixture = await openActor();
+      const { runStarted, finishRun, running } = busyRun(fixture);
+      await runStarted.promise;
+      const allowFirstEnqueue = deferred();
+      let captures = 0;
+      fixture.runtime.captureSteeringMessageImplementation = async (onMessage, operation) => {
+        captures++;
+        if (captures === 1) await allowFirstEnqueue.promise;
+        const message = agentMessage({
+          role: "user",
+          content: [{ type: "text", text: "follow up" }],
+          timestamp: Date.now(),
+        });
+        fixture.runtime.session.nextSteeringMessage = message;
+        onMessage(message);
+        return operation();
+      };
+      const firstId = testPromptId(40);
+      const secondId = testPromptId(41);
+      const first = fixture.actor.admitBrowserPrompt({
+        promptId: firstId, runId: RUN_A, text: "follow up",
+      });
+      await vi.waitFor(() => expect(captures).toBe(1));
+      const ownership = fixture.actor.currentRunOwnership(RUN_A)!;
+      expect(fixture.actor.claimPendingGuidanceForWait(ownership)).toBe(false);
+      await expect(fixture.actor.admitBrowserPrompt({
+        promptId: secondId, runId: RUN_A, text: "follow up",
+      })).resolves.toEqual({ outcome: "admitted" });
+      expect(captures).toBe(1);
+      expect(fixture.runtime.session.promptCalls.filter(({ streamingBehavior }) =>
+        streamingBehavior === "steer"
+      )).toEqual([]);
+      expect(fixture.actor.pendingPromptAdmissions().map(({ promptId }) => promptId))
+        .toEqual([firstId, secondId]);
+
+      allowFirstEnqueue.resolve();
+      await expect(first).resolves.toEqual({ outcome: "admitted" });
+      expect(fixture.actor.claimPendingGuidanceForWait(ownership)).toBe(true);
+      expect(fixture.runtime.session.promptCalls.filter(({ streamingBehavior }) =>
+        streamingBehavior === "steer"
+      )).toHaveLength(1);
+      finishRun.resolve();
+      await running;
       await fixture.actor.dispose();
     });
 
@@ -2859,7 +3065,7 @@ describe("ConversationActor", () => {
       await fixture.actor.dispose();
     });
 
-    it("rejects a busy admission while the run ticket is still queued", async () => {
+    it("durably defers a busy admission while the run ticket is still queued", async () => {
       const fixture = await openActor();
       const promptStarted = deferred();
       const promptFinished = deferred();
@@ -2884,9 +3090,11 @@ describe("ConversationActor", () => {
         promptId: PROMPT_ID,
         runId: RUN_A,
         text: "second prompt",
-      })).rejects.toThrow("not ready to accept a message");
+      })).resolves.toEqual({ outcome: "admitted" });
       expect(fixture.runtime.session.promptCalls).toHaveLength(1);
-      expect(fixture.actor.pendingPromptAdmissions()).toEqual([]);
+      expect(fixture.actor.pendingPromptAdmissions()).toEqual([{
+        promptId: PROMPT_ID, text: "second prompt",
+      }]);
 
       await promptStarted.promise;
       promptFinished.resolve();
@@ -2897,7 +3105,7 @@ describe("ConversationActor", () => {
       await fixture.actor.dispose();
     });
 
-    it("clears un-delivered browser admissions when the run ends", async () => {
+    it("retains un-delivered browser admissions when the run ends", async () => {
       const fixture = await openActor();
       const { runStarted, finishRun, running } = busyRun(fixture);
       await runStarted.promise;
@@ -2910,11 +3118,12 @@ describe("ConversationActor", () => {
         expect(fixture.actor.pendingPromptAdmissions()).toHaveLength(1)
       );
 
-      // The run ends without the raw user delivery: the admission must not
-      // leak into a later run.
+      // A terminal run cannot prove delivery or cancellation of durable input.
       finishRun.resolve();
       await running;
-      expect(fixture.actor.pendingPromptAdmissions()).toEqual([]);
+      expect(fixture.actor.pendingPromptAdmissions()).toEqual([{
+        promptId: PROMPT_ID, text: "follow up",
+      }]);
       await fixture.actor.dispose();
     });
 
@@ -2958,8 +3167,8 @@ describe("ConversationActor", () => {
         role: "user",
         content: [{ type: "text", text: "shared text" }],
       };
-      fixture.manager.appendMessage(firstRaw as never);
       emit()?.(nativeEvent({ type: "message_end", message: firstRaw }));
+      fixture.manager.appendMessage(firstRaw as never);
       await Promise.resolve();
       expect(fixture.events).not.toContainEqual(expect.objectContaining({
         type: "prompt_delivered",
@@ -2967,8 +3176,8 @@ describe("ConversationActor", () => {
       expect(fixture.actor.pendingPromptAdmissions()).toHaveLength(1);
 
       // The second raw end is the admission's: precise promptId delivery.
-      fixture.manager.appendMessage(admittedRaw);
       emit()?.(nativeEvent({ type: "message_end", message: admittedRaw }));
+      fixture.manager.appendMessage(admittedRaw);
       await Promise.resolve();
       expect(fixture.events).toContainEqual(expect.objectContaining({
         type: "prompt_delivered",
@@ -2992,8 +3201,8 @@ describe("ConversationActor", () => {
         content: [{ type: "text", text: "long task" }],
         timestamp: 1,
       });
-      fixture.manager.appendMessage(initialRaw);
       emit()?.(nativeEvent({ type: "message_end", message: initialRaw }));
+      fixture.manager.appendMessage(initialRaw);
 
       const queuedMessage = agentMessage({
         role: "user",
@@ -3012,11 +3221,11 @@ describe("ConversationActor", () => {
         content: [{ type: "text", text: "follow up" }],
         timestamp: 3,
       });
-      fixture.manager.appendMessage(extensionMessage);
       emit()?.(nativeEvent({
         type: "message_end",
         message: extensionMessage,
       }));
+      fixture.manager.appendMessage(extensionMessage);
       await Promise.resolve();
       expect(fixture.actor.pendingPromptAdmissions()).toHaveLength(1);
       expect(fixture.events).not.toContainEqual(expect.objectContaining({
@@ -3027,8 +3236,8 @@ describe("ConversationActor", () => {
       Object.assign(queuedMessage, {
         content: [{ type: "text", text: "extension replacement" }],
       });
-      fixture.manager.appendMessage(queuedMessage);
       emit()?.(nativeEvent({ type: "message_end", message: queuedMessage }));
+      fixture.manager.appendMessage(queuedMessage);
       await Promise.resolve();
       expect(fixture.events).toContainEqual(expect.objectContaining({
         type: "prompt_delivered",
@@ -3071,8 +3280,8 @@ describe("ConversationActor", () => {
         role: "user",
         content: [{ type: "text", text: "long task" }],
       };
-      fixture.manager.appendMessage(initialRaw as never);
       emit()?.(nativeEvent({ type: "message_end", message: initialRaw }));
+      fixture.manager.appendMessage(initialRaw as never);
       await Promise.resolve();
 
       const steerPromise = fixture.actor.steer(RUN_A, "shared text");
@@ -3086,8 +3295,8 @@ describe("ConversationActor", () => {
 
       // The first raw end resolves ONLY the explicit steer; no browser
       // prompt_delivered fires for it.
-      fixture.manager.appendMessage(steerRaw);
       emit()?.(nativeEvent({ type: "message_end", message: steerRaw }));
+      fixture.manager.appendMessage(steerRaw);
       await expect(steerPromise).resolves.toBeUndefined();
       expect(fixture.events).not.toContainEqual(expect.objectContaining({
         type: "prompt_delivered",
@@ -3095,8 +3304,8 @@ describe("ConversationActor", () => {
       expect(fixture.actor.pendingPromptAdmissions()).toHaveLength(1);
 
       // The second raw end delivers the browser promptId precisely.
-      fixture.manager.appendMessage(admittedRaw);
       emit()?.(nativeEvent({ type: "message_end", message: admittedRaw }));
+      fixture.manager.appendMessage(admittedRaw);
       await Promise.resolve();
       expect(fixture.events).toContainEqual(expect.objectContaining({
         type: "prompt_delivered",
@@ -3136,8 +3345,8 @@ describe("ConversationActor", () => {
         role: "user",
         content: [{ type: "text", text: "long task" }],
       };
-      fixture.manager.appendMessage(initialRaw as never);
       emit()?.(nativeEvent({ type: "message_end", message: initialRaw }));
+      fixture.manager.appendMessage(initialRaw as never);
       await Promise.resolve();
 
       // Reverse order: the browser admission queues before the explicit
@@ -3151,8 +3360,8 @@ describe("ConversationActor", () => {
       const steerPromise = fixture.actor.steer(RUN_A, "shared text");
       const steerRaw = fixture.runtime.takeSteeringCapture("shared text");
 
-      fixture.manager.appendMessage(admittedRaw);
       emit()?.(nativeEvent({ type: "message_end", message: admittedRaw }));
+      fixture.manager.appendMessage(admittedRaw);
       await Promise.resolve();
       expect(fixture.events).toContainEqual(expect.objectContaining({
         type: "prompt_delivered",
@@ -3170,8 +3379,8 @@ describe("ConversationActor", () => {
       ]);
       expect(await steerSettledRace).toBe(false);
 
-      fixture.manager.appendMessage(steerRaw);
       emit()?.(nativeEvent({ type: "message_end", message: steerRaw }));
+      fixture.manager.appendMessage(steerRaw);
       await expect(steerPromise).resolves.toBeUndefined();
 
       finishRun.resolve();
@@ -3206,8 +3415,8 @@ describe("ConversationActor", () => {
         role: "user",
         content: [{ type: "text", text: "long task" }],
       };
-      fixture.manager.appendMessage(initialRaw as never);
       emit()?.(nativeEvent({ type: "message_end", message: initialRaw }));
+      fixture.manager.appendMessage(initialRaw as never);
       await Promise.resolve();
 
       const steerPromise = fixture.actor.steer(RUN_A, "real guidance");
@@ -3218,8 +3427,8 @@ describe("ConversationActor", () => {
         role: "user",
         content: [{ type: "text", text: "unrelated extension text" }],
       };
-      fixture.manager.appendMessage(mismatched as never);
       emit()?.(nativeEvent({ type: "message_end", message: mismatched }));
+      fixture.manager.appendMessage(mismatched as never);
       await Promise.resolve();
       const steerSettledRace = Promise.race([
         steerPromise.then(
@@ -3233,8 +3442,8 @@ describe("ConversationActor", () => {
       expect(await steerSettledRace).toBe(false);
 
       // The matching raw end settles it.
-      fixture.manager.appendMessage(real);
       emit()?.(nativeEvent({ type: "message_end", message: real }));
+      fixture.manager.appendMessage(real);
       await expect(steerPromise).resolves.toBeUndefined();
 
       finishRun.resolve();
@@ -3273,7 +3482,7 @@ describe("ConversationActor", () => {
       await fixture.actor.dispose();
     });
 
-    it("rejects a busy admission while the SDK run is not streaming yet", async () => {
+    it("defers a busy admission while the SDK run is not streaming yet", async () => {
       const fixture = await openActor();
       const emit = () => fixture.runtime.session.eventListener;
       const runStarted = deferred();
@@ -3304,10 +3513,12 @@ describe("ConversationActor", () => {
         promptId: PROMPT_ID,
         runId: RUN_A,
         text: "pre-stream message",
-      })).rejects.toThrow("not streaming");
+      })).resolves.toEqual({ outcome: "admitted" });
       expect(steerCalls).toEqual([]);
       expect(fixture.runtime.session.promptCalls).toHaveLength(1);
-      expect(fixture.actor.pendingPromptAdmissions()).toEqual([]);
+      expect(fixture.actor.pendingPromptAdmissions()).toEqual([{
+        promptId: PROMPT_ID, text: "pre-stream message",
+      }]);
 
       finishRun.resolve();
       await running;
@@ -3343,8 +3554,8 @@ describe("ConversationActor", () => {
         role: "user",
         content: [{ type: "text", text: "start task" }],
       };
-      fixture.manager.appendMessage(initialRaw as never);
       emit()?.(nativeEvent({ type: "message_end", message: initialRaw }));
+      fixture.manager.appendMessage(initialRaw as never);
       await Promise.resolve();
 
       // A predecessor queues first; its raw delivery drains the queue front
@@ -3368,11 +3579,11 @@ describe("ConversationActor", () => {
       expect(fixture.actor.pendingPromptAdmissions()).toHaveLength(1);
 
       // Raw ends arrive in SDK queue order: predecessor first, own second.
-      fixture.manager.appendMessage(predRaw);
       emit()?.(nativeEvent({ type: "message_end", message: predRaw }));
+      fixture.manager.appendMessage(predRaw);
       await expect(predecessor).resolves.toBeUndefined();
-      fixture.manager.appendMessage(ownRaw);
       emit()?.(nativeEvent({ type: "message_end", message: ownRaw }));
+      fixture.manager.appendMessage(ownRaw);
       await Promise.resolve();
       expect(fixture.events).toContainEqual(expect.objectContaining({
         type: "prompt_delivered",
@@ -3451,8 +3662,8 @@ describe("ConversationActor", () => {
         role: "user",
         content: [{ type: "text", text: "start task" }],
       };
-      fixture.manager.appendMessage(initialRaw as never);
       emit()?.(nativeEvent({ type: "message_end", message: initialRaw }));
+      fixture.manager.appendMessage(initialRaw as never);
       await Promise.resolve();
 
       // An explicit steer is accepted and remains unobserved.
@@ -3483,6 +3694,7 @@ describe("ConversationActor", () => {
           return false;
         },
       );
+      await vi.waitFor(() => expect(staleCalls).toEqual([true]));
       fixture.actor.cancelWaitAttempt(ownershipValue, firstAttempt);
 
       // Second wait: registers before the raw guidance delivery; the SAME
@@ -3507,8 +3719,8 @@ describe("ConversationActor", () => {
 
       // The raw delivery settles the steer precisely; no further wait wakes
       // on the already-claimed record.
-      fixture.manager.appendMessage(rawGuidance);
       emit()?.(nativeEvent({ type: "message_end", message: rawGuidance }));
+      fixture.manager.appendMessage(rawGuidance);
       await expect(guidance).resolves.toBeUndefined();
       const thirdAttempt = fixture.actor.installWaitAttempt(ownershipValue, {
         targets: [waitTarget],
@@ -3548,10 +3760,10 @@ describe("ConversationActor", () => {
         role: "user",
         content: [{ type: "text", text: "long task" }],
       };
-      fixture.manager.appendMessage(initialRaw as never);
       emit()?.(nativeEvent({ type: "message_end", message: initialRaw }));
-      fixture.manager.appendMessage(rawMessage);
+      fixture.manager.appendMessage(initialRaw as never);
       emit()?.(nativeEvent({ type: "message_end", message: rawMessage }));
+      fixture.manager.appendMessage(rawMessage);
 
       await vi.waitFor(() => {
         expect(fixture.events).toContainEqual({
@@ -3562,13 +3774,24 @@ describe("ConversationActor", () => {
         });
       });
       expect(fixture.actor.pendingPromptAdmissions()).toEqual([]);
+      const entries = fixture.manager.getEntries();
+      const markerIndex = entries.findIndex((entry) =>
+        entry.type === "custom" && entry.customType === BROWSER_PROMPT_DELIVERY_CUSTOM_TYPE
+      );
+      expect(entries[markerIndex]).toMatchObject({ data: { promptId: PROMPT_ID, runId: RUN_A } });
+      expect(entries[markerIndex + 1]).toMatchObject({
+        type: "message", parentId: entries[markerIndex]!.id, message: rawMessage,
+      });
+      expect(inspectBrowserPromptLedger(entries)).toMatchObject({
+        pending: [], deliveries: [{ promptId: PROMPT_ID, runId: RUN_A }],
+      });
 
       finishRun.resolve();
       await running;
       await fixture.actor.dispose();
     });
 
-    it("clears admitted prompts when the run is aborted", async () => {
+    it("retains admitted prompts when the run is aborted", async () => {
       const fixture = await openActor();
       const { runStarted, finishRun, running } = busyRun(fixture);
       await runStarted.promise;
@@ -3581,7 +3804,9 @@ describe("ConversationActor", () => {
 
       await fixture.actor.abort(RUN_A);
       expect(fixture.runtime.session.clearQueueCalls).toBe(1);
-      expect(fixture.actor.pendingPromptAdmissions()).toEqual([]);
+      expect(fixture.actor.pendingPromptAdmissions()).toEqual([{
+        promptId: PROMPT_ID, text: "follow up",
+      }]);
 
       finishRun.resolve();
       await expect(running).resolves.toMatchObject({ outcome: "aborted" });
@@ -3618,7 +3843,9 @@ describe("ConversationActor", () => {
         text: "hello",
         streamingBehavior: undefined,
       }]);
-      expect(fixture.actor.pendingPromptAdmissions()).toEqual([]);
+      expect(fixture.actor.pendingPromptAdmissions()).toEqual([{
+        promptId: PROMPT_ID, text: "hello",
+      }]);
       await fixture.actor.dispose();
     });
 
@@ -3674,6 +3901,92 @@ describe("ConversationActor", () => {
       finishRun.resolve();
       await running;
       await fixture.actor.dispose();
+    });
+
+    it("reopens a pending admission and replays it once without a second admission", async () => {
+      const cwd = await mkdtemp(join(tmpdir(), "piweb-browser-prompt-replay-"));
+      let first: ActorFixture | undefined;
+      let reopened: ActorFixture | undefined;
+      try {
+        const store = await ProjectStore.open(cwd);
+        const manager = await store.createConversation(CONVERSATION_ID, profile(), {
+          updateRecent: false, refreshIndex: false,
+        });
+        const projectFor = (active: SessionManagerType) => ({
+          cwd: store.cwd,
+          projectConversationSession: store.projectConversationSession.bind(store),
+          refreshConversations: async () => conversationSummaries(active),
+        });
+        first = await openActor({ sessionManager: manager, project: projectFor(manager) });
+        const { runStarted, finishRun, running } = busyRun(first);
+        await runStarted.promise;
+        const promptId = testPromptId(14);
+        await first.actor.admitBrowserPrompt({
+          promptId, runId: RUN_B, text: "follow up",
+        });
+        finishRun.resolve();
+        await running;
+        expect(first.actor.pendingPromptAdmissions()).toEqual([{
+          promptId, text: "follow up",
+        }]);
+        await first.actor.dispose();
+
+        const reopenedManager = SessionManager.open(
+          manager.getSessionFile()!, store.sessionDir, store.cwd,
+        );
+        reopened = await openActor({
+          sessionManager: reopenedManager, project: projectFor(reopenedManager),
+        });
+        expect(reopened.actor.hasPendingBrowserPrompts()).toBe(true);
+        expect(reopened.actor.pendingPromptAdmissions()).toEqual([{
+          promptId, text: "follow up",
+        }]);
+        const beforeReconcile = reopenedManager.getEntries().length;
+        expect(reopened.actor.reconcileBrowserPrompt({ promptId, text: "follow up" })).toBe(true);
+        expect(reopened.events.at(-1)).toEqual({
+          type: "prompt_admitted", conversationId: CONVERSATION_ID,
+          promptId, runId: RUN_A, text: "follow up",
+        });
+        expect(reopenedManager.getEntries()).toHaveLength(beforeReconcile);
+
+        reopened.runtime.session.promptImplementation = async (text) => {
+          expect(text).toBe("follow up");
+          const raw = agentMessage({
+            role: "user", content: [{ type: "text", text }], timestamp: 2,
+          });
+          reopened!.runtime.session.eventListener?.(nativeEvent({ type: "agent_start" }));
+          reopened!.runtime.session.eventListener?.(nativeEvent({ type: "message_end", message: raw }));
+          reopenedManager.appendMessage(raw);
+          reopened!.runtime.session.eventListener?.(nativeEvent({ type: "agent_end" }));
+        };
+        const replay = reopened.actor.startPendingBrowserPrompt();
+        if (!replay) throw new Error("Expected a pending browser prompt replay");
+        expect(reopened.actor.startPendingBrowserPrompt()).toBeUndefined();
+        const settlement = await replay;
+        expect(settlement.runId).not.toBe(RUN_B);
+        await vi.waitFor(() => expect(reopened!.events).toContainEqual({
+          type: "prompt_delivered", conversationId: CONVERSATION_ID,
+          promptId, runId: settlement.runId,
+        }));
+        expect(reopened.runtime.session.promptCalls).toEqual([{
+          text: "follow up", streamingBehavior: undefined,
+        }]);
+        expect(inspectBrowserPromptLedger(reopenedManager.getEntries())).toMatchObject({
+          admissions: [{ promptId, runId: RUN_A, text: "follow up" }],
+          pending: [], deliveries: [{ promptId, runId: settlement.runId }],
+        });
+        expect(reopened.actor.hasPendingBrowserPrompts()).toBe(false);
+        expect(reopened.actor.startPendingBrowserPrompt()).toBeUndefined();
+        await reopened.actor.dispose();
+        const diskManager = SessionManager.open(
+          manager.getSessionFile()!, store.sessionDir, store.cwd,
+        );
+        expect(inspectBrowserPromptLedger(diskManager.getEntries()).pending).toEqual([]);
+      } finally {
+        await reopened?.actor.dispose();
+        await first?.actor.dispose();
+        await rm(cwd, { recursive: true, force: true });
+      }
     });
   });
 
@@ -4701,7 +5014,7 @@ describe("ConversationActor", () => {
     });
     await runStarted.promise;
 
-    await fixture.actor.admitBrowserPrompt({ promptId: "reload-pending", runId: RUN_B, text: "pending across checkpoint" });
+    await fixture.actor.admitBrowserPrompt({ promptId: testPromptId(9), runId: RUN_B, text: "pending across checkpoint" });
     const queued = fixture.runtime.session.steeringAgentMessages[0];
     let reloadReady = false;
     const stopping = fixture.actor.stopForReload(false).then(() => {
@@ -4718,11 +5031,11 @@ describe("ConversationActor", () => {
     // Safe reload waits for accepted guidance to deliver; a checkpoint is
     // neither SDK abort cleanup nor proof that the pending input was cancelled.
     const initial = agentMessage({ role: "user", content: "reload at a safe boundary", timestamp: 1 });
-    fixture.manager.appendMessage(initial);
     emit()?.(nativeEvent({ type: "message_end", message: initial }));
+    fixture.manager.appendMessage(initial);
     fixture.runtime.session.steeringAgentMessages.shift();
-    fixture.manager.appendMessage(queued!);
     emit()?.(nativeEvent({ type: "message_end", message: queued }));
+    fixture.manager.appendMessage(queued!);
     await Promise.resolve();
     expect(turnBoundaryCheck?.({
       contextUsage: fixture.runtime.session.getContextUsage(),
@@ -4739,7 +5052,7 @@ describe("ConversationActor", () => {
     expect(fixture.runtime.session.steeringAgentMessages).toEqual([]);
     expect(fixture.events.filter((event) => event.type === "prompt_withdrawn")).toEqual([]);
     expect(fixture.events).toContainEqual({
-      type: "prompt_delivered", conversationId: CONVERSATION_ID, promptId: "reload-pending", runId: RUN_A,
+      type: "prompt_delivered", conversationId: CONVERSATION_ID, promptId: testPromptId(9), runId: RUN_A,
     });
     expect(fixture.events.some((event) => (
       event.type === "session_event" && event.event.type === "run_finished"
@@ -5070,7 +5383,7 @@ describe("ConversationActor", () => {
       fixture.runtime.session.isStreaming = false;
     };
 
-    const promptId = "prompt-after-reload";
+    const promptId = testPromptId(10);
     const running = fixture.actor.startReloadContinuation({
       requestId: RELOAD_REQUEST_ID,
       continuationRunId: RUN_B,
@@ -5084,9 +5397,9 @@ describe("ConversationActor", () => {
     const rawMessage = fixture.runtime.takeSteeringCapture(
       "guidance after reload",
     );
-    fixture.manager.appendMessage(rawMessage);
     emit()?.(nativeEvent({ type: "message_start", message: rawMessage }));
     emit()?.(nativeEvent({ type: "message_end", message: rawMessage }));
+    fixture.manager.appendMessage(rawMessage);
 
     await vi.waitFor(() => {
       expect(fixture.events).toContainEqual(expect.objectContaining({

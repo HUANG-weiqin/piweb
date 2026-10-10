@@ -1717,6 +1717,14 @@ export class ProjectSessionCoordinator {
       throw new Error(`Conversation is being deleted: ${conversationId}`);
     }
     const liveActor = context.actors.get(conversationId);
+    if (
+      promptId !== undefined
+      && liveActor !== undefined
+      && this.isContextConversationActive(context, liveActor)
+      && liveActor.reconcileBrowserPrompt({ promptId, text, images: images && [...images] })
+    ) {
+      return { outcome: "admitted" };
+    }
     const liveActivity = liveActor?.getActivity();
     if (
       liveActor !== undefined
@@ -1733,7 +1741,13 @@ export class ProjectSessionCoordinator {
         throw new Error(`Conversation is being deleted: ${conversationId}`);
       }
       const actor = this.requireActor(context, conversationId);
-      // busy：消息与 run 状态无关，进 SDK steering 队列，当前工具序列结束即注入。
+      if (
+        promptId !== undefined
+        && actor.reconcileBrowserPrompt({ promptId, text, images: images && [...images] })
+      ) {
+        return { outcome: "admitted" as const };
+      }
+      // Busy input is durably accepted; the actor may defer SDK steering until a later run.
       if (actor.getActivity().kind !== "idle") {
         if (promptId === undefined) {
           throw new Error(
@@ -1751,13 +1765,13 @@ export class ProjectSessionCoordinator {
           throw new Error(`Conversation is being deleted: ${conversationId}`);
         }
         const pendingInbox = await list({ toConversationId: conversationId });
-        if (
-          pump === "started"
-          || pendingInbox.length > 0
-        ) {
-          throw new Error(
-            "Durable conversation work was admitted before this browser prompt",
-          );
+        if (pump === "started" || pendingInbox.length > 0) {
+          if (promptId === undefined) {
+            throw new Error(
+              "Durable conversation work was admitted before this browser prompt",
+            );
+          }
+          return actor.admitBrowserPrompt({ promptId, runId, text, images }, true);
         }
         return {
           completion: actor.startPrompt({
@@ -1765,6 +1779,7 @@ export class ProjectSessionCoordinator {
             text,
             images,
             origin: "browser",
+            promptId,
           }),
         };
       });
@@ -6157,7 +6172,11 @@ export class ProjectSessionCoordinator {
     const actor = context.actors.get(conversationId);
     if (
       actor
-      && (actor.getActivity().kind !== "idle" || actor.isCompacting())
+      && (
+        actor.getActivity().kind !== "idle"
+        || actor.isCompacting()
+        || actor.hasPendingBrowserPrompts()
+      )
     ) return true;
     const batchPrefix = `${conversationId.length}:${conversationId}:`;
     if ([...context.processingBatches.keys()].some((key) =>
@@ -6325,6 +6344,7 @@ export class ProjectSessionCoordinator {
     }> = [];
     const pendingSourceCards: ConversationCard[] = [];
     const unsettledReceiptRuns = new Map<string, Set<string>>();
+    const pendingBrowserPromptIds = new Set<string>();
     const actorIds = new Set(
       pending
         .filter(({ toConversationId }) =>
@@ -6360,6 +6380,9 @@ export class ProjectSessionCoordinator {
           .map(({ targetRunId }) => targetRunId);
         if (unsettled.length > 0) {
           unsettledReceiptRuns.set(id, new Set(unsettled));
+        }
+        if (inspection.pendingBrowserPrompts.length > 0) {
+          pendingBrowserPromptIds.add(id);
         }
         for (const card of inspection.cards) {
           if (
@@ -6410,6 +6433,11 @@ export class ProjectSessionCoordinator {
         && !blockedTargets.has(id)
         && !context.abortRecoveryFailed.has(id)
       ) {
+        actorIds.add(id);
+      }
+    }
+    for (const id of pendingBrowserPromptIds) {
+      if (!blockedTargets.has(id) && !context.abortRecoveryFailed.has(id)) {
         actorIds.add(id);
       }
     }
@@ -6919,6 +6947,14 @@ export class ProjectSessionCoordinator {
     if (context.closing) return "no_work";
     if (context.deleting.has(conversationId)) return "blocked_by_deletion";
     if (pending.length === 0) {
+      if (actor.hasPendingBrowserPrompts()) {
+        this.assertRunStartAllowed(context, conversationId);
+        const completion = actor.startPendingBrowserPrompt();
+        if (completion !== undefined) {
+          this.trackBackground(context, completion.then(() => undefined));
+          return "started";
+        }
+      }
       if (!allowBashNotifications
         || context.actors.get(conversationId) !== actor
         || actor.getState().disposed

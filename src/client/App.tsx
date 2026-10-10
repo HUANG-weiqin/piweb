@@ -40,7 +40,6 @@ import {
 import { ActivitySpinner } from "./components/ActivitySpinner";
 import { AuthDialog } from "./components/AuthDialog";
 import { Chat } from "./components/Chat";
-import { RetainedInputs, type RetainedPromptInput } from "./components/RetainedInputs";
 import {
   SettingsDrawer,
   type CustomProviderMutationResult,
@@ -236,15 +235,13 @@ function loadInitialWorkspaceState(
   return { workspaces, activeCwd };
 }
 
-const MAX_RETAINED_PROMPT_INPUTS = 64;
-const MAX_RETAINED_PROMPT_INPUT_BYTES = 64 * 1024 * 1024;
-
 interface DirectPendingPrompt extends ActiveFocus {
   workspaceKey: string;
   runId: string;
   promptId: string;
   text: string;
   images: PromptImage[];
+  draftEdited?: boolean;
 }
 
 interface PendingPromptWithdrawal extends ActiveFocus {
@@ -264,6 +261,8 @@ interface ConversationComposerDraft {
   text: string;
   images: PromptImage[];
   submittedStatus?: "unknown";
+  unknownPromptId?: string;
+  retryableUnknownPrompt?: boolean;
 }
 
 interface ConversationDraftScope {
@@ -449,7 +448,9 @@ function conversationScopeKey(
 }
 
 const UNCONFIRMED_PROMPT_NOTICE =
-  "发送状态未确认。内容已保留；请先查看恢复后的对话，确认没有出现后再重试。";
+  "发送状态未确认；恢复会话后将自动核对提交。";
+const EDITED_UNCONFIRMED_PROMPT_NOTICE =
+  "发送状态未确认；草稿已修改，未自动重试。";
 
 interface PendingFocus {
   commandId: string;
@@ -722,6 +723,13 @@ export function App() {
   };
   const [pendingPrompt, setPendingPrompt] = useState<DirectPendingPrompt>();
   const pendingPromptRef = useRef<DirectPendingPrompt | undefined>(undefined);
+  // A withdrawal can overtake its admission receipt on the control path.
+  const settledPromptIdsRef = useRef(new Set<string>());
+  const recordSettledPrompt = (promptId: string) => {
+    const ids = settledPromptIdsRef.current;
+    ids.add(promptId);
+    if (ids.size > 256) ids.delete(ids.values().next().value!);
+  };
   const [pendingPromptWithdrawal, setPendingPromptWithdrawal] = useState<PendingPromptWithdrawal>();
   const pendingPromptWithdrawalRef = useRef<PendingPromptWithdrawal | undefined>(undefined);
   const updatePendingPromptWithdrawal = (pending: PendingPromptWithdrawal | undefined) => {
@@ -747,23 +755,6 @@ export function App() {
     );
   };
   const clearPendingAdmissions = () => replacePendingAdmissions([]);
-  const retainedInputsRef = useRef(new Map<string, RetainedPromptInput>());
-  const confirmedInputFocusRef = useRef<ActiveFocus | undefined>(undefined);
-  const [retainedInputs, setRetainedInputs] = useState<RetainedPromptInput[]>([]);
-  // Keep live originals in the Map for Stop and capacity accounting, not in the recovery UI.
-  const publishRetainedInputs = () => setRetainedInputs([...retainedInputsRef.current.values()]
-    .filter((input) => input.status === "cancelled" || input.status === "unknown"));
-  const removeRetainedInput = (key: string) => {
-    if (retainedInputsRef.current.delete(key)) publishRetainedInputs();
-  };
-  const markRetainedInputsUnknown = () => {
-    for (const [key, input] of retainedInputsRef.current) {
-      if (input.status === "reserved" || input.status === "admitted") {
-        retainedInputsRef.current.set(key, { ...input, status: "unknown" });
-      }
-    }
-    publishRetainedInputs();
-  };
   const [pendingConversationDeletion, setPendingConversationDeletionState] =
     useState<PendingConversationDeletion>();
   const pendingConversationDeletionRef =
@@ -1133,8 +1124,9 @@ export function App() {
     updateDraft(savedDraft?.text ?? "");
     updateDraftImages(savedDraft?.images ?? []);
     setPromptNotice(savedDraft?.submittedStatus === "unknown"
-      || [...retainedInputsRef.current.values()].some((input) => input.scopeKey === key && input.status === "unknown")
-      ? UNCONFIRMED_PROMPT_NOTICE
+      ? savedDraft.retryableUnknownPrompt
+        ? UNCONFIRMED_PROMPT_NOTICE
+        : EDITED_UNCONFIRMED_PROMPT_NOTICE
       : "");
   };
   const updateConversationDraft = (next: Pick<
@@ -1145,6 +1137,8 @@ export function App() {
     if (!scope) return;
     const key = pendingConversationKey(scope);
     const savedDraft = conversationDraftByScopeRef.current.get(key);
+    const pending = pendingPromptRef.current;
+    if (pending && pendingConversationKey(pending) === key) pending.draftEdited = true;
     if (!next.text && next.images.length === 0 && !savedDraft?.submittedStatus) {
       conversationDraftByScopeRef.current.delete(key);
     } else {
@@ -1152,6 +1146,9 @@ export function App() {
         ...next,
         ...(savedDraft?.submittedStatus
           ? { submittedStatus: savedDraft.submittedStatus }
+          : {}),
+        ...(savedDraft?.unknownPromptId
+          ? { unknownPromptId: savedDraft.unknownPromptId }
           : {}),
       });
     }
@@ -1168,7 +1165,7 @@ export function App() {
         image.mimeType === pending.images[index]?.mimeType
         && image.data === pending.images[index]?.data
       ));
-    if (!stillShowingSubmittedPayload) return;
+    if (!stillShowingSubmittedPayload || pending.draftEdited) return;
     conversationDraftByScopeRef.current.delete(pendingConversationKey(scope));
     updateDraft("");
     updateDraftImages([]);
@@ -1464,29 +1461,42 @@ export function App() {
       && conversationId === focus.conversationId
       && focusId === focus.focusId;
   };
-  const findRetainedInput = (event: {
-    sessionId: string; conversationId: string; focusId: string;
-    promptId: string; runId: string;
-  }): RetainedPromptInput | undefined => {
-    const currentFocus = focusRef.current;
-    return [...retainedInputsRef.current.values()].find((input) =>
-      input.promptId === event.promptId && input.conversationId === event.conversationId
-      && (input.actualRunId === undefined || input.actualRunId === event.runId)
-      && ((input.sessionId === event.sessionId && input.focusId === event.focusId)
-        || (input.receiptFocus?.sessionId === event.sessionId && input.receiptFocus.focusId === event.focusId)
-        || (currentFocus && matchesFocus(event.sessionId, event.conversationId, event.focusId)
-          && input.scopeKey === pendingConversationKey({ ...currentFocus, workspaceKey: currentWorkspaceKey() }))),
-    );
+  const settleUnconfirmedDraftReceipt = (promptId: string, delivered: boolean) => {
+    const scope = draftScopeRef.current;
+    const focus = focusRef.current;
+    if (!scope || !focus || scope.projectId !== focus.projectId
+      || scope.conversationId !== focus.conversationId) return;
+    const key = pendingConversationKey(scope);
+    const draft = conversationDraftByScopeRef.current.get(key);
+    if (draft?.unknownPromptId !== promptId) return;
+    if (delivered && draft.retryableUnknownPrompt) {
+      conversationDraftByScopeRef.current.delete(key);
+      updateDraft("");
+      updateDraftImages([]);
+    } else {
+      // A withdrawn prompt or a later user edit keeps the current draft, not its uncertainty.
+      conversationDraftByScopeRef.current.set(key, {
+        text: draft.text,
+        images: draft.images,
+      });
+    }
+    setPromptNotice("");
   };
   const settleSubmittedPromptReceipt = (event: {
     sessionId: string; conversationId: string; focusId: string; promptId: string;
-  }) => {
+  }, delivered: boolean) => {
+    if (!matchesFocus(event.sessionId, event.conversationId, event.focusId)) return;
     const pending = pendingPromptRef.current;
-    if (!pending || pending.promptId !== event.promptId || pending.sessionId !== event.sessionId
-      || pending.conversationId !== event.conversationId || pending.focusId !== event.focusId) return;
-    settleAcceptedPromptDraft(pending);
-    updatePendingPrompt(undefined);
-    if (outstandingRunIdRef.current === pending.runId) updateOutstandingRunId("");
+    const acceptedPending = pending && pending.promptId === event.promptId
+      && pending.sessionId === event.sessionId
+      && pending.conversationId === event.conversationId
+      && pending.focusId === event.focusId ? pending : undefined;
+    if (acceptedPending) {
+      if (delivered) settleAcceptedPromptDraft(acceptedPending);
+      updatePendingPrompt(undefined);
+      if (outstandingRunIdRef.current === acceptedPending.runId) updateOutstandingRunId("");
+    }
+    settleUnconfirmedDraftReceipt(event.promptId, delivered);
   };
   const closePendingImageOpens = () => {
     for (const pending of pendingImageOpensRef.current.values()) {
@@ -1505,6 +1515,7 @@ export function App() {
     closePendingImageOpens();
     boundActiveRunIdRef.current = undefined;
     updatePendingPromptWithdrawal(undefined);
+    settledPromptIdsRef.current.clear();
     const pendingAbort = pendingAbortRef.current;
     if (
       pendingAbort
@@ -1584,25 +1595,38 @@ export function App() {
     });
     setPromptNotice("");
     settleAcceptedPromptDraft(pending);
+    settleUnconfirmedDraftReceipt(pending.promptId, true);
     updatePendingPrompt(undefined);
     updateOutstandingRunId(runId);
   };
-  const markPendingPromptUnconfirmed = () => {
+  const markPendingPromptUnconfirmed = (message?: string) => {
     const pending = pendingPromptRef.current;
     if (!pending) return;
     updatePendingPrompt(undefined);
-    const retained = retainedInputsRef.current.get(`${pendingConversationKey(pending)}\u0000${pending.promptId}`);
-    if (retained && retained.status !== "cancelled") {
-      retainedInputsRef.current.set(retained.key, { ...retained, status: "unknown" });
-      publishRetainedInputs();
+    if (outstandingRunIdRef.current === pending.runId) updateOutstandingRunId("");
+    const key = pendingConversationKey(pending);
+    const draft = conversationDraftByScopeRef.current.get(key);
+    const canReconcile = Boolean(draft && !pending.draftEdited
+      && draft.text.trim() === pending.text
+      && draft.images.length === pending.images.length
+      && draft.images.every((image, index) => (
+        image.mimeType === pending.images[index]?.mimeType
+        && image.data === pending.images[index]?.data
+      )));
+    if (draft && (draft.text || draft.images.length > 0)) {
+      conversationDraftByScopeRef.current.set(key, {
+        ...draft,
+        submittedStatus: "unknown",
+        unknownPromptId: pending.promptId,
+        retryableUnknownPrompt: canReconcile,
+      });
     }
     const activeScope = draftScopeRef.current;
-    if (
-      activeScope
-      && pendingConversationKey(activeScope) === pendingConversationKey(pending)
-    ) {
-      setPromptNotice(retained ? UNCONFIRMED_PROMPT_NOTICE
-        : "发送状态未确认；原输入副本已丢弃，请先核对历史。不会自动重发。");
+    if (activeScope && pendingConversationKey(activeScope) === key) {
+      const notice = canReconcile
+        ? UNCONFIRMED_PROMPT_NOTICE
+        : EDITED_UNCONFIRMED_PROMPT_NOTICE;
+      setPromptNotice(message ? `消息提交结果未确认：${message}。${notice}` : notice);
     }
   };
   const updateConversationReady = (ready: boolean) => {
@@ -1797,26 +1821,13 @@ export function App() {
       : undefined;
     setConversationRole(event.role);
     setLoopList(event.loopList ?? { items: [], armed: false });
-    const scopeKey = pendingConversationKey({ ...focus, workspaceKey: currentWorkspaceKey() });
     replacePendingAdmissions(
       event.pendingPrompts.map(({ promptId, text }) => ({
         promptId, text,
-        runId: pendingAdmissionsRef.current.find((admission) => admission.promptId === promptId)?.runId
-          ?? retainedInputsRef.current.get(`${scopeKey}\u0000${promptId}`)?.actualRunId,
+        runId: pendingAdmissionsRef.current.find((admission) => admission.promptId === promptId)?.runId,
       })),
     );
-    const pendingIds = new Set(event.pendingPrompts.map(({ promptId }) => promptId));
-    for (const [key, input] of retainedInputsRef.current) {
-      if (input.scopeKey !== scopeKey || input.status === "cancelled") continue;
-      retainedInputsRef.current.set(key, {
-        ...input,
-        status: pendingIds.has(input.promptId) ? "admitted" : "unknown",
-        receiptFocus: { sessionId: event.sessionId, focusId: event.focusId },
-      });
-    }
-    publishRetainedInputs();
     if (settleReadiness && !pendingFocusRef.current) {
-      confirmedInputFocusRef.current = focus;
       updateConversationReady(true);
       requestTransitionFrame(snapshotAttempt, "snapshot", {
         sessionId: event.sessionId,
@@ -1852,6 +1863,18 @@ export function App() {
       if (workspaceSyncingRef.current) clearTemporaryWorkspacePresentation();
       updateWorkspaceSyncing(false);
       updateConversationSyncing(false);
+    }
+    if (conversationReadyRef.current && settleReadiness && !pendingFocusRef.current
+      && protocolReadyRef.current && transportOnlineRef.current && !pendingPromptRef.current) {
+      const currentScope = draftScopeRef.current;
+      const savedDraft = currentScope && conversationDraftByScopeRef.current.get(
+        pendingConversationKey(currentScope),
+      );
+      if (currentScope?.projectId === focus.projectId
+        && currentScope.conversationId === focus.conversationId
+        && savedDraft?.retryableUnknownPrompt && savedDraft.unknownPromptId) {
+        sendPrompt(savedDraft.text, savedDraft.images);
+      }
     }
   };
   const activateDeferredFocusAuthority = (
@@ -2066,15 +2089,6 @@ export function App() {
           inspectWorkspaceSessionFiles(owner.dialogId, socket, epoch);
         }
         return;
-      }
-      if ((event.type === "prompt_admitted" || event.type === "prompt_delivered" || event.type === "prompt_withdrawn")
-        && matchesFocus(event.sessionId, event.conversationId, event.focusId)) {
-        const focus = focusRef.current!;
-        const key = `${pendingConversationKey({ ...focus, workspaceKey: currentWorkspaceKey() })}\u0000${event.promptId}`;
-        const input = retainedInputsRef.current.get(key);
-        const knownRunId = input?.actualRunId
-          ?? pendingAdmissionsRef.current.find((admission) => admission.promptId === event.promptId)?.runId;
-        if (knownRunId !== undefined && knownRunId !== event.runId) return;
       }
       if (event.type === "hello") {
         if (event.protocolVersion !== PROTOCOL_VERSION) {
@@ -2890,54 +2904,37 @@ export function App() {
         ) return;
         completionSoundRef.current?.play();
       } else if (event.type === "prompt_admitted") {
-        const retained = findRetainedInput(event);
-        if (retained?.status === "cancelled") return;
-        if (retained) {
-          retainedInputsRef.current.set(retained.key, { ...retained, actualRunId: event.runId, status: "admitted" });
-          publishRetainedInputs();
-        }
-        if (!matchesFocus(event.sessionId, event.conversationId, event.focusId)) return;
-        // busy 路径回执：消息已进 steering 队列，清草稿并显示为等待中。
+        if (!matchesFocus(event.sessionId, event.conversationId, event.focusId)
+          || settledPromptIdsRef.current.has(event.promptId)) return;
+        // Durable acceptance clears the draft; SDK delivery is a separate receipt.
         const pending = pendingPromptRef.current;
-        if (
-          pending
-          && pending.promptId === event.promptId
+        const acceptedPending = pending && pending.promptId === event.promptId
           && pending.sessionId === event.sessionId
           && pending.conversationId === event.conversationId
-          && pending.focusId === event.focusId
-        ) {
+          && pending.focusId === event.focusId ? pending : undefined;
+        if (acceptedPending) {
           setPromptNotice("");
-          settleAcceptedPromptDraft(pending);
+          settleAcceptedPromptDraft(acceptedPending);
           updatePendingPrompt(undefined);
-          if (outstandingRunIdRef.current === pending.runId) {
+          if (outstandingRunIdRef.current === acceptedPending.runId) {
             updateOutstandingRunId("");
           }
         }
+        settleUnconfirmedDraftReceipt(event.promptId, true);
         addPendingAdmission({ promptId: event.promptId, text: event.text, runId: event.runId });
       } else if (event.type === "prompt_delivered") {
-        const retained = findRetainedInput(event);
-        settleSubmittedPromptReceipt(event);
-        if (retained) {
-          removeRetainedInput(retained.key);
-        }
+        settleSubmittedPromptReceipt(event, true);
         if (!matchesFocus(event.sessionId, event.conversationId, event.focusId)) return;
+        recordSettledPrompt(event.promptId);
         removePendingAdmission(event.promptId);
         const pending = pendingPromptWithdrawalRef.current;
         if (pending?.promptId === event.promptId && pending.runId === event.runId) {
           setPromptNotice("消息已投递，无法撤回。");
         }
       } else if (event.type === "prompt_withdrawn") {
-        const retained = findRetainedInput(event);
-        settleSubmittedPromptReceipt(event);
-        if (retained) {
-          if (event.reason === "abort") {
-            retainedInputsRef.current.set(retained.key, { ...retained, actualRunId: event.runId, status: "cancelled" });
-            publishRetainedInputs();
-          } else {
-            removeRetainedInput(retained.key);
-          }
-        }
+        settleSubmittedPromptReceipt(event, false);
         if (!matchesFocus(event.sessionId, event.conversationId, event.focusId)) return;
+        recordSettledPrompt(event.promptId);
         removePendingAdmission(event.promptId);
         const pending = pendingPromptWithdrawalRef.current;
         if (pending?.promptId === event.promptId && pending.runId === event.runId) {
@@ -3018,22 +3015,6 @@ export function App() {
           });
         }
       } else if (event.type === "session_event") {
-        if (event.event.type === "run_queued") {
-          for (const input of retainedInputsRef.current.values()) {
-            if (input.sessionId === event.sessionId && input.conversationId === event.conversationId
-              && input.focusId === event.focusId && input.runId === event.runId
-              && (input.status === "reserved" || input.status === "unknown")) removeRetainedInput(input.key);
-          }
-        }
-        if (event.event.type === "run_finished") {
-          for (const [key, input] of retainedInputsRef.current) {
-            if (input.actualRunId === event.runId && input.status === "admitted"
-              && findRetainedInput({ ...event, promptId: input.promptId }) === input) {
-              retainedInputsRef.current.set(key, { ...input, status: "unknown" });
-            }
-          }
-          publishRetainedInputs();
-        }
         if (!matchesFocus(
           event.sessionId,
           event.conversationId,
@@ -3052,25 +3033,9 @@ export function App() {
           && event.runId === pendingAbort.runId
           && sameFocus(pendingAbort, focusRef.current ?? pendingAbort)
         ) updatePendingAbort(undefined);
-        if (event.event.type === "run_finished") {
-          const currentRunId = boundActiveRunIdRef.current;
-          const remaining = pendingAdmissionsRef.current.filter((admission) =>
-            admission.runId !== event.runId
-            && (admission.runId !== undefined || (currentRunId !== undefined && currentRunId !== event.runId)),
-          );
-          const remainingIds = new Set(remaining.map(({ promptId }) => promptId));
-          const focus = focusRef.current!;
-          const scopeKey = pendingConversationKey({ ...focus, workspaceKey: currentWorkspaceKey() });
-          for (const admission of pendingAdmissionsRef.current) {
-            if (remainingIds.has(admission.promptId)) continue;
-            const input = retainedInputsRef.current.get(`${scopeKey}\u0000${admission.promptId}`);
-            if (input?.status === "admitted" && input.actualRunId === undefined) {
-              retainedInputsRef.current.set(input.key, { ...input, status: "unknown" });
-            }
-          }
-          publishRetainedInputs();
-          replacePendingAdmissions(remaining);
-          if (pendingPromptWithdrawalRef.current?.runId === event.runId) updatePendingPromptWithdrawal(undefined);
+        if (event.event.type === "run_finished"
+          && pendingPromptWithdrawalRef.current?.runId === event.runId) {
+          updatePendingPromptWithdrawal(undefined);
         }
         const focus = focusRef.current;
         if (!focus) return;
@@ -3131,8 +3096,6 @@ export function App() {
             || pending.commandId !== event.commandId
             || !matchesFocus(pending.sessionId, pending.conversationId, pending.focusId)
           ) return;
-          removePendingAdmission(pending.promptId);
-          removeRetainedInput(`${pendingConversationKey({ ...pending, workspaceKey: currentWorkspaceKey() })}\u0000${pending.promptId}`);
           updatePendingPromptWithdrawal(undefined);
           return;
         }
@@ -3458,17 +3421,6 @@ export function App() {
           setCustomProvidersRefreshing(false);
           setCustomProvidersRefreshError(`读取本机模型配置失败：${event.message}`);
           return;
-        }
-        if (event.scope === "command" && event.operation === "prompt") {
-          const retained = [...retainedInputsRef.current.values()].find((input) =>
-            input.sessionId === event.sessionId && input.conversationId === event.conversationId
-            && input.focusId === event.focusId && input.runId === event.runId,
-          );
-          if (retained?.status === "cancelled") return;
-          if (retained) {
-            retainedInputsRef.current.set(retained.key, { ...retained, status: "unknown" });
-            publishRetainedInputs();
-          }
         }
         if (event.sessionId && event.sessionId !== sessionIdRef.current) return;
         if (event.operation === "withdraw_prompt") {
@@ -3821,12 +3773,7 @@ export function App() {
             && pending.focusId === event.focusId
           ) {
             matchedPendingPromptError = true;
-            updatePendingPrompt(undefined);
-            const retainedKey = `${pendingConversationKey(pending)}\u0000${pending.promptId}`;
-            setPromptNotice(
-              `消息提交结果未确认：${event.message}。${retainedInputsRef.current.has(retainedKey)
-                ? "原输入副本已保留" : "原输入副本已丢弃"}，请先核对历史。`,
-            );
+            markPendingPromptUnconfirmed(event.message);
           }
         }
         if (
@@ -3945,7 +3892,6 @@ export function App() {
         }
         updateDirectoryBrowser(undefined);
         markPendingPromptUnconfirmed();
-        markRetainedInputsUnknown();
         const pendingRoleOperation = pendingRoleOperationRef.current;
         if (pendingRoleOperation) {
           pendingRoleOperationRef.current = undefined;
@@ -4084,7 +4030,7 @@ export function App() {
   }, [notification]);
 
   const send = (command: ClientCommand): boolean => {
-    if (!protocolReady) {
+    if (!protocolReadyRef.current) {
       setError("本地服务尚未完成协议握手");
       return false;
     }
@@ -4680,7 +4626,7 @@ export function App() {
   const sendPrompt = (text: string, images: PromptImage[]): boolean => {
     const trimmed = text.trim();
     if ((!trimmed && images.length === 0) || !conversationReadyRef.current) return false;
-    if (pendingConversationTruncationRef.current) return false;
+    if (pendingConversationTruncationRef.current || pendingPromptRef.current) return false;
     const sessionId = sessionIdRef.current;
     const focus = focusRef.current;
     const scope = draftScopeRef.current;
@@ -4692,9 +4638,17 @@ export function App() {
       || scope.projectId !== focus.projectId
       || scope.conversationId !== focus.conversationId
     ) return false;
-    const knownRunOwnerId = state?.activeRun?.id || outstandingRunIdRef.current;
+    const knownRunOwnerId = boundActiveRunIdRef.current || outstandingRunIdRef.current;
     const runId = crypto.randomUUID();
-    const promptId = crypto.randomUUID();
+    const savedDraft = conversationDraftByScopeRef.current.get(pendingConversationKey(scope));
+    const promptId = savedDraft?.retryableUnknownPrompt && savedDraft.unknownPromptId
+      && savedDraft.text.trim() === trimmed
+      && savedDraft.images.length === images.length
+      && savedDraft.images.every((image, index) => (
+        image.mimeType === images[index]?.mimeType && image.data === images[index]?.data
+      ))
+      ? savedDraft.unknownPromptId
+      : crypto.randomUUID();
     const command = {
       type: "prompt" as const,
       sessionId,
@@ -4719,31 +4673,17 @@ export function App() {
       text: trimmed,
       images: submittedImages,
     };
-    const retainedBytes = [...retainedInputsRef.current.values()].reduce((total, input) => total + input.bytes, 0);
-    if (retainedInputsRef.current.size >= MAX_RETAINED_PROMPT_INPUTS
-      || retainedBytes + bytes > MAX_RETAINED_PROMPT_INPUT_BYTES) {
-      const hasRecoveryInputs = [...retainedInputsRef.current.values()]
-        .some((input) => input.status === "cancelled" || input.status === "unknown");
-      setPromptNotice(hasRecoveryInputs
-        ? "保留输入的容量已满，请在“恢复输入”中恢复或丢弃内容；当前草稿已保留。"
-        : "保留输入的容量已满，请等待排队消息投递或撤回部分消息；当前草稿已保留。");
-      return false;
-    }
-    const scopeKey = pendingConversationKey(pending);
-    const key = `${scopeKey}\u0000${promptId}`;
-    retainedInputsRef.current.set(key, { ...pending, key, scopeKey, bytes, status: "reserved" });
-    publishRetainedInputs();
     setPromptNotice("");
     updatePendingPrompt(pending);
     if (!knownRunOwnerId) updateOutstandingRunId(runId);
     const ok = send(command);
     if (!ok) {
-      const retained = retainedInputsRef.current.get(key);
-      if (retained?.status !== "reserved") return false;
-      removeRetainedInput(key);
+      if (pendingPromptRef.current !== pending) return false;
       updatePendingPrompt(undefined);
       if (outstandingRunIdRef.current === runId) updateOutstandingRunId("");
-      setPromptNotice("消息未发送，内容已保留，可以重试。");
+      setPromptNotice(savedDraft?.unknownPromptId === promptId
+        ? "消息提交结果仍未确认，草稿已保留；恢复会话后将再次核对。"
+        : "消息未发送，内容已保留，可以重试。");
       return false;
     }
     return true;
@@ -4815,32 +4755,6 @@ export function App() {
     } else if (pendingAbortRef.current === pending) {
       updatePendingAbort(undefined);
     }
-  };
-  const restoreRetainedInput = (key: string) => {
-    const input = retainedInputsRef.current.get(key);
-    const focus = focusRef.current;
-    const scope = draftScopeRef.current;
-    if (!input || !focus || !scope || pendingFocusRef.current || pendingPromptRef.current
-      || workspaceSyncingRef.current || conversationSyncingRef.current
-      || !confirmedInputFocusRef.current || !sameFocus(focus, confirmedInputFocusRef.current)
-      || input.scopeKey !== pendingConversationKey(scope)
-      || input.scopeKey !== pendingConversationKey({ ...focus, workspaceKey: currentWorkspaceKey() })
-      || (input.status !== "cancelled" && input.status !== "unknown")) return;
-    if (draftRef.current !== "" || draftImagesRef.current.length > 0) {
-      setPromptNotice("请先处理当前草稿，再恢复保留的输入；当前草稿不会被覆盖。");
-      return;
-    }
-    conversationDraftByScopeRef.current.delete(input.scopeKey);
-    updateDraft(input.text);
-    updateDraftImages(input.images);
-    updateConversationDraft({ text: input.text, images: input.images });
-    if (input.status === "unknown") {
-      conversationDraftByScopeRef.current.set(input.scopeKey, { text: input.text, images: input.images, submittedStatus: "unknown" });
-      setPromptNotice(UNCONFIRMED_PROMPT_NOTICE);
-    } else {
-      setPromptNotice("");
-    }
-    removeRetainedInput(key);
   };
   const focusConversation = (conversationId: string) => {
     const sessionId = sessionIdRef.current;
@@ -5652,22 +5566,29 @@ export function App() {
     return true;
   };
   const handleConversationFork = useLatestCallback(forkConversation);
+  const updateDraftEditNotice = () => {
+    const scope = draftScopeRef.current;
+    const savedDraft = scope && conversationDraftByScopeRef.current.get(pendingConversationKey(scope));
+    if (savedDraft?.submittedStatus === "unknown") {
+      setPromptNotice(EDITED_UNCONFIRMED_PROMPT_NOTICE);
+    } else if (promptNotice) {
+      setPromptNotice("");
+    }
+  };
   const handleChatDraftChange = useLatestCallback((text: string) => {
     updateDraft(text);
     updateConversationDraft({ text, images: draftImagesRef.current });
-    if (promptNotice) setPromptNotice("");
+    updateDraftEditNotice();
   });
   const handleChatImagesChange = useLatestCallback((images: PromptImage[]) => {
     updateDraftImages(images);
     updateConversationDraft({ text: draftRef.current, images });
-    if (promptNotice) setPromptNotice("");
+    updateDraftEditNotice();
   });
   const handleChatSend = useLatestCallback((text: string, images: PromptImage[]) =>
     submitPrompt(text, images));
   const handleChatAbort = useLatestCallback(abortCurrentRun);
   const handleChatWithdrawPrompt = useLatestCallback(withdrawPrompt);
-  const handleRetainedInputRestore = useLatestCallback(restoreRetainedInput);
-  const handleRetainedInputDiscard = useLatestCallback(removeRetainedInput);
   const handleChatSettings = useLatestCallback((
     resolveReturnFocus?: () => HTMLElement | null,
   ) => {
@@ -6098,11 +6019,6 @@ export function App() {
       : mobileScene;
   usePhoneSceneFocus(phoneViewport, phoneSceneFocusKey, phoneWorkbenchRef);
 
-  const retainedInputsFallback = retainedInputs.length > 0 ? <div className="retained-inputs-fallback">
-    <RetainedInputs inputs={retainedInputs} canRestore={false}
-      onRestore={handleRetainedInputRestore} onDiscard={handleRetainedInputDiscard} />
-  </div> : null;
-
   if (
     !activeCwd
     || (!visiblePresentation && (!currentFocus || !conversationSyncing))
@@ -6147,7 +6063,6 @@ export function App() {
         onRetry={() => switchWorkspace(activeCwd)}
       />
     </div>
-    {retainedInputsFallback}
     {workspaceSetupDialog}
     {directoryBrowserDialog}
     {workspaceSessionRepairDialog}
@@ -6445,13 +6360,6 @@ export function App() {
               draftEditable={draftEditable}
               draftScopeKey={draftScope ? pendingConversationKey(draftScope) : undefined}
               submitting={Boolean(pendingPrompt)}
-              retainedInputs={retainedInputs}
-              retainedInputScopeKey={draftScope ? pendingConversationKey(draftScope) : undefined}
-              canRestoreRetainedInput={Boolean(currentFocus && confirmedInputFocusRef.current
-                && sameFocus(currentFocus, confirmedInputFocusRef.current) && !pendingFocus && !pendingPrompt
-                && !transitioning && !switchingFocus)}
-              onRestoreRetainedInput={handleRetainedInputRestore}
-              onDiscardRetainedInput={handleRetainedInputDiscard}
               pendingAdmissions={pendingAdmissions}
               withdrawingPromptId={pendingPromptWithdrawal?.promptId}
               onWithdrawPrompt={handleChatWithdrawPrompt}
@@ -6475,7 +6383,6 @@ export function App() {
             />}
       </div>
     </div>
-    {(showConversationDeletionProgress || !visiblePresentation || showRoleSelection) && retainedInputsFallback}
     <SettingsDrawer
       state={runtimeState}
       open={drawer}

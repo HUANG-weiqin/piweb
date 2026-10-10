@@ -8,6 +8,9 @@ import {
 import { EDIT_BUDGET_CUSTOM_TYPE } from "./edit-budget.js";
 import {
   BASH_TASK_NOTIFICATION_CUSTOM_TYPE,
+  BROWSER_PROMPT_ADMISSION_CUSTOM_TYPE,
+  BROWSER_PROMPT_DELIVERY_CUSTOM_TYPE,
+  BROWSER_PROMPT_WITHDRAWAL_CUSTOM_TYPE,
   COMPACTION_THRESHOLD_CUSTOM_TYPE,
   CONTEXT_HINT_CUSTOM_TYPE,
   CONVERSATION_CARD_CUSTOM_TYPE,
@@ -28,6 +31,9 @@ import {
   aggregateReservedConversationEntries,
   appendReservedCustomEntry,
   createBashTaskNotificationEntry,
+  createBrowserPromptAdmissionEntry,
+  createBrowserPromptDeliveryEntry,
+  createBrowserPromptWithdrawalEntry,
   createCompactionThresholdEntry,
   createConversationCardEntry,
   createConversationMessageEntry,
@@ -40,6 +46,7 @@ import {
   createLoopListEntry,
   createLoopListContinueEntry,
   createMessageDeliveryReceiptEntry,
+  inspectBrowserPromptLedger,
   normalizeConversationMessageSummary,
   parseConversationCardEntry,
   parseCompactionThresholdEntry,
@@ -1554,5 +1561,186 @@ describe("conversation reserved entries", () => {
         updatedAt: "2026-07-19T10:01:00.000Z",
       }),
     ])).toThrow(/conflicting.*result/i);
+  });
+});
+
+describe("browser prompt ledger", () => {
+  const custom = (
+    id: string,
+    entry: { customType: string; data: unknown },
+    parentId: string | null = null,
+  ) => ({ type: "custom", id, parentId, timestamp, ...entry });
+  const rawUser = (id: string, parentId: string) => ({
+    type: "message", id, parentId, timestamp,
+    message: { role: "user", content: "different text", timestamp: 1 },
+  });
+  const prompt = () => createBrowserPromptAdmissionEntry({
+    promptId: randomUUID(), runId: randomUUID(), text: "first",
+  });
+
+  it("keeps an incomplete marker pending and accepts a later direct-child retry", () => {
+    const admission = prompt();
+    const delivery = createBrowserPromptDeliveryEntry({
+      promptId: admission.data.promptId,
+      runId: admission.data.runId,
+    });
+    const first = custom("admission", admission);
+    const marker = custom("marker", delivery, "admission");
+    expect(inspectBrowserPromptLedger([first, marker])).toEqual({
+      admissions: [admission.data], pending: [admission.data],
+      deliveries: [], withdrawals: [],
+    });
+    expect(inspectBrowserPromptLedger([
+      first, marker, custom("retry", delivery, "marker"),
+      rawUser("raw", "retry"),
+    ])).toEqual({
+      admissions: [admission.data], pending: [],
+      deliveries: [delivery.data], withdrawals: [],
+    });
+    expect(inspectBrowserPromptLedger([
+      first, marker, rawUser("raw", "admission"),
+    ]).pending).toEqual([admission.data]);
+    expect(inspectBrowserPromptLedger([
+      first, marker, { type: "usage", id: "gap" },
+      rawUser("raw", "marker"),
+    ]).pending).toEqual([admission.data]);
+    expect(inspectBrowserPromptLedger([
+      first, marker,
+      { ...rawUser("assistant", "marker"), message: { role: "assistant", content: "x" } },
+    ]).pending).toEqual([admission.data]);
+  });
+
+  it("returns admissions and pending payloads in physical admission order", () => {
+    const first = prompt();
+    const second = prompt();
+    const third = prompt();
+    const entries = [
+      custom("first", first),
+      custom("second", second),
+      custom("withdraw", createBrowserPromptWithdrawalEntry({
+        promptId: first.data.promptId,
+        runId: first.data.runId,
+      })),
+      custom("third", third),
+    ];
+    expect(inspectBrowserPromptLedger(entries)).toEqual({
+      admissions: [first.data, second.data, third.data],
+      pending: [second.data, third.data],
+      deliveries: [], withdrawals: [{ promptId: first.data.promptId, runId: first.data.runId }],
+    });
+  });
+
+  it("rejects unknown IDs, duplicate admissions and terminal conflicts", () => {
+    const admission = prompt();
+    const marker = createBrowserPromptDeliveryEntry({
+      promptId: admission.data.promptId,
+      runId: admission.data.runId,
+    });
+    const withdrawal = createBrowserPromptWithdrawalEntry({
+      promptId: admission.data.promptId,
+      runId: admission.data.runId,
+    });
+    const first = custom("admission", admission);
+    const delivered = [first, custom("marker", marker), rawUser("raw", "marker")];
+    expect(() => inspectBrowserPromptLedger([
+      custom("marker", marker), first,
+    ])).toThrow(/unknown browser prompt admission/i);
+    expect(() => inspectBrowserPromptLedger([
+      first, custom("duplicate", admission),
+    ])).toThrow(/duplicate browser prompt admission/i);
+    expect(() => inspectBrowserPromptLedger([
+      ...delivered, custom("withdrawn", withdrawal),
+    ])).toThrow(/conflicting browser prompt terminal/i);
+    expect(() => inspectBrowserPromptLedger([
+      first, custom("withdrawn", withdrawal),
+      custom("retry", marker),
+    ])).toThrow(/conflicting browser prompt terminal/i);
+    expect(() => inspectBrowserPromptLedger([
+      first, custom("withdrawn", withdrawal),
+      custom("again", withdrawal),
+    ])).toThrow(/conflicting browser prompt terminal/i);
+    expect(inspectBrowserPromptLedger([
+      first, custom("marker", marker), custom("withdrawn", withdrawal),
+    ])).toEqual({
+      admissions: [admission.data], pending: [],
+      deliveries: [], withdrawals: [withdrawal.data],
+    });
+  });
+
+  it("uses strict wire text/image bounds and strict non-context carriers", () => {
+    const promptId = randomUUID();
+    const runId = randomUUID();
+    const image = { mimeType: "image/png" as const, data: "YQ==" };
+    const admission = createBrowserPromptAdmissionEntry({
+      promptId, runId, text: "", images: [image],
+    });
+    expect(admission.data).toEqual({ promptId, runId, text: "", images: [image] });
+    expect(() => createBrowserPromptAdmissionEntry({
+      promptId, runId, text: "", images: [],
+    })).toThrow();
+    expect(() => createBrowserPromptAdmissionEntry({
+      promptId, runId, text: "x".repeat(200_001),
+    })).toThrow();
+    expect(() => createBrowserPromptAdmissionEntry({
+      promptId, runId, text: "x", images: [{ ...image, data: "%%%=" }],
+    })).toThrow();
+    expect(() => createBrowserPromptAdmissionEntry({
+      promptId, runId, text: "x", images: Array.from({ length: 5 }, () => image),
+    })).toThrow();
+    expect(() => inspectBrowserPromptLedger([
+      custom("admission", {
+        customType: BROWSER_PROMPT_ADMISSION_CUSTOM_TYPE,
+        data: { promptId, runId, text: "x", unexpected: true },
+      }),
+    ])).toThrow();
+    expect(() => inspectBrowserPromptLedger([
+      { ...custom("marker", createBrowserPromptDeliveryEntry({ promptId, runId })),
+        type: "custom_message" },
+    ])).toThrow();
+    expect(() => inspectBrowserPromptLedger([
+      custom("marker", { customType: BROWSER_PROMPT_WITHDRAWAL_CUSTOM_TYPE,
+        data: { promptId: "not-a-uuid" } }),
+    ])).toThrow();
+    expect(BROWSER_PROMPT_DELIVERY_CUSTOM_TYPE).toBe("piweb.browser_prompt_delivery.v1");
+  });
+
+  it("rejects images whose decoded total exceeds 16 MiB", () => {
+    const eightMiB = Buffer.alloc(8 * 1024 * 1024).toString("base64");
+    const data = {
+      promptId: randomUUID(), runId: randomUUID(), text: "",
+      images: [
+        { mimeType: "image/png" as const, data: eightMiB },
+        { mimeType: "image/jpeg" as const, data: eightMiB },
+      ],
+    };
+    expect(createBrowserPromptAdmissionEntry(data).data.images).toHaveLength(2);
+    expect(() => createBrowserPromptAdmissionEntry({
+      ...data, images: [...data.images, { mimeType: "image/gif", data: "YQ==" }],
+    })).toThrow();
+  });
+
+  it("appends all three reserved entries through the validated custom path", () => {
+    const admitted = prompt();
+    const delivery = createBrowserPromptDeliveryEntry({
+      promptId: admitted.data.promptId, runId: admitted.data.runId,
+    });
+    const withdrawal = createBrowserPromptWithdrawalEntry({
+      promptId: admitted.data.promptId, runId: admitted.data.runId,
+    });
+    const calls: Array<[string, unknown]> = [];
+    const appender = {
+      appendCustomEntry: (customType: string, data?: unknown) => {
+        calls.push([customType, data]);
+        return String(calls.length);
+      },
+    };
+    expect(appendReservedCustomEntry(appender, admitted)).toBe("1");
+    expect(appendReservedCustomEntry(appender, delivery)).toBe("2");
+    expect(appendReservedCustomEntry(appender, withdrawal)).toBe("3");
+    expect(calls).toEqual([
+      [BROWSER_PROMPT_ADMISSION_CUSTOM_TYPE, admitted.data],
+      [BROWSER_PROMPT_DELIVERY_CUSTOM_TYPE, delivery.data],
+      [BROWSER_PROMPT_WITHDRAWAL_CUSTOM_TYPE, withdrawal.data],
+    ]);
   });
 });

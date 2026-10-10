@@ -43,7 +43,7 @@ const transitionDiagnostics = {
 
 describe("parseClientCommand", () => {
   it("uses the run-correlated protocol version", () => {
-    expect(PROTOCOL_VERSION).toBe(69);
+    expect(PROTOCOL_VERSION).toBe(70);
   });
 
   it("correlates workspace maintenance before initialize and requires explicit tail-loss consent", () => {

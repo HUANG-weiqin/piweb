@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import {
   defineTool,
   type AgentSession,
@@ -59,11 +60,16 @@ import {
   createRunSettlementEntry,
   createServiceTierSelectionEntry,
   createBashTaskNotificationEntry,
+  createBrowserPromptAdmissionEntry,
+  createBrowserPromptDeliveryEntry,
+  createBrowserPromptWithdrawalEntry,
+  inspectBrowserPromptLedger,
   parseBashTaskNotificationEntry,
   parseReservedConversationEntry,
   BASH_TASK_NOTIFICATION_CUSTOM_TYPE,
   RUN_SETTLEMENT_CUSTOM_TYPE,
   type BashTaskNotificationEntry,
+  type BrowserPromptAdmission,
   type ConversationMeta,
   type ConversationMessageEntry,
   type LoopListTiming,
@@ -277,14 +283,15 @@ export interface ConversationActorCompletion {
   createdBy: ConversationMeta["createdBy"];
 }
 
-/** 一次 busy 期间被 SDK steering 队列接受的浏览器 prompt（内存态，重启丢失为接受项）。 */
+/** One live SDK steering observation; durable acceptance lives in the JSONL ledger. */
 interface PendingPromptAdmission {
   promptId: string;
   text: string;
 }
 
-/** 每个对话同时等待投递的上限（防连点打爆内存）。 */
+/** Bound accepted but undelivered input in the conversation's durable ledger. */
 const MAX_PENDING_ADMISSIONS = 64;
+const MAX_PENDING_ADMISSION_BYTES = 64 * 1024 * 1024;
 
 export interface ConversationActorOpenOptions {
   conversationId: string;
@@ -325,6 +332,8 @@ export interface StartConversationPrompt {
   text: string;
   images?: readonly PromptImage[];
   origin: ConversationRunOrigin;
+  /** Present on every browser wire prompt; older internal callers may omit it. */
+  promptId?: string;
 }
 
 export interface StartConversationMessages {
@@ -462,10 +471,11 @@ interface PendingGuidance {
 }
 
 /**
- * 本 run 已由 SDK 接受、尚未被 raw user message_end 观察的 guidance。
- * 显式 steer 与 busy 浏览器 prompt 共用同一 FIFO tracking，作为 wait
- * 唤醒的权威状态；`waited` 与 raw observation 独立，防止同一 guidance
- * 反复唤醒本 run 的后续 wait。记录在 raw user message_end 认领时移除。
+ * 本 run 捕获、尚未被 raw user message_end 观察的 guidance。
+ * 显式 steer 与 busy 浏览器 prompt 共用同一 FIFO tracking；完成 SDK
+ * 准入后才是 wait 唤醒及后续浏览器输入顺序的权威状态。`waited` 与 raw
+ * observation 独立，防止同一 guidance 反复唤醒后续 wait。记录在 raw
+ * user message_end 认领时移除。
  */
 interface PendingGuidanceObservation {
   /** 显式 steer 记录（其 command 在 raw user message_end 结算）。 */
@@ -476,6 +486,8 @@ interface PendingGuidanceObservation {
   readonly queuedMessage: AgentMessage;
   /** 本 run 的 wait 已在此 guidance 上唤醒过一次。 */
   waited: boolean;
+  /** Native SDK admission completed; only then may a wait observe guidance. */
+  sdkQueued: boolean;
 }
 
 interface ReloadStopRequest {
@@ -530,6 +542,7 @@ interface RunTicket {
   readonly reloadContinuation?: ReloadContinuationInput;
   /** The first raw user message belongs to startPrompt(), never guidance. */
   expectsInitialPromptRawUserMessage: boolean;
+  readonly initialBrowserPromptId?: string;
   /** Original first prompt used by the background title candidate. */
   autoTitlePrompt?: string;
   customSteerFlush?: Promise<void>;
@@ -900,6 +913,9 @@ export class ConversationActor {
   private readonly listeners = new Set<ConversationActorListener>();
   private readonly usedRunIds = new Set<string>();
   private readonly pendingAdmissions: PendingPromptAdmission[] = [];
+  private readonly browserPromptMessageIds = new WeakMap<object, { promptId: string; runId: string }>();
+  private attemptedPendingPromptId?: string;
+  private wrappedSessionManager?: SessionManager;
   private readonly pendingBashTaskNotifications: BashTaskCompletion[] = [];
   private readonly bashTaskNotificationDeliveries = new Set<BashTaskNotificationDelivery>();
   private readonly backgroundTasks: BashBackgroundTaskRegistry;
@@ -987,6 +1003,28 @@ export class ConversationActor {
           settlement,
         );
       });
+    this.installBrowserPromptDeliveryBoundary();
+  }
+
+  private installBrowserPromptDeliveryBoundary(): void {
+    const manager = this.sessionManager;
+    if (this.wrappedSessionManager === manager) return;
+    const appendMessage = manager.appendMessage;
+    manager.appendMessage = (message) => {
+      const receipt = this.browserPromptMessageIds.get(message);
+      if (receipt !== undefined) {
+        // The marker is a write-ahead receipt: only its immediate raw user
+        // child proves delivery after a crash between these two appends.
+        appendReservedCustomEntry(
+          manager,
+          createBrowserPromptDeliveryEntry(receipt),
+        );
+      }
+      const id = appendMessage.call(manager, message);
+      if (receipt !== undefined) this.browserPromptMessageIds.delete(message);
+      return id;
+    };
+    this.wrappedSessionManager = manager;
   }
 
   static async open(
@@ -1519,6 +1557,7 @@ export class ConversationActor {
             this.conversationId,
             { updateRecent: false },
           );
+          this.installBrowserPromptDeliveryBoundary();
         }
         const branch = this.sessionManager.getBranch();
         const branchReserved = aggregateReservedConversationEntries(branch);
@@ -2098,11 +2137,136 @@ export class ConversationActor {
     };
   }
 
-  /**
-   * Installs the unique run ticket and publishes run_queued synchronously.
-   * The returned promise resolves only with the exact durable settlement.
-   */
+  private browserPromptLedger() {
+    const branchIds = new Set(this.sessionManager.getBranch().map(({ id }) => id));
+    return inspectBrowserPromptLedger(this.sessionManager.getEntries().map(
+      (entry) => branchIds.has(entry.id) ? entry : null,
+    ));
+  }
+
+  /** A reconnect may repeat the same promptId without creating a second input. */
+  reconcileBrowserPrompt(input: {
+    promptId: string;
+    text: string;
+    images?: PromptImage[];
+  }): boolean {
+    this.assertUsable();
+    const ledger = this.browserPromptLedger();
+    const admission = ledger.admissions.find(({ promptId }) => promptId === input.promptId);
+    if (!admission) {
+      if (inspectBrowserPromptLedger(this.sessionManager.getEntries()).admissions.some(
+        ({ promptId }) => promptId === input.promptId
+      )) {
+        throw new Error(`Prompt was removed from the active branch: ${input.promptId}`);
+      }
+      return false;
+    }
+    const leftImages = admission.images ?? [];
+    const rightImages = input.images ?? [];
+    if (
+      admission.text !== input.text.trim()
+      || leftImages.length !== rightImages.length
+      || leftImages.some((image, index) =>
+        image.mimeType !== rightImages[index]?.mimeType
+        || image.data !== rightImages[index]?.data)
+    ) {
+      throw new Error(`Prompt ID was already admitted with different content: ${input.promptId}`);
+    }
+    const delivery = ledger.deliveries.find(({ promptId }) => promptId === input.promptId);
+    if (delivery) {
+      this.emit({
+        type: "prompt_delivered",
+        conversationId: this.conversationId,
+        promptId: input.promptId,
+        runId: delivery.runId,
+      });
+      return true;
+    }
+    const withdrawal = ledger.withdrawals.find(({ promptId }) => promptId === input.promptId);
+    if (withdrawal) {
+      this.emit({
+        type: "prompt_withdrawn",
+        conversationId: this.conversationId,
+        promptId: input.promptId,
+        runId: withdrawal.runId,
+        reason: "manual",
+      });
+      return true;
+    }
+    this.emit({
+      type: "prompt_admitted",
+      conversationId: this.conversationId,
+      promptId: input.promptId,
+      runId: admission.runId,
+      text: admission.text || "[图片]",
+    });
+    return true;
+  }
+
+  private acceptBrowserPrompt(input: BrowserPromptAdmission): PendingPromptAdmission {
+    const ledger = this.browserPromptLedger();
+    if (inspectBrowserPromptLedger(this.sessionManager.getEntries()).admissions.some(
+      ({ promptId }) => promptId === input.promptId
+    )) {
+      throw new Error(`Prompt was already admitted: ${input.promptId}`);
+    }
+    if (ledger.pending.length >= MAX_PENDING_ADMISSIONS) {
+      throw new Error(
+        `Too many pending messages (${MAX_PENDING_ADMISSIONS}); wait for the agent to catch up`,
+      );
+    }
+    const pendingBytes = ledger.pending.reduce(
+      (total, prompt) => total + Buffer.byteLength(JSON.stringify(prompt), "utf8"),
+      0,
+    );
+    if (
+      pendingBytes + Buffer.byteLength(JSON.stringify(input), "utf8")
+        > MAX_PENDING_ADMISSION_BYTES
+    ) {
+      throw new Error("Too much pending message data; wait for the agent to catch up");
+    }
+    appendReservedCustomEntry(
+      this.sessionManager,
+      createBrowserPromptAdmissionEntry(input),
+    );
+    return { promptId: input.promptId, text: input.text || "[图片]" };
+  }
+
+  /** Installs the unique run ticket after durable browser acceptance. */
   startPrompt(input: StartConversationPrompt): Promise<RunSettlement> {
+    return this.startPromptInternal(input, false);
+  }
+
+  /** Replays the oldest durable input only after inbox work has been admitted. */
+  startPendingBrowserPrompt(): Promise<RunSettlement> | undefined {
+    const pending = this.browserPromptLedger().pending[0];
+    if (pending === undefined || this.attemptedPendingPromptId === pending.promptId) {
+      return;
+    }
+    this.attemptedPendingPromptId = pending.promptId;
+    return this.startPromptInternal({
+      ...pending,
+      runId: randomUUID(),
+      origin: "browser",
+    }, true);
+  }
+
+  hasPendingBrowserPrompts(): boolean {
+    return this.browserPromptLedger().pending.length > 0;
+  }
+
+  private startPromptInternal(
+    input: StartConversationPrompt,
+    alreadyAccepted: boolean,
+  ): Promise<RunSettlement> {
+    this.assertUsable();
+    if (this.activeRun) throw new Error("Agent is already running");
+    if (this.usedRunIds.has(input.runId)) {
+      throw new Error("Run ID was already used in this conversation actor");
+    }
+    if (this.truncating) throw new Error("Conversation is being rewound");
+    if (this.switchingRole) throw new Error("Conversation role is being switched");
+    if (this.compacting) throw new Error("Conversation is compacting");
     const text = input.text.trim();
     const images = promptImagesForModel(this.session, input.images);
     if (!text && images === undefined) {
@@ -2112,6 +2276,19 @@ export class ConversationActor {
       throw new Error(
         "Extension slash commands are not supported until their detached Agent turns can be owned safely",
       );
+    }
+    if (input.promptId !== undefined && this.session.hasExtensionHandlers("input")) {
+      // A handler may return `handled` without a raw user append. Admitting
+      // before that preflight would acknowledge input that cannot be replayed.
+      throw new Error("Browser prompts are not supported while input extensions are registered");
+    }
+    if (input.promptId !== undefined && !alreadyAccepted) {
+      this.acceptBrowserPrompt({
+        promptId: input.promptId,
+        runId: input.runId,
+        text,
+        ...(input.images === undefined ? {} : { images: [...input.images] }),
+      });
     }
     const autoTitlePrompt = input.origin === "browser"
       && text
@@ -2126,6 +2303,7 @@ export class ConversationActor {
         recovered: false,
         promptText: input.origin === "browser" ? projectionText : undefined,
         expectsInitialPromptRawUserMessage: true,
+        ...(input.promptId === undefined ? {} : { initialBrowserPromptId: input.promptId }),
         ...(autoTitlePrompt === undefined ? {} : { autoTitlePrompt }),
       },
       async (ticket) => {
@@ -2154,119 +2332,71 @@ export class ConversationActor {
     );
   }
 
-  /**
-   * busy 时浏览器 prompt：消息进 SDK steering 队列（不建 run ticket）。
-   * steering 在当前 assistant turn 的工具调用全部结束后、下一次模型调用前注入，
-   * 用户消息因此能及时纠正 agent 方向（followUp 要等整个 run 结束才读取）。
-   * Pi 1 `preflightResult('queued')` 与 SDK native enqueue 前的精确 AgentMessage
-    * capture/observation 共同将消息关联到当前 run 后才 resolve；
-   * 轮到时若已 idle 则转 startPrompt。投递确认由 prompt_delivered 表达。
-   */
+  /** Accept first, then steer only when the exact current SDK loop can consume it. */
   async admitBrowserPrompt(input: {
     promptId: string;
     runId: string;
     text: string;
     images?: readonly PromptImage[];
-  }): Promise<RunSettlement | { outcome: "admitted" }> {
+  }, deferForInbox = false): Promise<RunSettlement | { outcome: "admitted" }> {
     this.assertUsable();
     const text = input.text.trim();
     const images = promptImagesForModel(this.session, input.images);
     if (!text && images === undefined) {
       throw new Error("Prompt text or an image is required");
     }
-    if (this.truncating) {
-      throw new Error("Conversation is being rewound");
-    }
-    if (this.switchingRole) {
-      throw new Error("Conversation role is being switched");
-    }
-    if (this.compacting) {
-      throw new Error("Conversation is compacting");
-    }
-    if (this.pendingAdmissions.some((a) => a.promptId === input.promptId)) {
-      throw new Error(`Prompt was already admitted: ${input.promptId}`);
-    }
-    if (this.pendingAdmissions.length >= MAX_PENDING_ADMISSIONS) {
-      throw new Error(
-        `Too many pending messages (${MAX_PENDING_ADMISSIONS}); wait for the agent to catch up`,
-      );
-    }
+    if (this.truncating) throw new Error("Conversation is being rewound");
+    if (this.switchingRole) throw new Error("Conversation role is being switched");
+    if (this.compacting) throw new Error("Conversation is compacting");
     if (text && this.isExtensionCommand(text)) {
       throw new Error(
         "Extension slash commands are not supported until their detached Agent turns can be owned safely",
       );
     }
-    const prompt = { ...input, text };
-    // 注意：不进入 operations 串行队列——run 进行中队列被 executeRun 占用，
-    // admit 必须在 run 进行中直接调用 SDK steer。
-    // 若检查时已 idle（当前 run 刚结束），转 startPrompt（其内部在串行队列执行）。
     const ticket = this.activeRun;
-    if (!ticket) {
-      return this.startPrompt({
-        runId: prompt.runId,
-        text: prompt.text,
-        images: prompt.images,
-        origin: "browser",
-      });
+    if (!ticket && !deferForInbox) {
+      return this.startPrompt({ ...input, text, origin: "browser" });
     }
-    if (
-      ticket.state.phase !== "running"
-      && ticket.state.phase !== "waiting"
-    ) {
-      // The SDK run is not live (queued) or is cancelling: a steering
-      // admission could escape into a second SDK run or survive queue cleanup.
-      // Fail closed; the browser keeps its draft because no prompt_admitted is
-      // emitted.
-      throw new Error("The agent run is not ready to accept a message");
+    if (ticket && text.startsWith("/")) {
+      throw new Error("Slash-prefixed messages cannot be queued while an Agent run is active");
     }
-    return this.admitSteerPrompt(ticket, prompt, images);
+    if (this.session.hasExtensionHandlers("input")) {
+      throw new Error("Browser messages are not supported while input extensions are registered");
+    }
+    // A deferred older input or prior durable inbox work must not be overtaken by SDK steering.
+    const olderPending = this.browserPromptLedger().pending;
+    const canSteer = !deferForInbox && ticket !== undefined && (
+      ticket.state.phase === "running"
+      || ticket.state.phase === "waiting"
+    ) && this.session.isStreaming
+      && this.session.agent.state.isStreaming
+      && olderPending.every(({ promptId }) =>
+        ticket.pendingGuidanceObservations.some((observation) =>
+          observation.admission?.promptId === promptId && observation.sdkQueued === true));
+    const admission = this.acceptBrowserPrompt({
+      promptId: input.promptId,
+      runId: ticket?.id ?? input.runId,
+      text,
+      ...(input.images === undefined ? {} : { images: [...input.images] }),
+    });
+    this.emit({
+      type: "prompt_admitted",
+      conversationId: this.conversationId,
+      promptId: admission.promptId,
+      runId: ticket?.id ?? input.runId,
+      text: admission.text,
+    });
+    if (!canSteer || ticket === undefined) return { outcome: "admitted" };
+    // executeRun owns the operations queue; live steering must stay outside it.
+    return this.admitSteerPrompt(ticket, admission, text, images);
   }
 
   private async admitSteerPrompt(
     ticket: RunTicket,
-    input: {
-      promptId: string;
-      runId: string;
-      text: string;
-      images?: readonly PromptImage[];
-    },
+    admission: PendingPromptAdmission,
+    text: string,
     images: ImageContent[] | undefined,
   ): Promise<{ outcome: "admitted" }> {
-    // Pi checks every slash-prefixed prompt for an extension command through
-    // an await before it can reach agent.steer. The identity capture below is
-    // intentionally synchronous, so reject this busy-only path before the SDK
-    // can enqueue an unobserved message after capture has ended.
-    if (input.text.startsWith("/")) {
-      throw new Error(
-        "Slash-prefixed messages cannot be queued while an Agent run is active",
-      );
-    }
-    // Fail closed BEFORE the SDK call:
-    // - pre-stream: the SDK run is not streaming yet — a steer-mode prompt
-    //   would start an unowned SDK run (and the later queue proof could not
-    //   undo it). The browser keeps its draft: no prompt_admitted.
-    // - post-loop settlement: AgentSession remains streaming after its low-level
-    //   Agent has ended, but a native steer can no longer reach that completed loop.
-    // - input extensions: the SDK can consume the prompt without queueing
-    //   (preflightResult('handled') without a queued AgentMessage). Extension commands are
-    //   already host-rejected before this point.
-    if (
-      !this.session.isStreaming
-      || !this.session.agent.state.isStreaming
-    ) {
-      throw new Error(
-        "The agent run is not streaming yet; cannot queue a message",
-      );
-    }
-    if (this.session.hasExtensionHandlers("input")) {
-      throw new Error(
-        "Busy browser messages are not supported while input extensions are registered",
-      );
-    }
-    const admission: PendingPromptAdmission = {
-      promptId: input.promptId,
-      text: input.text || "[图片]",
-    };
     this.pendingAdmissions.push(admission);
     let disposition: PromptDisposition | undefined;
     let observation: PendingGuidanceObservation | undefined;
@@ -2284,23 +2414,21 @@ export class ConversationActor {
           ) {
             throw new Error("The agent run stopped accepting messages before enqueue");
           }
-          observation = {
-            admission,
-            queuedMessage,
-            waited: false,
-          };
+          this.browserPromptMessageIds.set(queuedMessage, {
+            promptId: admission.promptId,
+            runId: ticket.id,
+          });
+          observation = { admission, queuedMessage, waited: false, sdkQueued: false };
           ticket.pendingGuidanceObservations.push(observation);
         },
         async () => {
-          await this.session.prompt(input.text, {
+          await this.session.prompt(text, {
             streamingBehavior: "steer",
             ...(images === undefined ? {} : { images }),
             preflightResult: (result) => {
               disposition = result;
               if (result !== "queued") {
-                throw new Error(
-                  `Prompt was ${result}, not queued for steering`,
-                );
+                throw new Error(`Prompt was ${result}, not queued for steering`);
               }
             },
           });
@@ -2318,35 +2446,25 @@ export class ConversationActor {
           && ticket.state.phase !== "waiting"
         )
       ) {
-        throw new Error(
-          "The agent run stopped accepting messages before admission completed",
-        );
+        throw new Error("The agent run stopped accepting messages before admission completed");
       }
+      if (observation !== undefined) observation.sdkQueued = true;
       this.onRunInputAccepted(ticket);
     } catch (error) {
-      // Abort may have won after core enqueue but before the admission ack.
-      // Only exact queue removal or a later raw end/settlement can retire its
-      // identity: a drained object can still deliver while Pi is cancelling.
+      // A stale capture or abort can race the enqueue. The durable record
+      // remains pending; only a later exact raw append can consume it.
       if (
         observation === undefined
-        || this.activeRun !== ticket
-        || ticket.state.phase !== "cancelling"
+        || this.created?.withdrawSteeringMessage(observation.queuedMessage)
       ) {
         if (observation !== undefined) {
           const index = ticket.pendingGuidanceObservations.indexOf(observation);
           if (index >= 0) ticket.pendingGuidanceObservations.splice(index, 1);
         }
-        this.removePendingAdmission(input.promptId);
+        this.removePendingAdmission(admission.promptId);
       }
-      throw error;
+      this.emitError(error, ticket.id);
     }
-    this.emit({
-      type: "prompt_admitted",
-      conversationId: this.conversationId,
-      promptId: input.promptId,
-      runId: ticket.id,
-      text: admission.text,
-    });
     return { outcome: "admitted" };
   }
 
@@ -2361,6 +2479,16 @@ export class ConversationActor {
     ) {
       throw new Error("The exact agent run is not accepting prompt withdrawals");
     }
+    if (!this.browserPromptLedger().pending.some(
+      (admission) => admission.promptId === promptId
+    )) {
+      throw new Error(`Prompt is not pending: ${promptId}`);
+    }
+    if (ticket.initialBrowserPromptId === promptId) {
+      // This raw user input is already driving the run, not a removable
+      // steering entry. A withdrawal here would race its durable append.
+      throw new Error(`Initial prompt cannot be withdrawn while its run is active: ${promptId}`);
+    }
     const admissionIndex = this.pendingAdmissions.findIndex(
       (admission) => admission.promptId === promptId,
     );
@@ -2369,14 +2497,21 @@ export class ConversationActor {
       (observation) => admission !== undefined && observation.admission === admission,
     );
     const observation = ticket.pendingGuidanceObservations[observationIndex];
-    if (admission === undefined || observation === undefined) {
-      throw new Error(`Prompt is not pending in this run: ${promptId}`);
+    if (admission !== undefined && observation === undefined) {
+      throw new Error(`Prompt has not reached the SDK steering queue: ${promptId}`);
     }
-    if (!this.requireCreated().withdrawSteeringMessage(observation.queuedMessage)) {
+    if (
+      observation !== undefined
+      && !this.requireCreated().withdrawSteeringMessage(observation.queuedMessage)
+    ) {
       throw new Error(`Prompt has already left the SDK steering queue: ${promptId}`);
     }
-    this.pendingAdmissions.splice(admissionIndex, 1);
-    ticket.pendingGuidanceObservations.splice(observationIndex, 1);
+    appendReservedCustomEntry(
+      this.sessionManager,
+      createBrowserPromptWithdrawalEntry({ promptId, runId: ticket.id }),
+    );
+    if (admissionIndex >= 0) this.pendingAdmissions.splice(admissionIndex, 1);
+    if (observationIndex >= 0) ticket.pendingGuidanceObservations.splice(observationIndex, 1);
     this.emit({
       type: "prompt_withdrawn",
       conversationId: this.conversationId,
@@ -2386,11 +2521,11 @@ export class ConversationActor {
     });
   }
 
-  /** 当前等待投递的浏览器 prompt（快照/恢复用）。 */
+  /** Current durable, undelivered browser inputs for the focused snapshot. */
   pendingPromptAdmissions(): readonly PendingPromptAdmission[] {
-    return this.pendingAdmissions.map(({ promptId, text }) => ({
+    return this.browserPromptLedger().pending.map(({ promptId, text }) => ({
       promptId,
-      text,
+      text: text || "[图片]",
     }));
   }
 
@@ -2515,6 +2650,7 @@ export class ConversationActor {
           steer: pendingGuidance,
           queuedMessage,
           waited: false,
+          sdkQueued: false,
         };
         ticket.pendingGuidanceObservations.push(observation);
       },
@@ -2540,6 +2676,7 @@ export class ConversationActor {
             "The agent run stopped accepting messages before admission completed",
           );
         }
+        if (observation !== undefined) observation.sdkQueued = true;
         this.onRunInputAccepted(ticket);
         return delivery.promise;
       },
@@ -2862,6 +2999,7 @@ export class ConversationActor {
       recovered: boolean;
       promptText?: string;
       expectsInitialPromptRawUserMessage: boolean;
+      initialBrowserPromptId?: string;
       autoTitlePrompt?: string;
       reloadContinuation?: ReloadContinuationInput;
     },
@@ -2918,6 +3056,9 @@ export class ConversationActor {
         : { reloadContinuation: { ...input.reloadContinuation } }),
       expectsInitialPromptRawUserMessage:
         input.expectsInitialPromptRawUserMessage,
+      ...(input.initialBrowserPromptId === undefined
+        ? {}
+        : { initialBrowserPromptId: input.initialBrowserPromptId }),
       ...(input.autoTitlePrompt === undefined
         ? {}
         : { autoTitlePrompt: input.autoTitlePrompt }),
@@ -3074,7 +3215,7 @@ export class ConversationActor {
   ): boolean {
     const ticket = this.requireOwnedRunningTicket(ownership);
     const record = ticket.pendingGuidanceObservations.find(
-      (candidate) => !candidate.waited,
+      (candidate) => candidate.sdkQueued && !candidate.waited,
     );
     if (!record) return false;
     record.waited = true;
@@ -3177,7 +3318,7 @@ export class ConversationActor {
       return;
     }
     const guidance = ticket.pendingGuidanceObservations.find(
-      (candidate) => !candidate.waited,
+      (candidate) => candidate.sdkQueued && !candidate.waited,
     );
     const bashTask = guidance === undefined
       ? ticket.acceptedBashTaskNotifications.find((candidate) => !candidate.waited)
@@ -3342,6 +3483,16 @@ export class ConversationActor {
             ),
             ticket.id,
           );
+          return;
+        }
+        if (this.browserPromptLedger().pending.some(
+          ({ promptId }) => promptId === admission.promptId
+        )) {
+          const error = new Error(
+            "Pi persisted the browser user message without its durable prompt delivery marker",
+          );
+          this.fatalError = error;
+          this.emitError(error, ticket.id, true);
           return;
         }
         this.emitImageMessagePersisted(rawMessage);
@@ -4125,26 +4276,9 @@ export class ConversationActor {
     ticket.state = { phase: "cancelling" };
     this.emitActivity();
     ticket.abortPromise = Promise.resolve().then(() => {
-      for (const observation of [...ticket.pendingGuidanceObservations]) {
-        const admission = observation.admission;
-        if (admission === undefined) continue;
-        const admissionIndex = this.pendingAdmissions.indexOf(admission);
-        if (admissionIndex < 0) continue;
-        if (!this.requireCreated().withdrawSteeringMessage(observation.queuedMessage)) continue;
-        this.pendingAdmissions.splice(admissionIndex, 1);
-        ticket.pendingGuidanceObservations.splice(
-          ticket.pendingGuidanceObservations.indexOf(observation), 1,
-        );
-        this.emit({
-          type: "prompt_withdrawn",
-          conversationId: this.conversationId,
-          promptId: admission.promptId,
-          runId: ticket.id,
-          reason: "abort",
-        });
-      }
-      // Bulk cleanup is not a cancellation receipt. Keep unproved browser and
-      // explicit guidance identities for raw message_end while Pi aborts.
+      // Stop cancels generation, not durable browser input. Any queued object
+      // removed by Pi remains in the ledger for the next inbox-ordered run;
+      // an already drained raw user still proves its own delivery exactly.
       this.session.clearQueue();
       ticket.acceptedCustomMessageObservations.splice(0);
       return this.session.abort();
@@ -4242,6 +4376,10 @@ export class ConversationActor {
       // A busy browser admission with the same text must never steal it.
       if (ticket.expectsInitialPromptRawUserMessage) {
         ticket.expectsInitialPromptRawUserMessage = false;
+        const promptId = ticket.initialBrowserPromptId;
+        if (promptId !== undefined) {
+          this.browserPromptMessageIds.set(rawMessage, { promptId, runId: ticket.id });
+        }
         queueMicrotask(() => {
           if (!rawMessageIsPersisted(
             this.sessionManager.getEntries(),
@@ -4254,6 +4392,24 @@ export class ConversationActor {
               ticket.id,
             );
             return;
+          }
+          if (promptId !== undefined) {
+            if (this.browserPromptLedger().pending.some(
+              (pending) => pending.promptId === promptId
+            )) {
+              const error = new Error(
+                "Pi persisted the initial browser user message without its durable prompt delivery marker",
+              );
+              this.fatalError = error;
+              this.emitError(error, ticket.id, true);
+              return;
+            }
+            this.emit({
+              type: "prompt_delivered",
+              conversationId: this.conversationId,
+              promptId,
+              runId: ticket.id,
+            });
           }
           this.emitImageMessagePersisted(rawMessage);
         });

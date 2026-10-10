@@ -1221,11 +1221,12 @@ function recoveryNeeded(inspection: PiSessionFileInspection): boolean {
   const settledRunIds = new Set(
     inspection.runSettlements.map(({ runId }) => runId),
   );
-  return inspection.metaOperations.some((operation) =>
-    operation.kind === "abort_session"
-    && operation.state === "started"
-    && operation.result.aborted
-  ) || inspection.messageDeliveryReceipts.some(
+  return inspection.pendingBrowserPrompts.length > 0
+    || inspection.metaOperations.some((operation) =>
+      operation.kind === "abort_session"
+      && operation.state === "started"
+      && operation.result.aborted
+    ) || inspection.messageDeliveryReceipts.some(
     ({ targetRunId }) => !settledRunIds.has(targetRunId),
   ) || inspection.cards.some((card) =>
     card.state === "sending"

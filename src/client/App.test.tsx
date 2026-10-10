@@ -12,7 +12,6 @@ import {
 } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
-  MAX_MESSAGE_BYTES,
   PROTOCOL_VERSION,
   type ClientCommand,
   type ConversationHistoryItem,
@@ -7717,7 +7716,7 @@ describe("App", () => {
     )).toHaveLength(0);
   });
 
-  it("restores an unacknowledged prompt after reconnect without resending it", () => {
+  it("reconciles an unacknowledged prompt only after the matching snapshot with the same ID", () => {
     render(<App />);
     const sessionId = startFromSetup();
     act(() => socketMock.emit?.({
@@ -7737,7 +7736,8 @@ describe("App", () => {
     const input = screen.getByRole("textbox", { name: "给 Pi 发送消息" });
     fireEvent.change(input, { target: { value: "uncertain prompt" } });
     fireEvent.click(screen.getByRole("button", { name: "发送" }));
-    expect(latestCommand("prompt").sessionId).toBe(sessionId);
+    const original = latestCommand("prompt");
+    expect(original.sessionId).toBe(sessionId);
 
     socketMock.autoFocus = false;
     act(() => socketMock.status?.(false));
@@ -7781,23 +7781,246 @@ describe("App", () => {
           providers: [],
         },
       });
-      socketMock.rawEmit?.({
-        type: "conversation_snapshot",
-        sessionId: reconnect.sessionId,
-        conversationId: CONVERSATION_ID,
-        focusId: reconnectFocusId,
-        items: [],
-        window: completeConversationWindow,
-      });
     });
-
-    expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" }))
-      .toHaveValue("uncertain prompt");
-    expect(screen.getByRole("alert")).toHaveTextContent("发送状态未确认");
     expect(socketMock.send.mock.calls.filter(
       ([command]) => command.type === "prompt",
     )).toHaveLength(1);
+    act(() => socketMock.rawEmit?.({
+      type: "conversation_snapshot",
+      sessionId: reconnect.sessionId,
+      conversationId: CONVERSATION_ID,
+      focusId: FOCUS_A,
+      items: [],
+      window: completeConversationWindow,
+    }));
+    expect(socketMock.send.mock.calls.filter(
+      ([command]) => command.type === "prompt",
+    )).toHaveLength(1);
+    act(() => socketMock.rawEmit?.({
+      type: "conversation_snapshot",
+      sessionId: reconnect.sessionId,
+      conversationId: CONVERSATION_ID,
+      focusId: reconnectFocusId,
+      items: [],
+      window: completeConversationWindow,
+    }));
+
+    const retry = latestCommand("prompt");
+    expect(retry).toMatchObject({
+      sessionId: reconnect.sessionId,
+      conversationId: CONVERSATION_ID,
+      focusId: reconnectFocusId,
+      promptId: original.promptId,
+      text: original.text,
+    });
+    expect(retry.runId).not.toBe(original.runId);
+    expect(socketMock.send.mock.calls.filter(
+      ([command]) => command.type === "prompt",
+    )).toHaveLength(2);
+    act(() => socketMock.rawEmit?.({
+      type: "conversation_snapshot",
+      sessionId: reconnect.sessionId,
+      conversationId: CONVERSATION_ID,
+      focusId: reconnectFocusId,
+      items: [],
+      window: completeConversationWindow,
+    }));
+    expect(socketMock.send.mock.calls.filter(
+      ([command]) => command.type === "prompt",
+    )).toHaveLength(2);
+    expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" }))
+      .toHaveValue("uncertain prompt");
+    expect(screen.getByRole("status")).toHaveTextContent("正在确认服务端已接收");
+    expect(screen.queryByText(/核对历史/)).not.toBeInTheDocument();
+
+    act(() => socketMock.rawEmit?.({
+      type: "prompt_delivered",
+      sessionId: retry.sessionId,
+      conversationId: CONVERSATION_ID,
+      focusId: reconnectFocusId,
+      promptId: retry.promptId!,
+      runId: original.runId,
+    }));
+    expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" })).toHaveValue("");
+    act(() => socketMock.rawEmit?.({
+      type: "prompt_delivered",
+      sessionId: retry.sessionId,
+      conversationId: CONVERSATION_ID,
+      focusId: reconnectFocusId,
+      promptId: retry.promptId!,
+      runId: original.runId,
+    }));
+    expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" })).toHaveValue("");
+    expect(screen.queryByRole("status", { name: /正在确认服务端已接收/ }))
+      .not.toBeInTheDocument();
   });
+
+  it.each(["before", "after"])(
+    "does not reconcile a draft edited %s its submission became uncertain",
+    (when) => {
+      render(<App />);
+      const sessionId = startFromSetup();
+      act(() => socketMock.emit?.({
+        type: "state", state: {
+          sessionId, cwd: "E:\\work", busy: false,
+          thinkingLevel: "off", toolMode: "full_access",
+          availableThinkingLevels: ["off"],
+          selectedModel: { provider: "provider", id: "model" }, providers: [],
+        },
+      }));
+      const input = screen.getByRole("textbox", { name: "给 Pi 发送消息" });
+      fireEvent.change(input, { target: { value: "submitted before edit" } });
+      fireEvent.click(screen.getByRole("button", { name: "发送" }));
+      const original = latestCommand("prompt");
+      if (when === "before") {
+        fireEvent.change(input, { target: { value: "edited after unknown outcome" } });
+      }
+      act(() => socketMock.rawEmit?.({
+        type: "error", scope: "command", operation: "prompt",
+        sessionId, conversationId: CONVERSATION_ID, focusId: FOCUS_A,
+        runId: original.runId, message: "admission uncertain",
+      }));
+      if (when === "after") {
+        fireEvent.change(input, { target: { value: "edited after unknown outcome" } });
+      }
+      act(() => socketMock.rawEmit?.({
+        type: "conversation_snapshot", sessionId,
+        conversationId: CONVERSATION_ID, focusId: FOCUS_A,
+        items: [], window: completeConversationWindow,
+      }));
+      expect(input).toHaveValue("edited after unknown outcome");
+      expect(screen.getByText(/发送状态未确认；草稿已修改，未自动重试/))
+        .toBeInTheDocument();
+      expect(socketMock.send.mock.calls.filter(([command]) => command.type === "prompt"))
+        .toHaveLength(1);
+      act(() => socketMock.rawEmit?.({
+        type: "prompt_withdrawn", sessionId, conversationId: CONVERSATION_ID,
+        focusId: FOCUS_A, promptId: original.promptId!, runId: original.runId,
+        reason: "manual",
+      }));
+      expect(input).toHaveValue("edited after unknown outcome");
+      expect(screen.queryByText(/发送状态未确认|消息提交结果未确认/))
+        .not.toBeInTheDocument();
+    },
+  );
+
+  it("retains an unknown draft after a failed reconciliation send and reuses its ID", () => {
+    render(<App />);
+    const sessionId = startFromSetup();
+    act(() => socketMock.emit?.({
+      type: "state", state: {
+        sessionId, cwd: "E:\\work", busy: false,
+        thinkingLevel: "off", toolMode: "full_access",
+        availableThinkingLevels: ["off"],
+        selectedModel: { provider: "provider", id: "model" }, providers: [],
+      },
+    }));
+    const input = screen.getByRole("textbox", { name: "给 Pi 发送消息" });
+    fireEvent.change(input, { target: { value: "original survives failed retry" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    const original = latestCommand("prompt");
+    act(() => socketMock.rawEmit?.({
+      type: "error", scope: "command", operation: "prompt",
+      sessionId, conversationId: CONVERSATION_ID, focusId: FOCUS_A,
+      runId: original.runId, message: "admission uncertain",
+    }));
+    socketMock.send.mockReturnValueOnce(false);
+    act(() => socketMock.rawEmit?.({
+      type: "conversation_snapshot", sessionId,
+      conversationId: CONVERSATION_ID, focusId: FOCUS_A,
+      items: [], window: completeConversationWindow,
+    }));
+    expect(latestCommand("prompt").promptId).toBe(original.promptId);
+    expect(input).toHaveValue("original survives failed retry");
+    expect(screen.getByText(/消息提交结果仍未确认，草稿已保留/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    const manualRetry = latestCommand("prompt");
+    expect(manualRetry.promptId).toBe(original.promptId);
+    expect(manualRetry.runId).not.toBe(original.runId);
+    expect(socketMock.send.mock.calls.filter(([command]) => command.type === "prompt"))
+      .toHaveLength(3);
+  });
+
+  it("keeps a newly edited draft when a retried prompt receives run_queued", () => {
+    render(<App />);
+    const sessionId = startFromSetup();
+    act(() => socketMock.emit?.({
+      type: "state", state: {
+        sessionId, cwd: "E:\\work", busy: false,
+        thinkingLevel: "off", toolMode: "full_access",
+        availableThinkingLevels: ["off"],
+        selectedModel: { provider: "provider", id: "model" }, providers: [],
+      },
+    }));
+    const input = screen.getByRole("textbox", { name: "给 Pi 发送消息" });
+    fireEvent.change(input, { target: { value: "original pending text" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    const original = latestCommand("prompt");
+    act(() => socketMock.rawEmit?.({
+      type: "error", scope: "command", operation: "prompt",
+      sessionId, conversationId: CONVERSATION_ID, focusId: FOCUS_A,
+      runId: original.runId, message: "admission uncertain",
+    }));
+    act(() => socketMock.rawEmit?.({
+      type: "conversation_snapshot", sessionId,
+      conversationId: CONVERSATION_ID, focusId: FOCUS_A,
+      items: [], window: completeConversationWindow,
+    }));
+    const retry = latestCommand("prompt");
+    fireEvent.change(input, { target: { value: "new user-authored draft" } });
+    act(() => socketMock.rawEmit?.({
+      type: "session_event", sessionId, conversationId: CONVERSATION_ID,
+      focusId: FOCUS_A, runId: retry.runId,
+      event: { type: "run_queued" },
+    }));
+    expect(input).toHaveValue("new user-authored draft");
+    expect(screen.queryByText(/发送状态未确认|消息提交结果未确认/)).not.toBeInTheDocument();
+    expect(screen.getByText("original pending text", { selector: "article" })).toBeInTheDocument();
+  });
+
+  it.each(["unchanged", "edited"])(
+    "settles a withdrawn unknown prompt without overwriting an %s draft",
+    (draftKind) => {
+      render(<App />);
+      const sessionId = startFromSetup();
+      act(() => socketMock.emit?.({
+        type: "state", state: {
+          sessionId, cwd: "E:\\work", busy: false,
+          thinkingLevel: "off", toolMode: "full_access",
+          availableThinkingLevels: ["off"],
+          selectedModel: { provider: "provider", id: "model" }, providers: [],
+        },
+      }));
+      const input = screen.getByRole("textbox", { name: "给 Pi 发送消息" });
+      fireEvent.change(input, { target: { value: "unknown original" } });
+      fireEvent.click(screen.getByRole("button", { name: "发送" }));
+      const original = latestCommand("prompt");
+      act(() => socketMock.rawEmit?.({
+        type: "error", scope: "command", operation: "prompt",
+        sessionId, conversationId: CONVERSATION_ID, focusId: FOCUS_A,
+        runId: original.runId, message: "admission uncertain",
+      }));
+      act(() => socketMock.rawEmit?.({
+        type: "conversation_snapshot", sessionId,
+        conversationId: CONVERSATION_ID, focusId: FOCUS_A,
+        items: [], window: completeConversationWindow,
+      }));
+      expect(latestCommand("prompt").promptId).toBe(original.promptId);
+      if (draftKind === "edited") {
+        fireEvent.change(input, { target: { value: "new user-authored draft" } });
+      }
+      act(() => socketMock.rawEmit?.({
+        type: "prompt_withdrawn", sessionId, conversationId: CONVERSATION_ID,
+        focusId: FOCUS_A, promptId: original.promptId!, runId: original.runId,
+        reason: "manual",
+      }));
+      expect(input).toHaveValue(draftKind === "edited" ? "new user-authored draft" : "unknown original");
+      expect(screen.queryByText(/发送状态未确认|消息提交结果未确认/)).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "发送" })).toBeEnabled();
+      expect(socketMock.send.mock.calls.filter(([command]) => command.type === "prompt"))
+        .toHaveLength(2);
+    },
+  );
 
   it("isolates and restores an ordinary text-and-image draft across workspace A-B-A", async () => {
     const firstProjectId = "f25ee8d8-34f0-4c30-a045-000000000201";
@@ -8031,13 +8254,13 @@ describe("App", () => {
 
     const restored = screen.getByRole("textbox", { name: "给 Pi 发送消息" });
     expect(restored).toHaveValue("pending across projects");
-    expect(screen.getByRole("alert")).toHaveTextContent("发送状态未确认");
+    expect(screen.getByRole("status")).toHaveTextContent("正在确认服务端已接收");
     expect(socketMock.send.mock.calls.filter(
       ([command]) => command.type === "prompt",
-    )).toHaveLength(1);
+    )).toHaveLength(2);
 
     fireEvent.change(restored, { target: { value: "edited after unknown outcome" } });
-    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("草稿已修改，未自动重试");
 
     fireEvent.click(screen.getByRole("button", { name: "打开工作区 second" }));
     const editedSecondSessionId = latestCommand("initialize").sessionId;
@@ -8072,10 +8295,10 @@ describe("App", () => {
 
     expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" }))
       .toHaveValue("edited after unknown outcome");
-    expect(screen.getByRole("alert")).toHaveTextContent("发送状态未确认");
+    expect(screen.getByRole("alert")).toHaveTextContent("草稿已修改，未自动重试");
     expect(socketMock.send.mock.calls.filter(
       ([command]) => command.type === "prompt",
-    )).toHaveLength(1);
+    )).toHaveLength(2);
   });
 
 
@@ -9385,6 +9608,65 @@ describe("App", () => {
     expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" })).toHaveValue("hello");
     expect(screen.getByText(/消息提交结果未确认/)).toBeInTheDocument();
     expect(screen.queryByText("hello", { selector: "article" })).not.toBeInTheDocument();
+  });
+
+  it("keeps an unconfirmed draft and its warning in the original conversation after a prompt error", () => {
+    const sessionId = startFocusReplacementProject();
+    fireEvent.change(screen.getByRole("textbox", { name: "给 Pi 发送消息" }), {
+      target: { value: "unconfirmed A draft" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    const prompt = latestCommand("prompt");
+    act(() => socketMock.rawEmit?.({
+      type: "error", scope: "command", operation: "prompt", sessionId,
+      conversationId: CONVERSATION_ID, focusId: FOCUS_A,
+      runId: prompt.runId, message: "admission uncertain",
+    }));
+    expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" }))
+      .toHaveValue("unconfirmed A draft");
+    expect(screen.getByText(/消息提交结果未确认/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "打开会话 B" }));
+    const focusB = latestCommand("focus_conversation");
+    act(() => {
+      socketMock.rawEmit?.({ type: "focus_attached", operation: "focus_conversation",
+        commandId: focusB.commandId, sessionId, projectId: PROJECT_ID,
+        conversationId: CONVERSATION_B, focusId: FOCUS_A_SECOND });
+      socketMock.rawEmit?.({ type: "state", state: {
+        sessionId, projectId: PROJECT_ID, conversationId: CONVERSATION_B,
+        focusId: FOCUS_A_SECOND, cwd: "E:\\work", busy: false,
+        thinkingLevel: "off", toolMode: "read_only", availableThinkingLevels: ["off"],
+        selectedModel: { provider: "provider", id: "model" }, providers: [],
+      } });
+      socketMock.rawEmit?.({ type: "conversation_snapshot", sessionId,
+        conversationId: CONVERSATION_B, focusId: FOCUS_A_SECOND,
+        items: [], window: completeConversationWindow });
+    });
+    expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" })).toHaveValue("");
+    fireEvent.click(screen.getByRole("button", { name: "打开会话 A" }));
+    const focusA = latestCommand("focus_conversation");
+    const returnedFocusId = "ae301850-745d-44dd-a30f-000000000107";
+    act(() => {
+      socketMock.rawEmit?.({ type: "focus_attached", operation: "focus_conversation",
+        commandId: focusA.commandId, sessionId, projectId: PROJECT_ID,
+        conversationId: CONVERSATION_ID, focusId: returnedFocusId });
+      socketMock.rawEmit?.({ type: "state", state: {
+        sessionId, projectId: PROJECT_ID, conversationId: CONVERSATION_ID,
+        focusId: returnedFocusId, cwd: "E:\\work", busy: false,
+        thinkingLevel: "off", toolMode: "read_only", availableThinkingLevels: ["off"],
+        selectedModel: { provider: "provider", id: "model" }, providers: [],
+      } });
+      socketMock.rawEmit?.({ type: "conversation_snapshot", sessionId,
+        conversationId: CONVERSATION_ID, focusId: returnedFocusId,
+        items: [], window: completeConversationWindow });
+    });
+    expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" }))
+      .toHaveValue("unconfirmed A draft");
+    const retry = latestCommand("prompt");
+    expect(retry.promptId).toBe(prompt.promptId);
+    expect(retry.runId).not.toBe(prompt.runId);
+    expect(retry.focusId).toBe(returnedFocusId);
+    expect(socketMock.send.mock.calls.filter(([command]) => command.type === "prompt")).toHaveLength(2);
   });
 
   it("invalidates an active session when a reconnect negotiates another protocol", () => {
@@ -11023,9 +11305,8 @@ describe("App", () => {
       type: "session_event", sessionId, conversationId: CONVERSATION_ID,
       focusId: FOCUS_A, runId: RUN_ID, event: { type: "run_finished", outcome: "aborted" },
     }));
-    expect(screen.queryByRole("region", { name: "等待处理的消息" }))
-      .not.toBeInTheDocument();
-    expect(openRecoveryInputs()).toHaveTextContent("需核对");
+    expect(screen.getByRole("region", { name: "等待处理的消息" }))
+      .toHaveTextContent("busy follow-up");
   });
 
   it.each(["admission", "send failure"])(
@@ -11136,9 +11417,10 @@ describe("App", () => {
     });
     expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" }))
       .toHaveValue("");
-    expect(screen.queryByRole("region", { name: "等待处理的消息" }))
-      .not.toBeInTheDocument();
-    expect(openRecoveryInputs()).toHaveTextContent("需核对");
+    expect(screen.getByRole("region", { name: "等待处理的消息" }))
+      .toHaveTextContent("stale admitted row");
+    expect(screen.getByRole("region", { name: "等待处理的消息" }))
+      .toHaveTextContent("pending after stale admit");
   });
 
   it("admits a busy prompt with promptId and shows it as waiting until delivered", () => {
@@ -11262,7 +11544,7 @@ describe("App", () => {
       .not.toBeInTheDocument();
   });
 
-  it("clears waiting prompts when the run is aborted without inventing original inputs", () => {
+  it("keeps waiting prompts after Stop until an exact receipt or authoritative snapshot", () => {
     render(<App />);
     const sessionId = startFromSetup();
     act(() => {
@@ -11294,6 +11576,11 @@ describe("App", () => {
     });
     expect(screen.getByRole("region", { name: "等待处理的消息" }))
       .toHaveTextContent("still waiting");
+    act(() => socketMock.emit?.({
+      type: "prompt_admitted", sessionId, conversationId: CONVERSATION_ID,
+      focusId: FOCUS_A, promptId: "3c5b3e7a-1f2a-4b6e-8d0c-9a1b2c3d4e5f",
+      runId: RUN_ID, text: "still waiting",
+    }));
 
     act(() => socketMock.emit?.({
       type: "session_event",
@@ -11304,8 +11591,14 @@ describe("App", () => {
       event: { type: "run_finished", outcome: "aborted" },
     }));
 
+    expect(screen.getByRole("region", { name: "等待处理的消息" }))
+      .toHaveTextContent("still waiting");
+    act(() => socketMock.rawEmit?.({
+      type: "prompt_delivered", sessionId, conversationId: CONVERSATION_ID,
+      focusId: FOCUS_A, promptId: "3c5b3e7a-1f2a-4b6e-8d0c-9a1b2c3d4e5f",
+      runId: "f71c2681-dc0a-48bc-9408-97b6fa43461e",
+    }));
     expect(screen.queryByRole("region", { name: "等待处理的消息" })).not.toBeInTheDocument();
-    expect(document.querySelector(".retained-inputs")).toBeNull();
   });
 });
 
@@ -11354,7 +11647,7 @@ describe("pending prompt withdrawal", () => {
       promptId: command.promptId, runId: command.runId });
   }
 
-  it.each(["broadcast", "complete"])("removes only the admitted ID after exact %s, not transport acceptance", (receipt) => {
+  it.each(["broadcast", "complete"])("keeps admission until an exact prompt receipt after %s", (receipt) => {
     const sessionId = start();
     const command = withdrawMiddle();
     expect(command).toEqual({ type: "withdraw_prompt", sessionId,
@@ -11366,9 +11659,10 @@ describe("pending prompt withdrawal", () => {
     expect(screen.getByRole("button", { name: "发送" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "停止" })).toBeEnabled();
     act(() => receipt === "broadcast" ? withdrawn(command) : complete(command));
-    expect(screen.getAllByText("identical waiting text")).toHaveLength(2);
+    expect(screen.getAllByText("identical waiting text"))
+      .toHaveLength(receipt === "broadcast" ? 2 : 3);
     expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" })).toHaveValue("keep current draft");
-    fireEvent.click(screen.getAllByRole("button", { name: "撤回" })[1]!);
+    fireEvent.click(screen.getAllByRole("button", { name: "撤回" }).at(-1)!);
     expect(latestCommand("withdraw_prompt").promptId).toBe(promptIds[2]);
   });
 
@@ -11396,7 +11690,8 @@ describe("pending prompt withdrawal", () => {
       return true;
     });
     withdrawMiddle();
-    expect(screen.getAllByText("identical waiting text")).toHaveLength(2);
+    expect(screen.getAllByText("identical waiting text"))
+      .toHaveLength(receipt === "broadcast" ? 2 : 3);
     expect(screen.queryByRole("button", { name: "撤回中…" })).not.toBeInTheDocument();
     for (const button of screen.getAllByRole("button", { name: "撤回" })) expect(button).toBeEnabled();
   });
@@ -11419,6 +11714,8 @@ describe("pending prompt withdrawal", () => {
     expect(screen.getByRole("button", { name: "撤回中…" })).toBeDisabled();
     expect(screen.getAllByText("identical waiting text")).toHaveLength(2);
     act(() => complete(second));
+    expect(screen.getAllByText("identical waiting text")).toHaveLength(2);
+    act(() => withdrawn(second));
     expect(screen.getAllByText("identical waiting text")).toHaveLength(1);
   });
 
@@ -11489,6 +11786,8 @@ describe("pending prompt withdrawal", () => {
     expect(screen.getAllByText("identical waiting text")).toHaveLength(3);
     expect(screen.getByRole("button", { name: "撤回中…" })).toBeDisabled();
     act(() => complete(second));
+    expect(screen.getAllByText("identical waiting text")).toHaveLength(3);
+    act(() => withdrawn(second));
     expect(screen.getAllByText("identical waiting text")).toHaveLength(2);
   });
 
@@ -11502,467 +11801,28 @@ describe("pending prompt withdrawal", () => {
     expect(screen.queryByRole("button", { name: "撤回中…" })).not.toBeInTheDocument();
     act(() => socketMock.emit?.({ type: "session_event", sessionId, runId: RUN_ID,
       event: { type: "run_finished", outcome: "aborted" } }));
-    expect(screen.queryByRole("region", { name: "等待处理的消息" })).not.toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "等待处理的消息" }))
+      .toHaveTextContent("identical waiting text");
   });
-});
 
-function openRecoveryInputs() {
-  const summary = screen.queryByText(/^恢复输入 · \d+ 条$/);
-  if (summary && !summary.closest("details")?.open) fireEvent.click(summary);
-  return screen.getByRole("region", { name: "恢复输入" });
-}
-
-describe("Stop input recovery", () => {
-  type Prompt = Extract<ClientCommand, { type: "prompt" }> & { promptId: string };
-  function start() {
-    const sessionId = startFocusReplacementProject();
-    socketMock.autoFocus = true;
-    act(() => socketMock.emit?.({ type: "state", state: {
-      sessionId, cwd: "E:\\work", busy: true, activeRun: { id: RUN_ID, phase: "running" },
-      thinkingLevel: "off", toolMode: "full_access", availableThinkingLevels: ["off"],
-      selectedModel: { provider: "provider", id: "model" }, providers: [],
-    } }));
-    return sessionId;
-  }
-  function sendInput(text: string): Prompt {
-    fireEvent.change(screen.getByRole("textbox", { name: "给 Pi 发送消息" }), { target: { value: text } });
+  it("keeps the draft when a prompt is withdrawn before admission", () => {
+    const sessionId = start();
     fireEvent.click(screen.getByRole("button", { name: "发送" }));
     const prompt = latestCommand("prompt");
-    if (!prompt.promptId) throw new Error("promptId missing");
-    return { ...prompt, promptId: prompt.promptId };
-  }
-  function admit(prompt: Prompt, text = prompt.text) {
-    socketMock.rawEmit?.({ type: "prompt_admitted", sessionId: prompt.sessionId,
-      conversationId: prompt.conversationId, focusId: prompt.focusId,
-      runId: RUN_ID, promptId: prompt.promptId, text });
-  }
-  function withdrawn(prompt: Prompt, reason: "manual" | "abort" = "abort") {
-    socketMock.rawEmit?.({ type: "prompt_withdrawn", sessionId: prompt.sessionId,
-      conversationId: prompt.conversationId, focusId: prompt.focusId,
-      runId: RUN_ID, promptId: prompt.promptId, reason });
-  }
-  function delivered(prompt: Prompt, overrides: Partial<Extract<ServerEvent, { type: "prompt_delivered" }>> = {}) {
-    socketMock.rawEmit?.({ type: "prompt_delivered", sessionId: prompt.sessionId,
-      conversationId: prompt.conversationId, focusId: prompt.focusId,
-      runId: RUN_ID, promptId: prompt.promptId, ...overrides });
-  }
-  function rejected(prompt: Prompt) {
-    socketMock.rawEmit?.({ type: "error", scope: "command", operation: "prompt",
-      sessionId: prompt.sessionId, conversationId: prompt.conversationId,
-      focusId: prompt.focusId, runId: prompt.runId, message: "run became cancelling" });
-  }
-  function promptCount() {
-    return socketMock.send.mock.calls.filter(([command]) => command.type === "prompt").length;
-  }
-  const input = () => screen.getByRole("textbox", { name: "给 Pi 发送消息" });
-  const panel = openRecoveryInputs;
-
-  it("hides internal reservations and admitted originals while keeping Stop recovery intact", () => {
-    start();
-    const prompt = sendInput("normal busy input");
-    expect(document.querySelector(".retained-inputs")).toBeNull();
-    act(() => admit(prompt));
-    const waiting = screen.getByRole("region", { name: "等待处理的消息" });
-    expect(waiting).toHaveTextContent("normal busy input");
-    expect(within(waiting).getByRole("button", { name: "撤回" })).toBeEnabled();
-    expect(document.querySelector(".retained-inputs")).toBeNull();
-    expect(promptCount()).toBe(1);
-    act(() => withdrawn(prompt));
-    expect(screen.queryByRole("region", { name: "等待处理的消息" })).not.toBeInTheDocument();
-    const summary = screen.getByText("恢复输入 · 1 条");
-    expect(summary.closest("details")).not.toHaveAttribute("open");
-    expect(panel()).toHaveTextContent("normal busy input");
-    expect(panel()).toHaveTextContent("已停止");
-    fireEvent.click(within(panel()).getByRole("button", { name: "恢复到输入框" }));
-    expect(input()).toHaveValue("normal busy input");
-    expect(document.querySelector(".retained-inputs")).toBeNull();
-    expect(promptCount()).toBe(1);
-  });
-
-  it("recovers the immutable original text/images rather than the admitted display text, only into a strictly empty draft", async () => {
-    start();
-    await pasteDraftImage();
-    const prompt = sendInput("  original wire text  ");
-    act(() => admit(prompt, "input-hook replaced display text"));
-    expect(input()).toHaveValue("");
-    expect(screen.queryByRole("img", { name: "待发送图片 1" })).not.toBeInTheDocument();
-    expect(screen.getByRole("region", { name: "等待处理的消息" })).toHaveTextContent("input-hook replaced display text");
-    fireEvent.change(input(), { target: { value: "new draft" } });
-    act(() => { withdrawn(prompt); withdrawn(prompt); });
-    expect(input()).toHaveValue("new draft");
-    expect(within(panel()).getAllByRole("button", { name: "恢复到输入框" })).toHaveLength(1);
-    expect(within(panel()).getByRole("button", { name: "恢复到输入框" })).toBeDisabled();
-    expect(screen.queryByRole("region", { name: "等待处理的消息" })).not.toBeInTheDocument();
-    fireEvent.change(input(), { target: { value: " " } });
-    expect(within(panel()).getByRole("button", { name: "恢复到输入框" })).toBeDisabled();
-    fireEvent.change(input(), { target: { value: "" } });
-    await pasteDraftImage("new-draft.png");
-    expect(within(panel()).getByRole("button", { name: "恢复到输入框" })).toBeDisabled();
-    fireEvent.click(screen.getByRole("button", { name: "移除图片 1" }));
-    const sendsBefore = promptCount();
-    fireEvent.click(within(panel()).getByRole("button", { name: "恢复到输入框" }));
-    expect(input()).toHaveValue(prompt.text);
-    expect(screen.getByRole("img", { name: "待发送图片 1" })).toHaveAttribute("src",
-      `data:${prompt.images![0]!.mimeType};base64,${prompt.images![0]!.data}`);
-    expect(document.querySelector(".retained-inputs")).toBeNull();
-    expect(promptCount()).toBe(sendsBefore);
-  });
-
-  it.each([false, true])("settles pre-ack abort proof without overwriting a newer draft (new draft: %s), ignores late admission/error", (newDraft) => {
-    start();
-    const prompt = sendInput("original before ack");
-    if (newDraft) fireEvent.change(input(), { target: { value: "newer text" } });
-    act(() => { withdrawn(prompt); withdrawn(prompt); admit(prompt, "too late"); rejected(prompt); });
-    expect(input()).toHaveValue(newDraft ? "newer text" : "");
-    expect(within(panel()).getAllByRole("button", { name: "恢复到输入框" })).toHaveLength(1);
-    expect(panel()).toHaveTextContent("已停止");
-    expect(panel()).not.toHaveTextContent("too late");
-    expect(screen.queryByRole("region", { name: "等待处理的消息" })).not.toBeInTheDocument();
-    expect(screen.queryByText(/run became cancelling/)).not.toBeInTheDocument();
-    if (newDraft) fireEvent.change(input(), { target: { value: "" } });
-    expect(screen.getByRole("button", { name: "发送" })).toBeDisabled();
-    fireEvent.click(within(panel()).getByRole("button", { name: "恢复到输入框" }));
-    expect(input()).toHaveValue("original before ack");
-    expect(promptCount()).toBe(1);
-  });
-
-  it.each(["transport false", "initial run_queued"])("releases a reservation only on %s, without automatic retry", (receipt) => {
-    const sessionId = startFocusReplacementProject();
-    if (receipt === "transport false") socketMock.send.mockReturnValueOnce(false);
-    const prompt = sendInput("initial original");
-    if (receipt === "initial run_queued") act(() => socketMock.rawEmit?.({
-      type: "session_event", sessionId, conversationId: prompt.conversationId,
-      focusId: prompt.focusId, runId: prompt.runId, event: { type: "run_queued" },
-    }));
-    expect(document.querySelector(".retained-inputs")).toBeNull();
-    expect(input()).toHaveValue(receipt === "transport false" ? "initial original" : "");
-    expect(promptCount()).toBe(1);
-  });
-
-  it("keeps a post-enqueue error unknown, preserves the newer draft, then releases the original only on late delivery", () => {
-    start();
-    const prompt = sendInput("pre-ack drained original");
-    fireEvent.change(input(), { target: { value: "new draft after send" } });
-    act(() => rejected(prompt));
-    expect(input()).toHaveValue("new draft after send");
-    expect(panel()).toHaveTextContent("需核对");
-    expect(panel()).toHaveTextContent("可能已投递，请先查看对话");
-    expect(screen.getByText(/^消息提交结果未确认：/)).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" })).toHaveValue("keep current draft");
+    act(() => {
+      socketMock.rawEmit?.({ type: "prompt_withdrawn", sessionId,
+        conversationId: prompt.conversationId, focusId: prompt.focusId,
+        runId: RUN_ID, promptId: prompt.promptId, reason: "abort" });
+      socketMock.rawEmit?.({ type: "prompt_admitted", sessionId,
+        conversationId: prompt.conversationId, focusId: prompt.focusId,
+        runId: RUN_ID, promptId: prompt.promptId, text: prompt.text });
+    });
+    expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" })).toHaveValue("keep current draft");
+    expect(screen.getByRole("region", { name: "等待处理的消息" }))
+      .not.toHaveTextContent("keep current draft");
     expect(screen.getByRole("button", { name: "发送" })).toBeEnabled();
-    act(() => delivered(prompt));
-    expect(document.querySelector(".retained-inputs")).toBeNull();
-    expect(input()).toHaveValue("new draft after send");
-    expect(promptCount()).toBe(1);
-  });
-
-  it.each(["disconnect", "abort proof", "wire error", "admission", "delivery"])("does not recreate a discarded unknown original on late %s", (receipt) => {
-    start();
-    const prompt = sendInput("discarded original");
-    act(() => rejected(prompt));
-    fireEvent.click(within(panel()).getByRole("button", { name: "丢弃" }));
-    fireEvent.change(input(), { target: { value: "" } });
-    act(() => {
-      if (receipt === "disconnect") socketMock.status?.(false);
-      else if (receipt === "abort proof") withdrawn(prompt);
-      else if (receipt === "wire error") rejected(prompt);
-      else if (receipt === "admission") admit(prompt);
-      else delivered(prompt);
-    });
-    expect(input()).toHaveValue("");
-    expect(document.querySelector(".retained-inputs")).toBeNull();
-    fireEvent.change(input(), { target: { value: "new manual draft" } });
-    if (receipt === "disconnect") expect(screen.getByRole("button", { name: "发送" })).toBeDisabled();
-    else expect(screen.getByRole("button", { name: "发送" })).toBeEnabled();
-    expect(promptCount()).toBe(1);
-  });
-
-  it("restores unknown only on explicit choice and warns to check history without sending", () => {
-    start();
-    const prompt = sendInput("possibly drained");
-    fireEvent.change(input(), { target: { value: "" } });
-    act(() => rejected(prompt));
-    expect(input()).toHaveValue("");
-    fireEvent.click(within(panel()).getByRole("button", { name: "恢复到输入框" }));
-    expect(input()).toHaveValue("possibly drained");
-    expect(screen.getByText(/^发送状态未确认。内容已保留/)).toBeInTheDocument();
-    expect(promptCount()).toBe(1);
-  });
-
-  it("keeps identical text as distinct IDs, releases manual withdrawal/delivery, and ignores a mismatched actual run", () => {
-    const sessionId = start();
-    const first = sendInput("same text");
-    act(() => admit(first));
-    const second = sendInput("same text");
-    act(() => { admit(second); withdrawn(first); withdrawn(first); delivered(second, { runId: RUN_B }); });
-    expect(first.promptId).not.toBe(second.promptId);
-    expect(within(panel()).getAllByRole("button", { name: "丢弃" })).toHaveLength(1);
-    expect(screen.getByRole("region", { name: "等待处理的消息" })).toHaveTextContent("same text");
-    act(() => socketMock.rawEmit?.({ type: "session_event", sessionId,
-      conversationId: second.conversationId, focusId: second.focusId, runId: RUN_ID,
-      event: { type: "run_finished", outcome: "aborted" } }));
-    expect(within(panel()).getAllByRole("button", { name: "丢弃" })).toHaveLength(2);
-    act(() => delivered(second));
-    expect(within(panel()).getAllByRole("button", { name: "丢弃" })).toHaveLength(1);
-    const third = sendInput("manual copy");
-    act(() => { admit(third); withdrawn(third, "manual"); });
-    expect(panel()).not.toHaveTextContent("manual copy");
-    fireEvent.click(within(panel()).getByRole("button", { name: "丢弃" }));
-    expect(document.querySelector(".retained-inputs")).toBeNull();
-    expect(promptCount()).toBe(3);
-  });
-
-  it("retires only the terminal run's waiting authority while preserving the next run and all unproved originals", () => {
-    const sessionId = start();
-    const first = sendInput("old run original");
-    act(() => {
-      admit(first);
-      socketMock.emit?.({ type: "state", state: {
-        sessionId, cwd: "E:\\work", busy: true, activeRun: { id: RUN_B, phase: "running" },
-        thinkingLevel: "off", toolMode: "full_access", availableThinkingLevels: ["off"],
-        selectedModel: { provider: "provider", id: "model" }, providers: [],
-      } });
-    });
-    const next = sendInput("next run original");
-    act(() => {
-      socketMock.rawEmit?.({ type: "prompt_admitted", sessionId, conversationId: next.conversationId,
-        focusId: next.focusId, runId: RUN_B, promptId: next.promptId, text: "next waiting authority" });
-      socketMock.rawEmit?.({ type: "conversation_snapshot", sessionId, conversationId: first.conversationId,
-        focusId: first.focusId, items: [], pendingPrompts: [
-          { promptId: first.promptId, text: "old run original" },
-          { promptId: next.promptId, text: "next waiting authority" },
-          { promptId: CONVERSATION_C, text: "unknown snapshot owner" },
-        ], window: completeConversationWindow });
-      socketMock.rawEmit?.({ type: "session_event", sessionId, conversationId: first.conversationId,
-        focusId: first.focusId, runId: RUN_ID, event: { type: "run_finished", outcome: "aborted" } });
-    });
-    const waiting = screen.getByRole("region", { name: "等待处理的消息" });
-    expect(waiting).toHaveTextContent("next waiting authority");
-    expect(waiting).toHaveTextContent("unknown snapshot owner");
-    expect(waiting).not.toHaveTextContent("old run original");
-    expect(panel()).toHaveTextContent("old run original");
-    expect(panel()).not.toHaveTextContent("next run original");
-    expect(panel()).toHaveTextContent("需核对");
-    expect(within(panel()).getAllByRole("button", { name: "丢弃" })).toHaveLength(1);
-    expect(screen.getByText("恢复输入 · 1 条")).toBeInTheDocument();
-    expect(panel()).not.toHaveTextContent("已停止");
-  });
-
-  it("does not turn run settlement or snapshot absence into cancellation and rebinds only copies it already owns", () => {
-    const sessionId = start();
-    const prompt = sendInput("unproved cancellation");
-    act(() => {
-      admit(prompt);
-      socketMock.rawEmit?.({ type: "session_event", sessionId, conversationId: prompt.conversationId,
-        focusId: prompt.focusId, runId: RUN_ID, event: { type: "run_finished", outcome: "aborted" } });
-      socketMock.rawEmit?.({ type: "conversation_snapshot", sessionId, conversationId: prompt.conversationId,
-        focusId: prompt.focusId, items: [], pendingPrompts: [{ promptId: RUN_B, text: "foreign-tab text only" }],
-        window: completeConversationWindow });
-    });
-    expect(panel()).toHaveTextContent("需核对");
-    expect(panel()).not.toHaveTextContent("已停止");
-    expect(panel()).not.toHaveTextContent("foreign-tab text only");
-    expect(within(panel()).getAllByRole("button", { name: "丢弃" })).toHaveLength(1);
-    expect(promptCount()).toBe(1);
-  });
-
-  it("labels recovery against the visible target rather than the old executable focus", () => {
-    const sessionId = start();
-    const prompt = sendInput("A original");
-    act(() => withdrawn(prompt));
-    expect(within(panel()).getByText("A original").closest("article"))
-      .not.toHaveTextContent("原会话");
-
-    socketMock.autoFocus = false;
-    fireEvent.click(screen.getByRole("button", { name: "打开会话 B" }));
-    const focusB = latestCommand("focus_conversation");
-    const aRow = () => within(panel()).getByText("A original").closest("article")!;
-    expect(aRow()).toHaveTextContent("原会话");
-    expect(within(aRow()).getByRole("button", { name: "恢复到输入框" })).toBeDisabled();
-
-    act(() => socketMock.rawEmit?.({ type: "focus_attached", operation: "focus_conversation",
-      commandId: focusB.commandId, sessionId, projectId: PROJECT_ID,
-      conversationId: CONVERSATION_B, focusId: "ae301850-745d-44dd-a30f-5e4b30fe44b2" }));
-    expect(aRow()).toHaveTextContent("原会话");
-    expect(within(aRow()).getByRole("button", { name: "恢复到输入框" })).toBeDisabled();
-  });
-
-  it("allows local recovery offline in the confirmed scope, but not across focus changes; old receipts update only their own copy", async () => {
-    const sessionId = start();
-    await pasteDraftImage();
-    const prompt = sendInput("A original");
-    act(() => admit(prompt));
-    fireEvent.click(screen.getByRole("button", { name: "打开会话 B" }));
-    act(() => socketMock.emit?.({ type: "state", state: {
-      sessionId, cwd: "E:\\work", busy: false, thinkingLevel: "off", toolMode: "full_access",
-      availableThinkingLevels: ["off"], selectedModel: { provider: "provider", id: "model" }, providers: [],
-    } }));
-    fireEvent.change(input(), { target: { value: "B draft stays" } });
-    act(() => { withdrawn(prompt); withdrawn(prompt); });
-    expect(within(panel()).getByRole("button", { name: "恢复到输入框" })).toBeDisabled();
-    expect(input()).toHaveValue("B draft stays");
-    fireEvent.click(within(panel()).getByTitle("展开原文和图片"));
-    await waitFor(() => expect(within(panel()).getByRole("img", { name: "保留的原图 1" })).toBeInTheDocument());
-    expect(within(panel()).getByRole("img", { name: "保留的原图 1" })).toHaveAttribute("src",
-      `data:${prompt.images![0]!.mimeType};base64,${prompt.images![0]!.data}`);
-    fireEvent.click(screen.getByRole("button", { name: "打开会话 A" }));
-    act(() => {
-      socketMock.emit?.({ type: "state", state: {
-        sessionId, cwd: "E:\\work", busy: false, thinkingLevel: "off", toolMode: "full_access",
-        availableThinkingLevels: ["off"], selectedModel: { provider: "provider", id: "model" }, providers: [],
-      } });
-      socketMock.status?.(false);
-    });
-    const before = promptCount();
-    fireEvent.click(within(panel()).getByRole("button", { name: "恢复到输入框" }));
-    expect(input()).toHaveValue("A original");
-    expect(promptCount()).toBe(before);
-  });
-
-  it("keeps lost receipts unknown across reconnect and releases on a new-focus delivery for the same stable-scope ID", () => {
-    start();
-    const prompt = sendInput("lost ack original");
-    socketMock.autoFocus = false;
-    act(() => socketMock.status?.(false));
-    expect(panel()).toHaveTextContent("需核对");
-    act(() => {
-      socketMock.status?.(true);
-      socketMock.emit?.({ type: "hello", protocolVersion: PROTOCOL_VERSION, startupCwd: "E:\\work" });
-    });
-    const reconnect = latestCommand("initialize");
-    act(() => {
-      socketMock.rawEmit?.({ type: "focus_attached", operation: "initialize", commandId: reconnect.commandId!,
-        sessionId: reconnect.sessionId, projectId: PROJECT_ID, conversationId: CONVERSATION_ID, focusId: FOCUS_A_SECOND });
-      socketMock.rawEmit?.({ type: "state", state: {
-        sessionId: reconnect.sessionId, projectId: PROJECT_ID, conversationId: CONVERSATION_ID, focusId: FOCUS_A_SECOND,
-        cwd: "E:\\work", busy: true,
-        activeRun: { id: RUN_ID, phase: "running" }, thinkingLevel: "off", toolMode: "full_access",
-        availableThinkingLevels: ["off"], selectedModel: { provider: "provider", id: "model" }, providers: [],
-      } });
-      socketMock.rawEmit?.({ type: "conversation_snapshot", sessionId: reconnect.sessionId,
-        conversationId: CONVERSATION_ID, focusId: FOCUS_A_SECOND, items: [], pendingPrompts: [{ promptId: prompt.promptId, text: "only projected text" }],
-        window: completeConversationWindow });
-    });
-    expect(document.querySelector(".retained-inputs")).toBeNull();
-    expect(screen.getByRole("region", { name: "等待处理的消息" })).toHaveTextContent("only projected text");
-    act(() => socketMock.rawEmit?.({ type: "session_event", sessionId: reconnect.sessionId,
-      conversationId: CONVERSATION_ID, focusId: FOCUS_A_SECOND, runId: RUN_ID,
-      event: { type: "run_finished", outcome: "aborted" } }));
-    expect(panel()).toHaveTextContent("lost ack original");
-    expect(panel()).not.toHaveTextContent("only projected text");
-    expect(panel()).toHaveTextContent("需核对");
-    expect(panel()).not.toHaveTextContent("已停止");
-    expect(screen.queryByRole("region", { name: "等待处理的消息" })).not.toBeInTheDocument();
-    act(() => delivered(prompt, { sessionId: reconnect.sessionId, focusId: FOCUS_A_SECOND }));
-    expect(document.querySelector(".retained-inputs")).toBeNull();
-    expect(promptCount()).toBe(1);
-  });
-
-  it("bounds all retained statuses to 64 originals, blocks even an idle-looking send, and frees capacity only on explicit discard", () => {
-    const sessionId = start();
-    const composer = input();
-    const sendButton = screen.getByRole("button", { name: "发送" });
-    for (let index = 0; index < 64; index++) {
-      fireEvent.change(composer, { target: { value: `original ${index}` } });
-      fireEvent.click(sendButton);
-      const sent = latestCommand("prompt");
-      if (!sent.promptId) throw new Error("promptId missing");
-      const prompt = { ...sent, promptId: sent.promptId };
-      act(() => {
-        admit(prompt);
-        if (index % 3 === 0) withdrawn(prompt);
-        if (index % 3 === 1) rejected(prompt);
-      });
-    }
-    expect(within(panel()).getAllByRole("button", { name: "丢弃" })).toHaveLength(43);
-    sendInput("blocked while waiting");
-    expect(promptCount()).toBe(64);
-    expect(input()).toHaveValue("blocked while waiting");
-    expect(screen.getByText(/^保留输入的容量已满/)).toBeInTheDocument();
-    act(() => {
-      socketMock.rawEmit?.({ type: "session_event", sessionId, conversationId: CONVERSATION_ID,
-        focusId: FOCUS_A, runId: RUN_ID, event: { type: "run_finished", outcome: "aborted" } });
-      socketMock.emit?.({ type: "state", state: {
-        sessionId, cwd: "E:\\work", busy: false, thinkingLevel: "off", toolMode: "full_access",
-        availableThinkingLevels: ["off"], selectedModel: { provider: "provider", id: "model" }, providers: [],
-      } });
-    });
-    expect(within(panel()).getAllByRole("button", { name: "丢弃" })).toHaveLength(64);
-    sendInput("blocked current draft");
-    expect(promptCount()).toBe(64);
-    expect(input()).toHaveValue("blocked current draft");
-    expect(screen.getByText(/^保留输入的容量已满/)).toBeInTheDocument();
-    expect(panel()).toHaveTextContent("original 0");
-    fireEvent.click(within(panel()).getAllByRole("button", { name: "丢弃" })[0]!);
-    fireEvent.click(screen.getByRole("button", { name: "发送" }));
-    expect(promptCount()).toBe(65);
-  });
-
-  // Legacy 1 MB frames hit the 64-entry cap before 64 MiB can be reached.
-  it.skipIf(MAX_MESSAGE_BYTES * 64 <= 64 * 1024 * 1024)("budgets the complete JSON UTF-8 bytes of original image inputs, not just the record count", async () => {
-    start();
-    const bytes = new Uint8Array(8 * 1024 * 1024);
-    bytes.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-    const data = Buffer.from(bytes).toString("base64");
-    vi.stubGlobal("FileReader", class {
-      result = `data:image/png;base64,${data}`;
-      onload?: () => void;
-      readAsDataURL() { this.onload?.(); }
-    });
-    let retainedBytes = 0;
-    for (let index = 0; index < 3; index++) {
-      fireEvent.paste(input(), { clipboardData: { files: [
-        new File([bytes], "a.png", { type: "image/png" }), new File([bytes], "b.png", { type: "image/png" }),
-      ] } });
-      await waitFor(() => expect(screen.getByRole("img", { name: "待发送图片 2" })).toBeVisible());
-      fireEvent.click(screen.getByRole("button", { name: "发送" }));
-      if (index < 2) {
-        const prompt = latestCommand("prompt");
-        if (!prompt.promptId) throw new Error("promptId missing");
-        retainedBytes += Buffer.byteLength(JSON.stringify(prompt));
-        act(() => { admit({ ...prompt, promptId: prompt.promptId! }); withdrawn({ ...prompt, promptId: prompt.promptId! }); });
-      }
-    }
-    expect(retainedBytes).toBeLessThan(64 * 1024 * 1024);
-    expect(retainedBytes / 2 * 3).toBeGreaterThan(64 * 1024 * 1024);
-    expect(promptCount()).toBe(2);
-    expect(screen.getByRole("alert")).toHaveTextContent("保留输入的容量已满");
-    expect(screen.getByRole("img", { name: "待发送图片 2" })).toBeVisible();
-    expect(within(panel()).getAllByRole("button", { name: "丢弃" })).toHaveLength(2);
-  });
-
-  it("retains and manages orphaned originals after deletion invalidates and clears the draft scope", async () => {
-    const sessionId = start();
-    await pasteDraftImage();
-    const prompt = sendInput("deleted scope original");
-    act(() => {
-      admit(prompt);
-      withdrawn(prompt);
-      socketMock.emit?.({ type: "state", state: {
-        sessionId, cwd: "E:\\work", busy: false, thinkingLevel: "off", toolMode: "full_access",
-        availableThinkingLevels: ["off"], selectedModel: { provider: "provider", id: "model" }, providers: [],
-      } });
-    });
-    fireEvent.change(input(), { target: { value: "current draft may be invalidated" } });
-    fireEvent.click(screen.getByRole("button", { name: "删除会话 A" }));
-    fireEvent.click(screen.getByRole("button", { name: "永久删除" }));
-    const deletion = latestCommand("delete_conversation");
-    act(() => {
-      socketMock.rawEmit?.({ type: "focus_invalidated", sessionId, projectId: PROJECT_ID,
-        conversationId: CONVERSATION_ID, focusId: FOCUS_A, reason: "deleted" });
-      socketMock.rawEmit?.({ type: "command_complete", operation: "delete_conversation",
-        sessionId, commandId: deletion.commandId });
-    });
-    expect(screen.queryByRole("textbox", { name: "给 Pi 发送消息" })).not.toBeInTheDocument();
-    expect(panel()).toHaveTextContent("deleted scope original");
-    expect(screen.getAllByRole("region", { name: "恢复输入" })).toHaveLength(1);
-    expect(within(panel()).getByRole("button", { name: "恢复到输入框" })).toBeDisabled();
-    fireEvent.click(within(panel()).getByTitle("展开原文和图片"));
-    await waitFor(() => expect(within(panel()).getByRole("img", { name: "保留的原图 1" })).toBeVisible());
-    expect(within(panel()).getByRole("img", { name: "保留的原图 1" })).toHaveAttribute("src",
-      `data:${prompt.images![0]!.mimeType};base64,${prompt.images![0]!.data}`);
-    fireEvent.click(within(panel()).getByRole("button", { name: "丢弃" }));
-    expect(document.querySelector(".retained-inputs")).toBeNull();
-    expect(promptCount()).toBe(1);
+    expect(socketMock.send.mock.calls.filter(([command]) => command.type === "prompt")).toHaveLength(1);
   });
 
   it("registers the abort owner before a synchronous cancelling state and terminal receipt", () => {

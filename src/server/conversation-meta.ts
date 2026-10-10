@@ -14,7 +14,13 @@ import {
   MAX_BASH_TASK_OUTPUT_FILE_BYTES,
   MAX_COMPACTION_THRESHOLD_PERCENT,
   MAX_MODEL_REFERENCE_BYTES,
+  MAX_PROMPT_CHARACTERS,
+  MAX_PROMPT_IMAGE_BYTES,
+  MAX_PROMPT_IMAGE_COUNT,
   conversationBashTaskSchema,
+  decodedPromptImageBytes,
+  parsePromptImage,
+  type PromptImage,
   type ConversationBashTask,
   MAX_SESSION_MESSAGE_SUMMARY_BYTES,
   MAX_SESSION_MESSAGE_SUMMARY_CHARACTERS,
@@ -35,6 +41,12 @@ export const MESSAGE_DELIVERY_RECEIPT_CUSTOM_TYPE =
   "piweb.message_delivery_receipt.v1";
 export const RUN_SETTLEMENT_CUSTOM_TYPE =
   "piweb.run_settlement.v1";
+export const BROWSER_PROMPT_ADMISSION_CUSTOM_TYPE =
+  "piweb.browser_prompt_admission.v1";
+export const BROWSER_PROMPT_DELIVERY_CUSTOM_TYPE =
+  "piweb.browser_prompt_delivery.v1";
+export const BROWSER_PROMPT_WITHDRAWAL_CUSTOM_TYPE =
+  "piweb.browser_prompt_withdrawal.v1";
 /** Durable proof that a run has passed its one-time first-write gate. */
 export const EDIT_GATE_CUSTOM_TYPE = "piweb.edit_gate.v1";
 export const META_OPERATION_CUSTOM_TYPE =
@@ -466,6 +478,59 @@ const messageDeliveryReceiptEntrySchema = z.object({
   data: messageDeliveryReceiptSchema,
 }).strict();
 
+const browserPromptImagesSchema = z.array(z.unknown())
+  .max(MAX_PROMPT_IMAGE_COUNT)
+  .transform((values, context): PromptImage[] | typeof z.NEVER => {
+    const images: PromptImage[] = [];
+    let decodedBytes = 0;
+    for (const value of values) {
+      const image = parsePromptImage(value);
+      if (image === undefined) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "Invalid browser prompt image payload",
+        });
+        return z.NEVER;
+      }
+      decodedBytes += decodedPromptImageBytes(image.data);
+      images.push(image);
+    }
+    if (decodedBytes > MAX_PROMPT_IMAGE_BYTES) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Browser prompt images exceed the decoded byte limit",
+      });
+      return z.NEVER;
+    }
+    return images;
+  });
+
+const browserPromptAdmissionSchema = z.object({
+  promptId: uuidSchema("promptId"),
+  runId: uuidSchema("runId"),
+  text: z.string().trim().max(MAX_PROMPT_CHARACTERS),
+  images: browserPromptImagesSchema.optional(),
+}).strict().refine(
+  ({ text, images }) => text.length > 0 || (images?.length ?? 0) > 0,
+  "Browser prompt must contain text or images",
+);
+const browserPromptAdmissionEntrySchema = z.object({
+  customType: z.literal(BROWSER_PROMPT_ADMISSION_CUSTOM_TYPE),
+  data: browserPromptAdmissionSchema,
+}).strict();
+const browserPromptMarkerSchema = z.object({
+  promptId: uuidSchema("promptId"),
+  runId: uuidSchema("runId"),
+}).strict();
+const browserPromptDeliveryEntrySchema = z.object({
+  customType: z.literal(BROWSER_PROMPT_DELIVERY_CUSTOM_TYPE),
+  data: browserPromptMarkerSchema,
+}).strict();
+const browserPromptWithdrawalEntrySchema = z.object({
+  customType: z.literal(BROWSER_PROMPT_WITHDRAWAL_CUSTOM_TYPE),
+  data: browserPromptMarkerSchema,
+}).strict();
+
 export interface LoopListTiming {
   listStartedAt: string;
   activeStartedAt?: string;
@@ -855,6 +920,11 @@ export type MessageDeliveryReceipt =
   z.infer<typeof messageDeliveryReceiptSchema>;
 export type MessageDeliveryReceiptEntry =
   z.infer<typeof messageDeliveryReceiptEntrySchema>;
+export type BrowserPromptAdmissionData = z.infer<typeof browserPromptAdmissionSchema>;
+export type BrowserPromptAdmissionEntry = z.infer<typeof browserPromptAdmissionEntrySchema>;
+export type BrowserPromptDeliveryEntry = z.infer<typeof browserPromptDeliveryEntrySchema>;
+export type BrowserPromptWithdrawalEntry = z.infer<typeof browserPromptWithdrawalEntrySchema>;
+export type BrowserPromptAdmission = BrowserPromptAdmissionData;
 export type CompactionResumeEntry =
   z.infer<typeof compactionResumeEntrySchema>;
 export type ContextHintEntry = z.infer<typeof contextHintEntrySchema>;
@@ -1054,6 +1124,33 @@ export function createMessageDeliveryReceiptEntry(
 ): MessageDeliveryReceiptEntry {
   return parseMessageDeliveryReceiptEntry({
     customType: MESSAGE_DELIVERY_RECEIPT_CUSTOM_TYPE,
+    data,
+  });
+}
+
+export function createBrowserPromptAdmissionEntry(
+  data: BrowserPromptAdmissionData,
+): BrowserPromptAdmissionEntry {
+  return browserPromptAdmissionEntrySchema.parse({
+    customType: BROWSER_PROMPT_ADMISSION_CUSTOM_TYPE,
+    data,
+  });
+}
+
+export function createBrowserPromptDeliveryEntry(
+  data: BrowserPromptDeliveryEntry["data"],
+): BrowserPromptDeliveryEntry {
+  return browserPromptDeliveryEntrySchema.parse({
+    customType: BROWSER_PROMPT_DELIVERY_CUSTOM_TYPE,
+    data,
+  });
+}
+
+export function createBrowserPromptWithdrawalEntry(
+  data: BrowserPromptWithdrawalEntry["data"],
+): BrowserPromptWithdrawalEntry {
+  return browserPromptWithdrawalEntrySchema.parse({
+    customType: BROWSER_PROMPT_WITHDRAWAL_CUSTOM_TYPE,
     data,
   });
 }
@@ -1320,6 +1417,9 @@ export function appendReservedCustomEntry(
     | ConversationRoleChangeEntry
     | ConversationCardEntry
     | MessageDeliveryReceiptEntry
+    | BrowserPromptAdmissionEntry
+    | BrowserPromptDeliveryEntry
+    | BrowserPromptWithdrawalEntry
     | RunSettlementEntry
     | EditGateEntry
     | MetaOperationEntry
@@ -1327,6 +1427,18 @@ export function appendReservedCustomEntry(
     | ServiceTierSelectionEntry
     | LoopListEntry,
 ): string {
+  if (value.customType === BROWSER_PROMPT_ADMISSION_CUSTOM_TYPE) {
+    const entry = browserPromptAdmissionEntrySchema.parse(value);
+    return appender.appendCustomEntry(entry.customType, entry.data);
+  }
+  if (value.customType === BROWSER_PROMPT_DELIVERY_CUSTOM_TYPE) {
+    const entry = browserPromptDeliveryEntrySchema.parse(value);
+    return appender.appendCustomEntry(entry.customType, entry.data);
+  }
+  if (value.customType === BROWSER_PROMPT_WITHDRAWAL_CUSTOM_TYPE) {
+    const entry = browserPromptWithdrawalEntrySchema.parse(value);
+    return appender.appendCustomEntry(entry.customType, entry.data);
+  }
   const reserved = parseReservedConversationEntry(value);
   if (
     reserved === undefined
@@ -1429,6 +1541,21 @@ export function parseReservedConversationEntry(
       kind: "message_delivery_receipt",
       entry: parseMessageDeliveryReceiptEntry(payload),
     };
+  }
+  // This ledger is inspected against physical adjacency, not aggregated into
+  // a context/card projection. Validate here so every reserved reader still
+  // rejects malformed carriers; the dedicated inspector owns its state.
+  if (customType === BROWSER_PROMPT_ADMISSION_CUSTOM_TYPE) {
+    browserPromptAdmissionEntrySchema.parse(payload);
+    return undefined;
+  }
+  if (customType === BROWSER_PROMPT_DELIVERY_CUSTOM_TYPE) {
+    browserPromptDeliveryEntrySchema.parse(payload);
+    return undefined;
+  }
+  if (customType === BROWSER_PROMPT_WITHDRAWAL_CUSTOM_TYPE) {
+    browserPromptWithdrawalEntrySchema.parse(payload);
+    return undefined;
   }
   if (customType === LOOP_LIST_CUSTOM_TYPE) {
     return { kind: "loop_list", entry: parseLoopListEntry(payload) };
@@ -1627,6 +1754,85 @@ function assertCardUpdate(
       `Piweb conversation card terminal result cannot change for cardId ${incoming.cardId}`,
     );
   }
+}
+
+/**
+ * Replays the physical browser prompt ledger. An appended delivery marker is
+ * only a proof when the very next physical entry is its direct raw user child;
+ * an orphan marker is an ordinary recoverable crash gap, not a delivery.
+ */
+export function inspectBrowserPromptLedger(
+  values: readonly unknown[],
+): {
+  admissions: BrowserPromptAdmission[];
+  pending: BrowserPromptAdmission[];
+  deliveries: BrowserPromptDeliveryEntry["data"][];
+  withdrawals: BrowserPromptWithdrawalEntry["data"][];
+} {
+  const admissions: BrowserPromptAdmission[] = [];
+  const deliveries: BrowserPromptDeliveryEntry["data"][] = [];
+  const withdrawals: BrowserPromptWithdrawalEntry["data"][] = [];
+  const states = new Map<string, "pending" | "delivered" | "withdrawn">();
+  for (let index = 0; index < values.length; index += 1) {
+    const value = values[index];
+    if (!isRecord(value) || !(
+      value.customType === BROWSER_PROMPT_ADMISSION_CUSTOM_TYPE
+      || value.customType === BROWSER_PROMPT_DELIVERY_CUSTOM_TYPE
+      || value.customType === BROWSER_PROMPT_WITHDRAWAL_CUSTOM_TYPE
+    )) continue;
+    const physical = rawCustomEntrySchema.parse(value);
+    if (physical.customType === BROWSER_PROMPT_ADMISSION_CUSTOM_TYPE) {
+      const data = browserPromptAdmissionEntrySchema.parse({
+        customType: physical.customType, data: physical.data,
+      }).data;
+      if (states.has(data.promptId)) {
+        throw new Error(`Duplicate browser prompt admission: ${data.promptId}`);
+      }
+      states.set(data.promptId, "pending");
+      admissions.push(data);
+      continue;
+    }
+    const marker = physical.customType === BROWSER_PROMPT_DELIVERY_CUSTOM_TYPE
+      ? browserPromptDeliveryEntrySchema.parse({
+          customType: physical.customType, data: physical.data,
+        })
+      : browserPromptWithdrawalEntrySchema.parse({
+          customType: physical.customType, data: physical.data,
+        });
+    const promptId = marker.data.promptId;
+    const state = states.get(promptId);
+    if (state === undefined) {
+      throw new Error(`Unknown browser prompt admission: ${promptId}`);
+    }
+    if (state !== "pending") {
+      throw new Error(`Conflicting browser prompt terminal state: ${promptId}`);
+    }
+    if (physical.customType === BROWSER_PROMPT_WITHDRAWAL_CUSTOM_TYPE) {
+      states.set(promptId, "withdrawn");
+      withdrawals.push(marker.data);
+      continue;
+    }
+    const next = values[index + 1];
+    if (
+      isRecord(next)
+      && next.type === "message"
+      && typeof next.id === "string"
+      && SESSION_ID_PATTERN.test(next.id)
+      && next.parentId === physical.id
+      && isRecord(next.message)
+      && next.message.role === "user"
+      && "content" in next.message
+    ) {
+      states.set(promptId, "delivered");
+      deliveries.push(marker.data);
+    }
+  }
+  return {
+    admissions,
+    pending: admissions.filter(({ promptId }) => states.get(promptId) === "pending"),
+    deliveries,
+    withdrawals,
+  };
 }
 
 export function aggregateReservedConversationEntries(

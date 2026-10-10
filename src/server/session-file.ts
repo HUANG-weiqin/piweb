@@ -5,7 +5,9 @@ import {
 import type { LoopList } from "../shared/protocol.js";
 import {
   aggregateReservedConversationEntries,
+  inspectBrowserPromptLedger,
   parseReservedConversationEntry,
+  type BrowserPromptAdmission,
   type ConversationCard,
   type ConversationMeta,
   type MessageDeliveryReceipt,
@@ -50,6 +52,7 @@ export interface PiSessionFileInspection {
   messageDeliveryReceipts: MessageDeliveryReceipt[];
   runSettlements: RunSettlement[];
   metaOperations: MetaOperation[];
+  pendingBrowserPrompts: BrowserPromptAdmission[];
   loopList?: LoopList & { updatedAt: string };
   lastActivityAt: string;
 }
@@ -830,6 +833,7 @@ function inspectPiSessionFileInternal(
   }
 
   let reserved;
+  let pendingBrowserPrompts: BrowserPromptAdmission[];
   try {
     const loopListByEntryId = new Map<
       string,
@@ -912,6 +916,18 @@ function inspectPiSessionFileInternal(
     // The session header is not a reserved custom entry, so passing the owned
     // parsed array avoids allocating an entries copy on metadata-only reads.
     reserved = aggregateReservedConversationEntries(values);
+    inspectBrowserPromptLedger(values);
+    const branchIds = new Set(
+      createReadonlySessionEntriesAdapter(
+        values.slice(1) as ReadonlySessionEntry[],
+      ).getBranch().map(({ id }) => id),
+    );
+    // Preserve physical gaps: filtering out a sibling between a marker and
+    // its raw child would invent a delivery proof that never existed on disk.
+    pendingBrowserPrompts = inspectBrowserPromptLedger(values.slice(1).map(
+      (value) => isRecord(value) && branchIds.has(value.id as string)
+        ? value : null,
+    )).pending;
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
     throw new Error(
@@ -932,6 +948,7 @@ function inspectPiSessionFileInternal(
   const inspection: PiSessionFileInspection = {
     conversationId: header.id,
     ...reserved,
+    pendingBrowserPrompts,
     lastActivityAt,
   };
   if (!includeEntries) return inspection;

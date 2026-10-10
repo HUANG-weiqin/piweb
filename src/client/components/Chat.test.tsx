@@ -25,7 +25,6 @@ import {
   type ChatState,
 } from "../chat/reducer";
 import { Chat } from "./Chat";
-import { RetainedInputs, type RetainedPromptInput } from "./RetainedInputs";
 
 const mermaidMock = vi.hoisted(() => ({
   initialize: vi.fn(),
@@ -107,10 +106,6 @@ function view(
     draftEditable
     submitting={false}
     pendingAdmissions={[]}
-    retainedInputs={[]}
-    canRestoreRetainedInput={false}
-    onRestoreRetainedInput={() => undefined}
-    onDiscardRetainedInput={() => undefined}
     onWithdrawPrompt={() => undefined}
     onDraftChange={() => undefined}
     onImagesChange={() => undefined}
@@ -137,161 +132,6 @@ afterEach(() => {
 });
 
 describe("Chat", () => {
-  const recoveryInputs: RetainedPromptInput[] = [{
-    key: "original-current", scopeKey: "current", workspaceKey: "E:\\work", projectId: "project",
-    conversationId: "conversation-a", sessionId: "session-a", focusId: "focus-a",
-    runId: "candidate", actualRunId: "actual", promptId: "original-current", bytes: 200,
-    text: "original text\nsecond line", images: [{ mimeType: "image/png", data: "b3JpZ2luYWw=" }], status: "cancelled",
-  }, {
-    key: "original-other", scopeKey: "other", workspaceKey: "E:\\other", projectId: "other-project",
-    conversationId: "conversation-b", sessionId: "session-b", focusId: "focus-b",
-    runId: "candidate-b", promptId: "original-other", bytes: 100,
-    text: "other conversation original", images: [], status: "unknown",
-  }];
-
-  it.each([
-    { mobile: false, status: "cancelled" as const },
-    { mobile: true, status: "cancelled" as const },
-    { mobile: false, status: "unknown" as const },
-    { mobile: true, status: "unknown" as const },
-  ])("shows compact recovery with lazy originals and read-only other scopes ($mobile, $status)", async ({ mobile, status }) => {
-    const restore = vi.fn();
-    const discard = vi.fn();
-    const send = vi.fn(() => true);
-    const text = `${"original text\nsecond line ".repeat(20)}\n**original tail**`;
-    const inputs = [{ ...recoveryInputs[0]!, text, status }, recoveryInputs[1]!];
-    const rendered = render(view(emptyChat, "", undefined, {
-      retainedInputs: inputs, retainedInputScopeKey: "current", canRestoreRetainedInput: true,
-      onRestoreRetainedInput: restore, onDiscardRetainedInput: discard, onSend: send,
-      mobile: mobile ? { title: "会话 A", onBack: vi.fn() } : undefined,
-    }));
-    const panel = rendered.container.querySelector<HTMLElement>(".retained-inputs-content")!;
-    expect(panel).not.toBeVisible();
-    expect(panel.querySelector("pre")).not.toBeInTheDocument();
-    expect(within(panel).queryByRole("img", { hidden: true })).not.toBeInTheDocument();
-    if (mobile) {
-      const launcher = screen.getByRole("button", { name: "打开恢复输入" });
-      expect(launcher).toHaveTextContent("恢复输入 2");
-      expect(launcher).toHaveAttribute("aria-expanded", "false");
-      fireEvent.click(launcher);
-      expect(launcher).toHaveAttribute("aria-expanded", "true");
-      expect(screen.getAllByRole("heading", { name: "恢复输入" })).toHaveLength(1);
-      expect(screen.queryByText("恢复输入 · 2 条")).not.toBeInTheDocument();
-    } else {
-      const toggle = screen.getByText("恢复输入 · 2 条");
-      expect(toggle.closest("details")).not.toHaveAttribute("open");
-      fireEvent.click(toggle);
-      expect(toggle.closest("details")).toHaveAttribute("open");
-    }
-    expect(screen.getByRole("region", { name: "恢复输入" })).toBeVisible();
-    const original = within(panel).getByText(`${text.slice(0, 160).replace(/\s+/g, " ").trim()}…`);
-    expect(original).toHaveClass("retained-input-text");
-    const current = original.closest("article")!;
-    expect(within(current).getByText(status === "cancelled" ? "已停止" : "需核对")).toBeVisible();
-    expect(within(current).getByText("1 张图片")).toBeVisible();
-    expect(within(panel).getAllByText("需核对的输入可能已投递，请先查看对话。")).toHaveLength(1);
-    expect(within(panel).getAllByText("恢复只填入空输入框，不会发送。")).toHaveLength(1);
-    expect(within(panel).getByText("仅当前标签页保留")).toHaveAttribute("title", expect.stringContaining("刷新或关闭页面不保证保留"));
-    expect(within(panel).queryByText("查看原输入")).not.toBeInTheDocument();
-    expect(current.querySelector("pre")).not.toBeInTheDocument();
-    const preview = current.querySelector("summary")!;
-    fireEvent.click(preview);
-    await waitFor(() => expect(current.querySelector("pre")?.textContent).toBe(text));
-    expect(within(current).getByRole("img", { name: "保留的原图 1" })).toHaveAttribute("src", "data:image/png;base64,b3JpZ2luYWw=");
-    fireEvent.click(preview);
-    await waitFor(() => expect(current.querySelector("pre")).not.toBeInTheDocument());
-    expect(within(current).queryByRole("img")).not.toBeInTheDocument();
-    fireEvent.click(within(current).getByRole("button", { name: "恢复到输入框" }));
-    expect(restore).toHaveBeenCalledWith("original-current");
-    expect(send).not.toHaveBeenCalled();
-    const other = within(panel).getByText("other conversation original").closest("article")!;
-    expect(other).toBeVisible();
-    expect(within(other).getByText(/E:\\other/)).toBeVisible();
-    const unavailable = within(other).getByRole("button", { name: "恢复到输入框" });
-    expect(unavailable).toBeDisabled();
-    expect(unavailable).toHaveAttribute("title", "请先打开这条输入所在的会话");
-    fireEvent.click(unavailable);
-    expect(restore).toHaveBeenCalledTimes(1);
-    fireEvent.click(within(other).getByRole("button", { name: "丢弃" }));
-    expect(discard).toHaveBeenCalledWith("original-other");
-    expect(send).not.toHaveBeenCalled();
-  });
-
-  it.each([
-    { draft: " ", images: [], submitting: false, confirmed: true, reason: "请先清空输入框" },
-    { draft: "", images: recoveryInputs[0]!.images, submitting: false, confirmed: true, reason: "请先清空输入框" },
-    { draft: "", images: [], submitting: true, confirmed: true, reason: "请等待当前消息提交完成" },
-    { draft: "", images: [], submitting: false, confirmed: false, reason: "请先返回原会话，等待切换完成" },
-  ])("explains unavailable recovery without overwriting or sending ($reason, $draft, $submitting, $confirmed)", ({ draft, images, submitting, confirmed, reason }) => {
-    const restore = vi.fn();
-    const send = vi.fn(() => true);
-    render(view(emptyChat, draft, undefined, {
-      retainedInputs: [recoveryInputs[0]!], retainedInputScopeKey: "current", canRestoreRetainedInput: confirmed,
-      draftImages: images, submitting, onRestoreRetainedInput: restore, onSend: send,
-    }));
-    fireEvent.click(screen.getByText("恢复输入 · 1 条"));
-    const panel = screen.getByRole("region", { name: "恢复输入" });
-    const button = within(panel).getByRole("button", { name: "恢复到输入框" });
-    expect(button).toBeDisabled();
-    expect(button).toHaveAttribute("title", reason);
-    expect(within(panel).getByText(reason)).toBeVisible();
-    fireEvent.click(button);
-    expect(restore).not.toHaveBeenCalled();
-    expect(send).not.toHaveBeenCalled();
-    expect(screen.getByRole("textbox", { name: "给 Pi 发送消息" })).toHaveValue(draft);
-  });
-
-  it("keeps fallback recovery collapsed and read-only when no original scope is open", () => {
-    const restore = vi.fn();
-    const discard = vi.fn();
-    render(<RetainedInputs inputs={recoveryInputs} canRestore={false} onRestore={restore} onDiscard={discard} />);
-    const toggle = screen.getByText("恢复输入 · 2 条");
-    expect(toggle.closest("details")).not.toHaveAttribute("open");
-    fireEvent.click(toggle);
-    const panel = screen.getByRole("region", { name: "恢复输入" });
-    for (const button of within(panel).getAllByRole("button", { name: "恢复到输入框" })) {
-      expect(button).toBeDisabled();
-      expect(button).toHaveAttribute("title", "请先打开这条输入所在的会话");
-      fireEvent.click(button);
-    }
-    expect(restore).not.toHaveBeenCalled();
-    fireEvent.click(within(panel).getAllByRole("button", { name: "丢弃" })[0]!);
-    expect(discard).toHaveBeenCalledWith("original-current");
-  });
-
-  it.each([false, true])("manages local recovery offline without stale pending authority and returns sheet focus (confirmed scope: %s)", (confirmed) => {
-    const restore = vi.fn();
-    const discard = vi.fn();
-    const send = vi.fn(() => true);
-    render(view(emptyChat, "", undefined, {
-      retainedInputs: recoveryInputs, retainedInputScopeKey: "current", canRestoreRetainedInput: confirmed,
-      conversationReady: false, online: false,
-      pendingAdmissions: [{ promptId: "old", text: "old pending authority" }],
-      onRestoreRetainedInput: restore, onDiscardRetainedInput: discard, onSend: send,
-      mobile: { title: "会话 A", onBack: vi.fn() },
-    }));
-    const launcher = screen.getByRole("button", { name: "打开恢复输入" });
-    launcher.focus();
-    fireEvent.click(launcher);
-    expect(screen.getByRole("dialog", { name: "恢复输入" })).toBeVisible();
-    const panel = screen.getByRole("region", { name: "恢复输入" });
-    expect(panel).toBeVisible();
-    const current = within(panel).getByText("original text second line").closest("article")!;
-    const button = within(current).getByRole("button", { name: "恢复到输入框" });
-    if (confirmed) expect(button).toBeEnabled();
-    else expect(button).toBeDisabled();
-    fireEvent.click(button);
-    expect(restore).toHaveBeenCalledTimes(confirmed ? 1 : 0);
-    expect(screen.queryByRole("region", { name: "等待中" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "撤回" })).not.toBeInTheDocument();
-    fireEvent.click(within(current).getByRole("button", { name: "丢弃" }));
-    expect(discard).toHaveBeenCalledWith("original-current");
-    expect(send).not.toHaveBeenCalled();
-    expect(screen.getByRole("button", { name: "关闭恢复输入" })).toHaveFocus();
-    fireEvent.keyDown(document, { key: "Escape" });
-    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-    expect(launcher).toHaveFocus();
-  });
   it("hides cached Bash activity until the focused history snapshot is ready", () => {
     const focus = {
       sessionId: "11111111-1111-4111-8111-111111111111",

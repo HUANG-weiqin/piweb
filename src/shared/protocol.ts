@@ -113,9 +113,11 @@ export const MAX_TRANSITION_DIAGNOSTIC_PHASE_MS = 60 * 60 * 1_000;
 // their OpenAI-compatible model list before saving.
 // v59: idle current-leaf fork copies LLM-effective context into a fresh host
 // lifecycle via `fork_conversation`; history anchors stay unsupported.
+// v70: browser prompt receipts now follow durable JSONL admission; Stop keeps
+// un-delivered inputs, and same-ID reconnects reconcile without duplicate runs.
 // v69: connection-scoped session-file inspection and backed-up tail repair,
 // available even when workspace initialization fails; no validation bypass.
-export const PROTOCOL_VERSION = 69;
+export const PROTOCOL_VERSION = 70;
 export const OBSERVATION_FATAL_CLOSE_CODE = 4002;
 export const COLOR_SCHEMES = ["quiet-rebel", "classic-rebel"] as const;
 export type ColorScheme = typeof COLOR_SCHEMES[number];

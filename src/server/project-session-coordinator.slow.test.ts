@@ -30,16 +30,19 @@ import {
   type ConversationActorEvent,
 } from "./conversation-actor.js";
 import {
+  BROWSER_PROMPT_ADMISSION_CUSTOM_TYPE,
   CONVERSATION_CARD_CUSTOM_TYPE,
   CONVERSATION_META_CUSTOM_TYPE,
   aggregateReservedConversationEntries,
   appendReservedCustomEntry,
   createConversationCardEntry,
   createConversationMessageEntry,
+  createBrowserPromptAdmissionEntry,
   createLoopListEntry,
   createMessageDeliveryReceiptEntry,
   createMetaOperationEntry,
   createRunSettlementEntry,
+  inspectBrowserPromptLedger,
   MAX_CONVERSATION_BODY_BYTES,
   RUN_SETTLEMENT_CUSTOM_TYPE,
   type ConversationMeta,
@@ -181,6 +184,17 @@ async function settleFixtureRecovery(fixture: Fixture): Promise<void> {
     () => context.backgroundTasks.size === 0,
     "startup recovery to settle before the scenario mutates durable state",
   );
+}
+
+/** Pi emits raw message_end before SessionManager.appendMessage persists it. */
+function deliverInitialBrowserUserMessage(
+  control: ReturnType<FakeRuntime["control"]>,
+  text: string,
+): void {
+  const message = agentMessage({ role: "user", content: text, timestamp: Date.now() });
+  control.listener?.({ type: "message_start", message } as AgentSessionEvent);
+  control.listener?.({ type: "message_end", message } as AgentSessionEvent);
+  control.manager.appendMessage(message);
 }
 
 describe("ProjectSessionCoordinator", () => {
@@ -5449,7 +5463,7 @@ describe("ProjectSessionCoordinator", () => {
     );
     await activationStarted.promise;
 
-    const promptId = "busy-admission-before-unrelated-activation";
+    const promptId = deterministicTestUuid("browser-prompt", "busy-admission-before-unrelated-activation");
     const admitted = fixture.coordinator.prompt(
       fixture.handle,
       actor.conversationId,
@@ -5493,12 +5507,28 @@ describe("ProjectSessionCoordinator", () => {
     }
   });
 
-  it("broadcasts one abort proof per exact queued browser prompt through the live abort control path", async () => {
+  it("preserves exact queued browser prompts on Stop and automatically replays them after the run settles", async () => {
     const fixture = await createFixture();
     const actor = await fixture.coordinator.createUserConversation(fixture.handle, { roleId: "default" });
+    const control = fixture.runtime.control(actor.conversationId);
     const started = deferred();
     const release = deferred();
-    fixture.runtime.control(actor.conversationId).enqueue(blocksUntil(started, release, "cancelled work"));
+    control.enqueue(async (session) => {
+      started.resolve();
+      session.abortCurrent = () => undefined;
+      try {
+        await release.promise;
+        session.emitFinal("cancelled work");
+      } finally {
+        session.abortCurrent = undefined;
+      }
+    });
+    for (let index = 0; index < 2; index++) {
+      control.enqueue(async (session) => {
+        deliverInitialBrowserUserMessage(session, "same text");
+        session.emitFinal(`replayed browser prompt ${index}`);
+      });
+    }
     const events: ConversationActorEvent[] = [];
     const unsubscribe = actor.subscribe((event) => events.push(event));
     const runId = randomUUID();
@@ -5506,21 +5536,149 @@ describe("ProjectSessionCoordinator", () => {
     await started.promise;
     const promptIds = [randomUUID(), randomUUID()];
     for (const promptId of promptIds) {
-      await fixture.coordinator.prompt(fixture.handle, actor.conversationId, randomUUID(), "same text", promptId);
+      await expect(fixture.coordinator.prompt(
+        fixture.handle, actor.conversationId, randomUUID(), "same text", promptId,
+      )).resolves.toEqual({ outcome: "admitted" });
     }
     await fixture.coordinator.abort(fixture.handle, actor.conversationId, randomUUID());
-    expect(events.filter((event) => event.type === "prompt_withdrawn")).toEqual([]);
     const aborting = fixture.coordinator.abort(fixture.handle, actor.conversationId, runId);
     const repeated = fixture.coordinator.abort(fixture.handle, actor.conversationId, runId);
     await aborting;
     await repeated;
-    await running;
-    expect(events.filter((event) => event.type === "prompt_withdrawn")).toEqual(promptIds.map((promptId) => ({
-      type: "prompt_withdrawn", conversationId: actor.conversationId, promptId, runId, reason: "abort",
-    })));
-    expect(actor.pendingPromptAdmissions()).toEqual([]);
-    expect(actor.getActivity()).toEqual({ kind: "idle" });
+    expect(actor.pendingPromptAdmissions().map(({ promptId }) => promptId)).toEqual(promptIds);
+    expect(events.filter((event) => event.type === "prompt_withdrawn")).toEqual([]);
+    release.resolve();
+    await expect(running).resolves.toMatchObject({ runId, outcome: "aborted" });
+    await waitUntil(
+      () => actor.pendingPromptAdmissions().length === 0
+        && events.filter((event) => event.type === "prompt_delivered").length === 2,
+      "the two stopped browser prompts to be automatically replayed",
+    );
+    // Two live SDK steer attempts were cleared by Stop; each durable input
+    // then starts exactly one fresh browser run.
+    expect(control.promptTexts).toEqual([
+      "busy work", "same text", "same text", "same text", "same text",
+    ]);
+    expect(events.filter((event) => event.type === "prompt_delivered")).toEqual(
+      promptIds.map((promptId) => ({
+        type: "prompt_delivered",
+        conversationId: actor.conversationId,
+        promptId,
+        runId: expect.not.stringMatching(runId),
+      })),
+    );
+    expect(events.filter((event) => event.type === "prompt_withdrawn")).toEqual([]);
+    const ledger = inspectBrowserPromptLedger(actor.sessionManager.getEntries());
+    expect(ledger.pending).toEqual([]);
+    expect(ledger.deliveries.map(({ promptId }) => promptId)).toEqual(promptIds);
+    expect(new Set(ledger.deliveries.map(({ runId }) => runId)).size).toBe(2);
     unsubscribe();
+  });
+
+  it("discovers an undelivered browser admission at restart and replays it after durable inbox work", async () => {
+    const fixture = await createFixture();
+    await settleFixtureRecovery(fixture);
+    const { targetId, messageId } = await createPendingExternalEnvelope(
+      fixture, "browser-replay-after-inbox",
+    );
+    const promptId = deterministicTestUuid("browser-prompt", "restart-after-inbox");
+    const acceptedRunId = deterministicTestUuid("browser-run", "before-restart");
+    const text = "resume this accepted browser input after inbox delivery";
+    const manager = await fixture.handle.project.openConversation(
+      targetId, { updateRecent: false },
+    );
+    appendReservedCustomEntry(manager, createBrowserPromptAdmissionEntry({
+      promptId, runId: acceptedRunId, text,
+    }));
+    expect((await fixture.handle.project.inspectConversation(targetId)).pendingBrowserPrompts)
+      .toEqual([{ promptId, runId: acceptedRunId, text }]);
+
+    await fixture.coordinator.close();
+    const inboxStarted = deferred();
+    const releaseInbox = deferred();
+    fixture.runtime.nextSessionBehaviors.push([
+      async (control) => {
+        inboxStarted.resolve();
+        await releaseInbox.promise;
+        control.emitFinal("inbox completed before browser replay");
+      },
+      async (control) => {
+        deliverInitialBrowserUserMessage(control, text);
+        control.emitFinal("browser prompt replayed");
+      },
+    ]);
+    fixture.coordinator = new ProjectSessionCoordinator(
+      fixture.runtime, fixture.roles, fixture.registry,
+    );
+    fixture.handle = await fixture.coordinator.acquireProject(
+      fixture.cwd, "full_access",
+    );
+    await inboxStarted.promise;
+    const control = fixture.runtime.control(targetId);
+    expect(control.received[0]?.content).toContain("external source browser-replay-after-inbox");
+    expect(control.promptTexts).toEqual([]);
+    expect((await fixture.handle.project.inspectConversation(targetId)).pendingBrowserPrompts)
+      .toEqual([{ promptId, runId: acceptedRunId, text }]);
+    releaseInbox.resolve();
+    await waitUntil(async () => {
+      const inspection = await fixture.handle.project.inspectConversation(targetId);
+      return inspection.pendingBrowserPrompts.length === 0
+        && inspection.runSettlements.length === 2;
+    }, "the accepted browser input to replay after inbox settlement");
+    expect(control.promptTexts).toEqual([text]);
+    expect(inspectBrowserPromptLedger(control.manager.getEntries()).deliveries)
+      .toEqual([{ promptId, runId: expect.not.stringMatching(acceptedRunId) }]);
+    expect(await coordinatorInbox(fixture.handle).get(messageId)).toBeUndefined();
+  });
+
+  it("reconciles a re-sent promptId after reconnect without a second admission and rejects changed content", async () => {
+    const fixture = await createFixture();
+    const actor = await fixture.coordinator.createUserConversation(
+      fixture.handle, { roleId: "default" },
+    );
+    const started = deferred();
+    const release = deferred();
+    fixture.runtime.control(actor.conversationId).enqueue(
+      blocksUntil(started, release, "original run finished"),
+    );
+    const runId = randomUUID();
+    const running = fixture.coordinator.prompt(
+      fixture.handle, actor.conversationId, runId, "keep the conversation busy",
+    );
+    await started.promise;
+    const promptId = deterministicTestUuid("browser-prompt", "reconnect-idempotence");
+    const text = "re-send this exact accepted browser input";
+    await expect(fixture.coordinator.prompt(
+      fixture.handle, actor.conversationId, randomUUID(), text, promptId,
+    )).resolves.toEqual({ outcome: "admitted" });
+    const before = inspectBrowserPromptLedger(actor.sessionManager.getEntries());
+    expect(before.pending).toEqual([{ promptId, runId, text }]);
+
+    const reconnected = await fixture.coordinator.openConversation(
+      fixture.handle, actor.conversationId, { updateRecent: false },
+    );
+    expect(reconnected).toBe(actor);
+    const receipts: ConversationActorEvent[] = [];
+    const unsubscribe = reconnected.subscribe((event) => receipts.push(event));
+    await expect(fixture.coordinator.prompt(
+      fixture.handle, actor.conversationId, randomUUID(), text, promptId,
+    )).resolves.toEqual({ outcome: "admitted" });
+    expect(receipts.filter((event) => event.type === "prompt_admitted"))
+      .toEqual([{ type: "prompt_admitted", conversationId: actor.conversationId, promptId, runId, text }]);
+    expect(actor.sessionManager.getEntries().filter((entry) =>
+      (entry as { customType?: string }).customType === BROWSER_PROMPT_ADMISSION_CUSTOM_TYPE,
+    )).toHaveLength(1);
+    expect(inspectBrowserPromptLedger(actor.sessionManager.getEntries()).pending)
+      .toEqual(before.pending);
+    await expect(fixture.coordinator.prompt(
+      fixture.handle, actor.conversationId, randomUUID(), `${text} changed`, promptId,
+    )).rejects.toThrow("already admitted with different content");
+    expect(inspectBrowserPromptLedger(actor.sessionManager.getEntries()).admissions)
+      .toEqual(before.admissions);
+    fixture.coordinator.withdrawPrompt(fixture.handle, actor.conversationId, runId, promptId);
+    unsubscribe();
+    release.resolve();
+    await running;
   });
 
   it("rejects start_session replays that change role or title under the same idempotency key", async () => {
@@ -8811,7 +8969,7 @@ describe("ProjectSessionCoordinator", () => {
       caller.conversationId,
       callerRunId,
       "browser guidance",
-      "browser-guidance-prompt-1",
+      deterministicTestUuid("browser-prompt", "browser-guidance-prompt-1"),
     )).resolves.toEqual({ outcome: "admitted" });
     await expect(Promise.race([
       waitResolved.promise.then(() => "resolved"),
@@ -8841,7 +8999,7 @@ describe("ProjectSessionCoordinator", () => {
     await peerRun.completion;
   });
 
-  it("rejects a busy prompt whose preflight passed but added no steering entry", async () => {
+  it("keeps a busy prompt durable when its preflight added no steering entry without waking the wait", async () => {
     const fixture = await createFixture();
     const caller = await fixture.coordinator.createUserConversation(
       fixture.handle,
@@ -8895,15 +9053,16 @@ describe("ProjectSessionCoordinator", () => {
     // steering identity. Fail closed: reject, no admission, no wait wake.
     const control = fixture.runtime.control(caller.conversationId);
     control.steerPromptHandled = true;
+    const promptId = deterministicTestUuid("browser-prompt", "handled-prompt-1");
     await expect(fixture.coordinator.prompt(
       fixture.handle,
       caller.conversationId,
       callerRunId,
       "handled prompt",
-      "handled-prompt-1",
-    )).rejects.toThrow("Prompt was handled, not queued for steering");
+      promptId,
+    )).resolves.toEqual({ outcome: "admitted" });
     control.steerPromptHandled = undefined;
-    expect(caller.pendingPromptAdmissions()).toEqual([]);
+    expect(caller.pendingPromptAdmissions()).toEqual([{ promptId, text: "handled prompt" }]);
     await expect(Promise.race([
       waitResolved.promise.then(() => "resolved"),
       new Promise<"timeout">((resolve) =>
@@ -8938,6 +9097,7 @@ describe("ProjectSessionCoordinator", () => {
       "hold the target while expanded browser guidance is tested",
     );
     const delivered: Array<{ promptId: string }> = [];
+    const promptId = deterministicTestUuid("browser-prompt", "expanded-prompt-1");
     const unsubscribe = fixture.coordinator.subscribe(fixture.handle, (event) => {
       if (event.type === "prompt_delivered") delivered.push(event);
     });
@@ -9002,7 +9162,7 @@ describe("ProjectSessionCoordinator", () => {
       caller.conversationId,
       callerRunId,
       "browser guidance",
-      "expanded-prompt-1",
+      promptId,
     )).resolves.toEqual({ outcome: "admitted" });
     control.steerPromptExpandedText = undefined;
     await firstResolved.promise;
@@ -9015,7 +9175,7 @@ describe("ProjectSessionCoordinator", () => {
     expect(delivered).toEqual([{
       type: "prompt_delivered",
       conversationId: caller.conversationId,
-      promptId: "expanded-prompt-1",
+      promptId,
       runId: callerRunId,
     }]);
     expect(caller.pendingPromptAdmissions()).toEqual([]);
@@ -9115,7 +9275,7 @@ describe("ProjectSessionCoordinator", () => {
     expect(waitedPeer.getActivity()).toMatchObject({ kind: "idle" });
   });
 
-  it("never wakes a later wait from rejected guidance", async () => {
+  it("never wakes a later wait from rejected SDK guidance or a deferred browser admission", async () => {
     const fixture = await createFixture();
     const caller = await fixture.coordinator.createUserConversation(
       fixture.handle,
@@ -9180,17 +9340,19 @@ describe("ProjectSessionCoordinator", () => {
     });
     control.steerImplementation = () => "queued";
     control.steerPromptPreflightResult = "handled";
+    const promptId = deterministicTestUuid("browser-prompt", "rejected-prompt-1");
     await expect(fixture.coordinator.prompt(
       fixture.handle,
       caller.conversationId,
       callerRunId,
       "rejected prompt",
-      "rejected-prompt-1",
-    )).rejects.toThrow("Prompt was handled, not queued for steering");
+      promptId,
+    )).resolves.toEqual({ outcome: "admitted" });
     control.steerPromptPreflightResult = undefined;
-    expect(caller.pendingPromptAdmissions()).toEqual([]);
+    expect(caller.pendingPromptAdmissions()).toEqual([{ promptId, text: "rejected prompt" }]);
 
-    // Neither rejection may leave accepted guidance behind or wake the wait.
+    // Neither SDK rejection accepted guidance nor woke the wait; the browser
+    // admission remains durable for a later run instead of being withdrawn.
     await expect(Promise.race([
       waitResolved.promise.then(() => "resolved"),
       new Promise<"timeout">((resolve) =>
@@ -9492,7 +9654,7 @@ describe("ProjectSessionCoordinator", () => {
       caller.conversationId,
       callerRunId,
       "browser guidance",
-      "browser-guidance-prompt-2",
+      deterministicTestUuid("browser-prompt", "browser-guidance-prompt-2"),
     )).resolves.toEqual({ outcome: "admitted" });
     await firstResolved.promise;
     expect(firstResult).toEqual({ outcome: "guidance" });
@@ -15402,6 +15564,66 @@ describe("ProjectSessionCoordinator", () => {
     } finally {
       openSpy.mockRestore();
     }
+  });
+
+  it("durably admits a browser prompt behind an unsettled receipt run", async () => {
+    const fixture = await createFixture();
+    await settleFixtureRecovery(fixture);
+    const sourceId = randomUUID();
+    await fixture.handle.project.createConversation(
+      sourceId,
+      defaultProfile(fixture.roles),
+    );
+    const target = await fixture.coordinator.createUserConversation(
+      fixture.handle,
+      { roleId: "default" },
+    );
+    await settleFixtureRecovery(fixture);
+    const receiptRunId = randomUUID();
+    appendReservedCustomEntry(target.sessionManager, createMessageDeliveryReceiptEntry({
+      messageId: randomUUID(),
+      cardId: randomUUID(),
+      fromConversationId: sourceId,
+      toConversationId: target.conversationId,
+      sourceRunId: randomUUID(),
+      targetRunId: receiptRunId,
+      kind: "message",
+      sentAt: "2026-07-19T12:00:00.000Z",
+      payloadFingerprint: "a".repeat(64),
+      deliveredAt: "2026-07-19T12:00:01.000Z",
+    }));
+    const receiptStarted = deferred();
+    const releaseReceipt = deferred();
+    fixture.runtime.control(target.conversationId).enqueue(
+      blocksUntil(receiptStarted, releaseReceipt, "receipt finished"),
+      async (control) => {
+        const raw = agentMessage({
+          role: "user", content: "browser after receipt", timestamp: Date.now(),
+        });
+        control.listener?.({ type: "message_end", message: raw } as AgentSessionEvent);
+        control.manager.appendMessage(raw);
+        control.emitFinal("browser finished");
+      },
+    );
+    const promptId = randomUUID();
+    await expect(fixture.coordinator.prompt(
+      fixture.handle,
+      target.conversationId,
+      randomUUID(),
+      "browser after receipt",
+      promptId,
+    )).resolves.toEqual({ outcome: "admitted" });
+    await receiptStarted.promise;
+    expect(inspectBrowserPromptLedger(target.sessionManager.getEntries()).pending)
+      .toEqual([expect.objectContaining({ promptId, text: "browser after receipt" })]);
+    expect(fixture.runtime.control(target.conversationId).received[0])
+      .toMatchObject({ customType: "workbench.inbox_resume.v1" });
+    releaseReceipt.resolve();
+    await waitUntil(
+      () => inspectBrowserPromptLedger(target.sessionManager.getEntries()).deliveries
+        .some(({ promptId: delivered }) => delivered === promptId),
+      "the browser prompt to replay after the receipt run",
+    );
   });
 
   it("resumes an unsettled receipt run before admitting a browser prompt", async () => {

@@ -3,6 +3,9 @@ import { readFileSync } from "node:fs";
 import { CURRENT_SESSION_VERSION } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
 import {
+  BROWSER_PROMPT_ADMISSION_CUSTOM_TYPE,
+  BROWSER_PROMPT_DELIVERY_CUSTOM_TYPE,
+  BROWSER_PROMPT_WITHDRAWAL_CUSTOM_TYPE,
   CONVERSATION_CARD_CUSTOM_TYPE,
   CONVERSATION_MESSAGE_CUSTOM_TYPE,
   CONVERSATION_META_CUSTOM_TYPE,
@@ -10,6 +13,9 @@ import {
   RUN_SETTLEMENT_CUSTOM_TYPE,
   LOOP_LIST_CUSTOM_TYPE,
   MESSAGE_DELIVERY_RECEIPT_CUSTOM_TYPE,
+  createBrowserPromptAdmissionEntry,
+  createBrowserPromptDeliveryEntry,
+  createBrowserPromptWithdrawalEntry,
   createConversationCardEntry,
   createConversationMessageEntry,
   createConversationMetaEntry,
@@ -706,6 +712,7 @@ describe("validatePiSessionFile", () => {
       runSettlements: [settlement.data],
       editBudgetEvents: [],
       metaOperations: [],
+      pendingBrowserPrompts: [],
       lastActivityAt: "2026-01-01T00:05:00.000Z",
     });
     expect(validatePiSessionFile(
@@ -1200,5 +1207,103 @@ describe("validatePiSessionFile", () => {
       session,
       "duplicate-delivery.jsonl",
     )).toThrow(/duplicate delivered piweb messageId/i);
+  });
+});
+
+describe("browser prompt JSONL inspection", () => {
+  const header = () => ({
+    type: "session", version: 3, id: randomUUID(), timestamp, cwd: "E:\\work",
+  });
+  const custom = (
+    id: string,
+    parentId: string | null,
+    entry: { customType: string; data: unknown },
+  ) => ({ type: "custom", id, parentId, timestamp, ...entry });
+  const raw = (id: string, parentId: string) => ({
+    type: "message", id, parentId, timestamp,
+    message: { role: "user", content: "unrelated body", timestamp: 1 },
+  });
+  const admission = () => createBrowserPromptAdmissionEntry({
+    promptId: randomUUID(), runId: randomUUID(), text: "recover me",
+  });
+
+  it("requires an immediately next direct raw user child and permits marker-only retries", () => {
+    const session = header();
+    const admitted = admission();
+    const delivery = createBrowserPromptDeliveryEntry({
+      promptId: admitted.data.promptId,
+      runId: admitted.data.runId,
+    });
+    const base = [session, custom("admission", null, admitted)];
+    const marker = custom("marker", "admission", delivery);
+    const retry = custom("retry", "marker", delivery);
+    expect(inspectPiSessionFile(serialize([...base, marker]), "gap.jsonl")
+      .pendingBrowserPrompts).toEqual([admitted.data]);
+    expect(inspectPiSessionFile(serialize([...base, marker, retry]), "retry.jsonl")
+      .pendingBrowserPrompts).toEqual([admitted.data]);
+    expect(inspectPiSessionFile(serialize([...base, marker, retry, raw("user", "retry")]),
+      "delivered.jsonl").pendingBrowserPrompts).toEqual([]);
+    expect(inspectPiSessionFile(serialize([...base, marker, raw("user", "admission")]),
+      "wrong-parent.jsonl").pendingBrowserPrompts).toEqual([admitted.data]);
+    // A sibling between marker and raw remains a physical gap even when the
+    // final raw child follows marker in the active parent chain.
+    expect(inspectPiSessionFile(serialize([
+      ...base, marker,
+      custom("sibling", "admission", { customType: "other", data: {} }),
+      raw("user", "marker"),
+    ]), "physical-gap.jsonl").pendingBrowserPrompts).toEqual([admitted.data]);
+  });
+
+  it("projects only the final active branch while validating every physical ledger record", () => {
+    const session = header();
+    const admitted = admission();
+    const first = custom("admission", null, admitted);
+    const withdrawn = custom("withdraw", "admission",
+      createBrowserPromptWithdrawalEntry({
+        promptId: admitted.data.promptId, runId: admitted.data.runId,
+      }));
+    expect(inspectPiSessionFile(serialize([session, first, withdrawn]), "withdrawn.jsonl")
+      .pendingBrowserPrompts).toEqual([]);
+    expect(inspectPiSessionFile(serialize([
+      session, first, withdrawn, raw("active", "admission"),
+    ]), "withdrawn-off-branch.jsonl").pendingBrowserPrompts).toEqual([admitted.data]);
+    expect(inspectPiSessionFile(serialize([
+      session, first, raw("other-branch", "admission"),
+      custom("new-leaf", null, { customType: "other", data: {} }),
+    ]), "inactive-admission.jsonl").pendingBrowserPrompts).toEqual([]);
+    expect(() => inspectPiSessionFile(serialize([
+      session, first, custom("duplicate", null, admitted),
+      custom("active", null, { customType: "other", data: {} }),
+    ]), "invalid-off-branch.jsonl")).toThrow(/duplicate browser prompt admission/i);
+  });
+
+  it("rejects malformed, unknown and conflicting marker entries in the full file", () => {
+    const session = header();
+    const admitted = admission();
+    const first = custom("admission", null, admitted);
+    const delivery = custom("marker", "admission",
+      createBrowserPromptDeliveryEntry({
+        promptId: admitted.data.promptId, runId: admitted.data.runId,
+      }));
+    expect(() => inspectPiSessionFile(serialize([
+      session, custom("unknown", null,
+        createBrowserPromptWithdrawalEntry({ promptId: randomUUID(), runId: randomUUID() })),
+    ]), "unknown.jsonl")).toThrow(/unknown browser prompt admission/i);
+    expect(() => inspectPiSessionFile(serialize([
+      session, first, delivery, raw("user", "marker"),
+      custom("withdraw", "user", createBrowserPromptWithdrawalEntry({
+        promptId: admitted.data.promptId,
+        runId: admitted.data.runId,
+      })),
+    ]), "conflict.jsonl")).toThrow(/conflicting browser prompt terminal/i);
+    for (const customType of [
+      BROWSER_PROMPT_ADMISSION_CUSTOM_TYPE,
+      BROWSER_PROMPT_DELIVERY_CUSTOM_TYPE,
+      BROWSER_PROMPT_WITHDRAWAL_CUSTOM_TYPE,
+    ]) {
+      expect(() => inspectPiSessionFile(serialize([
+        session, custom("malformed", null, { customType, data: { extra: true } }),
+      ]), "malformed.jsonl")).toThrow(/invalid piweb reserved entry/i);
+    }
   });
 });

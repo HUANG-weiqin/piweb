@@ -52,13 +52,13 @@ LoopList 是 Actor 权威的三态列表，不是 busy 或队列。仅 todo_read
 
 ### 浏览器消息准入
 
-浏览器观察不控制后台 run。live busy 准入走同步 owner/control 路径，不等无关 lifecycle 长任务；idle 仍经 project lifecycle 且 inbox-first。busy 只在 running/waiting、AgentSession.isStreaming 与 low-level agent.state.isStreaming 同为 true、没有 input extension handler 时调用 prompt(steer)。pre-stream/post-loop 窗口在 SDK 前拒绝，不能启动无主 run。steeringMode 固定 all，当前工具序列结束后一次注入所有排队消息。
+浏览器观察不控制后台 run。输入以 `promptId` 在 conversation JSONL 先持久准入、后发接收回执；live busy 走同步 owner/control 路径，idle 仍经 project lifecycle：先启动已有 inbox/receipt 工作，再持久准入浏览器输入并暂缓 SDK 投递，不能让它越过 durable work。只有 running/waiting、AgentSession.isStreaming 与 low-level agent.state.isStreaming 同为 true、没有 input extension handler 时才尝试 prompt(steer)；pre-stream/post-loop 窗口只保留持久输入，不启动无主 SDK run。steeringMode 固定 all，当前工具序列结束后一次注入已排队消息。
 
 initial disposition 必须 started，busy browser/显式 steer 必须 queued，handled 不算接受。PiRuntime 用 invocation-scoped AsyncLocalStorage 包住异步调用，在 native agent.steer 真正 enqueue 前同步复核 exact ticket 并捕获唯一 user 对象，返回后再检查 disposition/admission。私有文本 mirror 可能先更新，不能按文本/长度回滚或 clearQueue 破坏并发合法输入。
 
-admitted FIFO 最多 64 条且不持久化；prompt_admitted 携带实际接收 runId，prompt_delivered 才证明 raw user 持久化。证明只在 raw message_end 后从同一 SessionManager 找到 entry.message === rawMessage：首个 raw user 无条件归 initial，后续 browser/explicit guidance 共用 accepted 顺序 FIFO，只在队头 captured object 与 raw object 相同时认领。同文扩展消息不消费记录，原地改正文不改变身份，settlement 不是投递证明。
+持久未投递浏览器输入单会话最多 64 条、64 MiB；`prompt_admitted` 证明接收但不声称一定已进 SDK 队列，`prompt_delivered` 才证明投递。首个 raw user 无条件归 initial，后续 browser/explicit guidance 共用 SDK 接受顺序 FIFO，仅队头 captured object 与 raw object 同一引用时认领。同文扩展消息不消费记录，原地改正文不改变身份。AgentSession 的 raw `message_end` 在 appendMessage 前发出：宿主同步包裹同一 SessionManager 的 appendMessage，先写带 `promptId + 实际 runId` 的 delivery marker；只有紧邻、直接以 marker 为父的 raw user entry 才证明投递。孤立 marker 是可恢复崩溃间隙，settlement 不是投递证明。
 
-withdraw_prompt 只撤 still-queued 的 exact 对象，已 drain 必须拒绝。abort 先封 admission，逐对象移除成功才发 reason=abort 凭据，再清其余队列并 abort。已 drain/captured pre-ack cancelling 的 tracking 保留至 durable delivery 或 settlement；bulk clear、terminal、snapshot 缺席都不是取消证明。不清 inbox durable 工作，不倒回已接受 input 引发的 wait 唤醒/Bash 迁移。恢复原件只属于[浏览器易失副本](kb-client-state.md#输入与恢复)。
+`withdraw_prompt` 对已入 SDK 队列的对象只接受 exact 移除证明，已 drain 必须拒绝；尚未入队且不正驱动当前 run 的持久输入以 withdrawal marker 结算；当前 run 的初始 raw 输入不能假装可撤回。Stop 封闭当前 run admission、清 SDK 易失队列并 abort，但不撤销已接收、未投递的浏览器输入；它在 durable inbox 之后自动续投。已 drain/captured pre-ack 的 tracking 保留至 raw delivery 或 settlement，bulk clear、terminal、snapshot 缺席都不是逐条取消证明。不清 inbox durable 工作，不倒回已接受 input 引发的 wait 唤醒/Bash 迁移；客户端仅保留普通草稿与未确认回执，不建恢复副本。
 
 ### Extension UI
 

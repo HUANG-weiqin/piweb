@@ -8,7 +8,6 @@ import type {
 } from "../shared/protocol";
 import type { ChatState } from "./chat/reducer";
 import { Chat } from "./components/Chat";
-import type { RetainedPromptInput } from "./components/RetainedInputs";
 import { ConversationSidebar } from "./components/ConversationSidebar";
 import { SettingsDrawer } from "./components/SettingsDrawer";
 import { WorkspaceRail, workspaceKey } from "./components/WorkspaceRail";
@@ -447,13 +446,6 @@ export function VisualFixture({
     mimeType: "image/png",
     data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLh+QAAAABJRU5ErkJggg==",
   }]);
-  const [retainedInputs, setRetainedInputs] = useState<RetainedPromptInput[]>(showComposerStates ? [{
-    key: "fixture-retained", scopeKey: "fixture-scope", workspaceKey: ACTIVE_CWD,
-    projectId: "fixture-project", conversationId: ACTIVE_CONVERSATION_ID,
-    sessionId: "session-visual-fixture", focusId: "focus-visual-fixture",
-    promptId: "fixture-retained", runId: "fixture-run", text: "停止后保留的原输入。请先清空当前草稿，再手动恢复。",
-    images: [], bytes: 100, status: "cancelled",
-  }] : []);
   // Local visual interaction only; this fixture has no service admission semantics.
   const [pendingAdmissions, setPendingAdmissions] = useState(() => showComposerStates
     ? [{
@@ -572,17 +564,6 @@ export function VisualFixture({
         draftImages={fixtureImages}
         draftEditable
         submitting={false}
-        retainedInputs={retainedInputs}
-        retainedInputScopeKey="fixture-scope"
-        canRestoreRetainedInput
-        onRestoreRetainedInput={(key) => {
-          const input = retainedInputs.find((input) => input.key === key);
-          if (!input || fixtureDraft !== "" || fixtureImages.length > 0) return;
-          setFixtureDraft(input.text);
-          setFixtureImages(input.images);
-          setRetainedInputs((inputs) => inputs.filter((input) => input.key !== key));
-        }}
-        onDiscardRetainedInput={(key) => setRetainedInputs((inputs) => inputs.filter((input) => input.key !== key))}
         pendingAdmissions={pendingAdmissions}
         onWithdrawPrompt={(promptId) => setPendingAdmissions((admissions) =>
           admissions.filter((admission) => admission.promptId !== promptId))}

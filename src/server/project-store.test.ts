@@ -41,6 +41,8 @@ vi.mock("./conversation-meta.js", async (importOriginal) => {
 
 import {
   CONVERSATION_META_CUSTOM_TYPE,
+  createBrowserPromptAdmissionEntry,
+  createBrowserPromptDeliveryEntry,
   createConversationCardEntry,
   createConversationMessageEntry,
   createMetaOperationEntry,
@@ -2617,6 +2619,47 @@ describe("ProjectStore", () => {
       .toEqual([basename(changed.getSessionFile()!), basename(source.getSessionFile()!)].sort());
     expect(listAll).not.toHaveBeenCalled();
     expect(discovered.conversations.map(({ id }) => id)).toContain(stable.getSessionId());
+  });
+
+  it("discovers pending browser prompts from JSONL after restart and caches only the candidate", async () => {
+    const cwd = await createTemporaryDirectory("piweb-discovery-browser-prompts-");
+    const store = await ProjectStore.open(cwd);
+    const pending = await store.createConversation(randomUUID(), discoveryMeta(), {
+      updateRecent: false, refreshIndex: false,
+    });
+    const delivered = await store.createConversation(randomUUID(), discoveryMeta(), {
+      updateRecent: false, refreshIndex: false,
+    });
+    const first = createBrowserPromptAdmissionEntry({
+      promptId: randomUUID(), runId: randomUUID(), text: "pending input",
+    });
+    const second = createBrowserPromptAdmissionEntry({
+      promptId: randomUUID(), runId: randomUUID(), text: "delivered input",
+    });
+    pending.appendCustomEntry(first.customType, first.data);
+    delivered.appendCustomEntry(second.customType, second.data);
+    const marker = createBrowserPromptDeliveryEntry({
+      promptId: second.data.promptId, runId: second.data.runId,
+    });
+    delivered.appendCustomEntry(marker.customType, marker.data);
+    delivered.appendMessage({ role: "user", content: "not compared with ledger text", timestamp: 1 });
+
+    const result = await store.discoverConversations();
+    expect(result.recoveryConversationIds).toEqual([pending.getSessionId()]);
+    const reopened = await ProjectStore.open(cwd);
+    const read = vi.spyOn(reopened as never, "readStableExpectedSessionFile");
+    expect((await reopened.discoverConversations()).recoveryConversationIds)
+      .toEqual([pending.getSessionId()]);
+    expect(read).not.toHaveBeenCalled();
+
+    const pendingMarker = createBrowserPromptDeliveryEntry({
+      promptId: first.data.promptId, runId: first.data.runId,
+    });
+    pending.appendCustomEntry(pendingMarker.customType, pendingMarker.data);
+    expect((await reopened.discoverConversations()).recoveryConversationIds)
+      .toEqual([pending.getSessionId()]);
+    pending.appendMessage({ role: "user", content: "different", timestamp: 2 });
+    expect((await reopened.discoverConversations()).recoveryConversationIds).toEqual([]);
   });
 
   it("does not select settled receipts, completed delegations, or delivered ordinary cards", async () => {

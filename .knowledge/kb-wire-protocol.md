@@ -1,6 +1,6 @@
 # 线协议
 
-`updated: 2026-10-07`
+`updated: 2026-10-10`
 
 ## 这个模块是干什么的
 
@@ -39,6 +39,7 @@ ClientCommand
 
 - 协议只暴露 UI 实际消费的稳定事件。
 - projectId/conversationId 是持久身份，sessionId 是浏览器项目观察 epoch，focusId 是一次 conversation attach，runId 是一次逻辑执行（可在宿主恢复中保持）；协议必须显式携带消费方需要的身份，不能混用。projectId 与所有 ephemeral correlation ID 是 UUID；conversationId 使用 Pi Web 的兼容策略（1–256 个 ASCII 字母数字及 `._-`，首尾为字母数字），以接纳常见的旧 durable Pi 非 UUID 会话，同时给 metadata、notebook 与 wire 一个共同的宿主上限；这不是 Pi SDK 自身的长度合同。
+- v70 更改浏览器 prompt 接收语义但不新增命令或事件字段：`run_queued` / `prompt_admitted` 均要求先持久 admission，Stop 不撤销已接收输入，同 ID 断线重发由服务端精确对账；旧浏览器恢复面板不能与新语义混用，因此协议版本推进。
 - `project_snapshot` 与 `role_catalog_snapshot` 用 `sessionId + projectId` 过滤；它们描述整个项目，不能因更新来自后台 conversation 就丢弃。
 - `project_activity_snapshot` 是连接级、跨当前 observation 的进程目录，只汇总 coordinator 已加载项目的 cwd/projectId、busy conversation 数和 coordinator-owned attention 数；它不携带 transcript、当前 focus 或浏览器私有 unread。最多 100 项，超出时置 `truncated=true`。
 - `conversation_run_settled` 是当前项目 observation 的实时结算边界：只在 actor 已持久写入精确 run settlement 并回到 idle 后发送，携带 `sessionId + projectId + conversationId + runId + outcome + createdBy`。它覆盖 focused 和后台 conversation，但不会由 initialize、refresh 或 snapshot 重放；浏览器不能从可能合并的 activity 快照反推这类瞬时完成事件。
@@ -47,8 +48,8 @@ ClientCommand
 - `ConversationActivity.waiting` 只投影 `targetCount`（1–32），不能把首个 target 伪装成唯一等待目标。当前高频 PublicState 只投影 waiting phase，不暴露虚假的 `waitingFor`。
 - 当前 transcript 的 state、snapshot、live run 和卡片必须匹配 `sessionId + conversationId + focusId`。每次 initialize/open/create/focus 都分配新 focusId，因此快速 `A → B → A` 时第一次 A 的迟到帧不能污染第二次 A。
 - prompt/abort 显式携带上述 focus 三元身份和 runId；底层即时引导仍可使用 `steer + commandId + 精确 active runId`，由 `command_complete(steer)` 确认 SDK 已把该 user message 持久送入当前 run，而不只是放进易失内存队列。steer 是控制通道，不能排在被当前 run 占用的 actor 串行队列之后；错 focus 或错 runId 必须失败，不能作用于当前观察。
-- 消息与忙闲无关，随时可发。busy 时浏览器 `prompt` 直接进 SDK steering 队列（当前工具序列结束后、下一次模型调用前注入，用户可及时纠正方向；排队消息一次全部注入）：服务端回 `prompt_admitted`（匹配 focus 三元身份 + promptId）即证明 SDK 已接受入队；其 `runId` 必须是实际接受输入的 run，不能取 prompt 命令自带的 disposable runId。`prompt_delivered`（raw user 持久化证明）才结算为已投递；admitted 是"等待中"，delivered 才是"已发送"。进程重启仍会丢失易失队列，UI 必须诚实显示等待中。撤回只认精确 `prompt_withdrawn` 证明：单条手动撤回用 `reason=manual`；abort 先逐对象发真实移除的 `reason=abort`，再清空其余 steering/followUp 队列；已 drain 尚未持久投递的 admissions/guidance tracking 保留至 raw durable delivery 或 settlement，不能宣称取消。当前页面只保留自己提交的原输入供手动恢复；错过取消/投递凭据的原件只能标记待核对，不自动重发。
-- `conversation_snapshot` 携带有界 `pendingPrompts`（当前 focus 的 admitted 项，`promptId + text` FIFO），断线/多窗口据此恢复等待中列表；它不是 transcript，不进入高频 PublicState。客户端不得自建队列、重发或按正文去重；单条撤回只走服务端 `withdraw_prompt` 权威控制。focused snapshot 始终显式带该数组，空 FIFO 也必须发出，不能用字段缺失表达“没有变化”。
+- 消息与忙闲无关，随时可发。服务端先在 conversation JSONL 按 `promptId` 持久准入原文/图片，再向客户端发 idle `run_queued` 或 busy/暂缓 `prompt_admitted`；busy 只有 SDK 仍可接收且无 input extension handler 时才通过 steering 队列，在当前工具序列结束后注入。`prompt_admitted` 证明持久接收并携带接受时实际 runId，不再断言已经进入 SDK；`prompt_delivered` 才证明 raw user 已持久投递。Stop 只停当前生成，未投递输入在 durable inbox 之后自动续投；进程重启从 JSONL 精确检查恢复，不让易失 SDK 队列决定输入存亡。手动撤回以 `prompt_withdrawn(reason=manual)` 证明：已排队对象必须精确移除，尚未入队的持久输入以 withdrawal marker 结算；Stop 不产生伪造的逐条取消凭据。
+- `conversation_snapshot` 携带有界 `pendingPrompts`（当前活动分支持久未投递项的 `promptId + text` 顺序），断线/多窗口据此恢复等待中列表；它不是 transcript，不进入高频 PublicState。客户端不得按正文去重；只有确认前断线留下的原草稿，才可在 matching snapshot 后以同一 `promptId`、原内容、全新 `runId` 自动重发供服务端幂等对账。单条撤回走服务端 `withdraw_prompt` 权威控制；focused snapshot 始终显式带完整数组，包括空数组。
 - v39 的 `conversation_snapshot.loopList` 与 `loop_list_update` 使用严格三态 item：`status` 只能是 `pending | active | completed`，不接受 `checked`。新持久写入只使用 `piweb.loop_list.v2` / `piweb.loop_list_continue.v2`；服务端可严格读取 canonical v1 `checked` history，并仅在内部规范化成 v2（`checked=true → completed`、`false → pending`），不改写既有 JSONL，也绝不推导 active。未知版本、非 canonical v1 或混用字段均 fail closed。列表允许多个 active，数组顺序只用于稳定展示；active 是持久关注状态，不能作为 `activeRun` 或 busy 的替代证明。完整有界 LoopList 仍只进入 focused snapshot 与匹配 `sessionId + conversationId + focusId` 的 live event，不进入高频 `PublicState`、`project_snapshot`、无 focus preview 或 presentation cache；切换 observation 时客户端先清空，后续匹配 snapshot 才恢复权威值。
 - `browse_directory` 是 initialize 前的连接级只读控制命令，使用连接内一次性 commandId 关联 `directory_listing` 或 command error；`path` 是临时浏览位置，不是已提交项目 cwd。列表同时受项数和序列化字节数限制，迟到或不匹配的结果必须忽略。
 - v69 的 `inspect_workspace_sessions / repair_workspace_sessions` 同属连接级 socket control，以 `cwd + 一次性 commandId` 关联 `workspace_sessions_inspected / workspace_sessions_repaired` 或 command error，不依赖 initialize/focus 成功。回执的 `cwd` 原样关联请求拼写，磁盘/租约所有权仍按 canonical cwd 处理；目录别名不能让正确回执被丢弃。诊断返回最多 100 个坏文件及 `truncated`；修复仅接受 basename 与当前诊断的 `expectedRevision`，每条计划绑定文件版本而非客户端 conversationId。丢弃不完整尾 fragment 必须显式携带用户同意；空 files 用于重新证明恢复 foundation。修复结果可同时有已提交 `backups` 和后续 `error`，不能按 transport send 或普通 state/snapshot 推导成功。写入控制命令参与 reload/close drain，冻结后拒绝新修复；结果失效后只能 fresh 检查，不自动重发。磁盘范围见[会话数据修复](kb-project-sessions.md#工作区会话数据修复)。
@@ -87,9 +88,9 @@ ClientCommand
 - `project_snapshot` 等控制面快照的 `truncated` 与 conversation 的结构化 `window` 都只描述浏览器投影覆盖范围，不能解释成 durable 数据被删除。`project_snapshot.truncated` 只表示**成员集合**可能被裁剪（会话数/字节预算/整组移除）；字段值（preview/name/autoTitlePreview）的展示级裁剪不得置位，否则浏览器会把每个真实项目的缺席都当成不可信，永远无法撒回已删除会话。当前 conversation 没有公开分页 cursor；在 load-older 命令及 stale-cursor 语义落地前不能先暴露伪 cursor。
 - sessionId、focusId 和 acknowledged commandId 在一个连接内不可复用，runId 在一个 session 内不可复用；它们是关联身份，不承诺任意网络命令的 exactly-once。
 - `run_queued → run_started → run_finished(outcome)` 由工作台适配层合成，不把 SDK 的 agent lifecycle 当成线协议真相。
-- `prompt_admitted` 是 busy prompt 的接收回执：服务端已校验身份并让它进入当前 run 的 SDK steering 队列。浏览器只有收到精确匹配 focus 三元身份 + promptId 的这一帧，才能清草稿并投影“等待中” user message；`prompt_delivered` 才把它标为已投递。
+- `prompt_admitted` 是 busy 或暂缓 prompt 的持久接收回执，不能单独证明 SDK 入队。浏览器只有收到精确匹配 focus 三元身份 + promptId 的这一帧，才能清草稿并投影“等待中”；`prompt_delivered` 才把它标为已投递。idle 新 run 仍由 `run_queued` 确认，避免抢先清草稿而丢失初始 user 意图投影。
 - runId 描述执行生命周期，不描述气泡生命周期。projector 为每条物理 assistant message 发送 `assistant_message_started`，steer 被 SDK 真正取用时另用 `user_message` 标出同一 run 内的新用户段；后续文本、思考、工具和 usage 仍归该 run，但 reducer 只写入最新 assistant 段。UI 可以合并没有 card/compaction/user 边界的同 run 相邻段，最终 focused snapshot 仍以 Pi durable entry 的 ordered parts 为准。
-- `WebSocket.send()` 不是协议提交点。idle prompt 由匹配 focus + runId 的 `run_queued` 确认；busy prompt 由匹配 focus + promptId 的 `prompt_admitted` 确认。回执前断线是 unknown outcome，客户端必须保留草稿并在恢复后让用户核对，不能自动重试，也不能按正文去重。
+- `WebSocket.send()` 不是协议提交点；`run_queued` / `prompt_admitted` 都须晚于服务端持久 admission。回执前断线是 unknown outcome：客户端保留原草稿及 promptId，匹配新 focus 的 conversation snapshot hydrate 后以同 ID/同内容/新 runId 自动重发；服务端按 JSONL 中的 promptId 幂等返回 pending/delivered/withdrawn 精确回执，找不到才真正新准入，不能按正文去重。用户改动草稿后不以旧 ID 发送新内容。
 - 错误包含 `scope`，命令错误可包含 `operation`；需要精确结算的设置错误还必须携带 sessionId + commandId。通用设置错误不能结束一次运行。`refresh_models` 的失败只进入设置回执，不得落为全局运行错误。
 - context usage 保留 `measured | estimated | unknown` 来源，不把未知伪装成精确数字。
 
@@ -121,7 +122,7 @@ ClientCommand
 - 扩展 UI 文本与选项有独立上限；超限是扩展错误，不能静默截断后改变选择语义。
 - 大型或循环工具结果必须经过 `toWireValue()`；不要直接放入 `ServerEvent`。
 - 不要把完整 conversation list 放回 PublicState，也不要发送无总量上限的历史快照。conversation window 必须按最终 `JSON.stringify` UTF-8 bytes 计量；非空来源至少保留最新 item，不能因为最新 turn/item 单独超限而返回空快照。
-- 浏览器唯一路径是带 promptId 的 `prompt`：服务端按忙闲分流（busy 进 SDK steering 队列，idle 起新 run），投递证明只能凭 exact promptId + runId 的 raw user 持久化 receipt，run settlement 本身不是交付证明。底层 raw steer 同时承载浏览器消息与 inbox/extension 消息（同一队列，按到达顺序注入）。
+- 浏览器唯一路径是带 promptId 的 `prompt`：服务端先持久准入，再按忙闲与 SDK 可接收状态选择即时 steer 或暂缓自动续投；投递证明是同一 SessionManager 中带 exact promptId + 实际 runId 的 marker 紧邻其 raw user 子 entry，孤立 marker 与 run settlement 都不是证明。底层 raw steer 仍同时承载浏览器与 inbox/extension 消息，并按 SDK 接受顺序注入；持久暂缓项不冒充已入 SDK 队列。
 - 不要只按 conversationId 过滤 transcript。conversationId 会在 `A → B → A` 中重复，focusId 才能阻断 ABA。
 
 ## 关联模块
