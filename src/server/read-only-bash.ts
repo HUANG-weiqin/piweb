@@ -44,6 +44,9 @@ const FILE_SIDE_EFFECT_LONG_OPTIONS = [
 ] as const;
 const UNIQ_FLAG_PATTERN = /^(?:-[cduiDz]+|-[fsw][0-9]+|--(?:count|repeated|unique|ignore-case|zero-terminated)|--(?:all-repeated|group)(?:=(?:none|prepend|separate|append|both))?|--(?:skip-fields|skip-chars|check-chars)=[0-9]+)$/u;
 const UNIQ_VALUE_FLAG_PATTERN = /^-[fsw]$/u;
+const TINYFISH_SEARCH_VALUE_OPTION_PATTERN = /^--(?:location|language|include-domains|exclude-domains|page)$/u;
+const TINYFISH_FETCH_VALUE_OPTION_PATTERN = /^--(?:format|per-url-timeout-ms|if-none-match|if-modified-since)$/u;
+const TINYFISH_FETCH_FLAG_PATTERN = /^--(?:links|image-links|include-etag-and-last-modified)$/u;
 
 // Sticky atom patterns make the lexical scan anchored at the current position.
 // Shell metacharacters are safe inside single quotes. Double quotes still exclude
@@ -53,7 +56,7 @@ const SINGLE_QUOTED_ATOM_PATTERN = /'([^\x00-\x1f\x7f']*)'/y;
 const DOUBLE_QUOTED_ATOM_PATTERN = /"([^\x00-\x1f\x7f"$\\`]*)"/y;
 
 const REJECTION_MESSAGE =
-  "Command was not executed: read-only Bash accepts reviewed Git/rg queries and pwd, ls, grep, find, cat, head, tail, wc, cut, tr, jq, sort, uniq, stat, du, df, readlink, realpath, dirname, basename, or file; each | or && segment is checked, cd only scopes the current call, and redirects, expansions, and modifying forms are rejected.";
+  "Command was not executed: read-only Bash accepts reviewed Git/rg queries, tinyfish search query / fetch content get with known query options, and pwd, ls, grep, find, cat, head, tail, wc, cut, tr, jq, sort, uniq, stat, du, df, readlink, realpath, dirname, basename, or file; each | or && segment is checked, cd only scopes the current call, and redirects, expansions, and modifying forms are rejected.";
 
 interface ParsedSegment {
   words: string[];
@@ -258,6 +261,34 @@ function isReviewedUniq(arguments_: readonly string[]): boolean {
   return true;
 }
 
+function isReviewedTinyfish(words: readonly string[]): boolean {
+  const isSearch = words[1] === "search" && words[2] === "query";
+  const isFetch = words[1] === "fetch" && words[2] === "content" && words[3] === "get";
+  if (!isSearch && !isFetch) return false;
+
+  const arguments_ = words.slice(isSearch ? 3 : 4);
+  const valueOptions = isSearch
+    ? TINYFISH_SEARCH_VALUE_OPTION_PATTERN
+    : TINYFISH_FETCH_VALUE_OPTION_PATTERN;
+  for (let index = 0; index < arguments_.length; index++) {
+    const argument = arguments_[index];
+    if (argument === "--") return true; // Remaining words are literal operands.
+    if (
+      !argument.startsWith("-")
+      || argument === "--pretty" || argument === "--help" || argument === "-h"
+      || (isFetch && TINYFISH_FETCH_FLAG_PATTERN.test(argument))
+    ) {
+      continue;
+    }
+    const equals = argument.indexOf("=");
+    const option = equals === -1 ? argument : argument.slice(0, equals);
+    if (!valueOptions.test(option)) return false;
+    const value = equals === -1 ? arguments_[++index] : argument.slice(equals + 1);
+    if (!value || value.startsWith("-")) return false;
+  }
+  return true;
+}
+
 function isReviewedSegment(segment: ParsedSegment): boolean {
   const [name, ...arguments_] = segment.words;
   switch (name) {
@@ -268,6 +299,8 @@ function isReviewedSegment(segment: ParsedSegment): boolean {
         && arguments_.at(-1) !== "";
     case "git":
       return isReviewedGit(segment.words);
+    case "tinyfish":
+      return isReviewedTinyfish(segment.words);
     case "rg":
       return !hasForbiddenOption(arguments_, RG_EXTERNAL_PROGRAM_PATTERN);
     case "pwd":
@@ -332,10 +365,11 @@ export function createReadOnlyBashTool(
   return defineTool({
     ...bash,
     description:
-      "Execute a conservatively reviewed query shell command with Git, rg, and common file-inspection tools. Reviewed | and && chains are supported; cd affects only this call. This text guardrail is not an OS sandbox.",
+      "Execute a conservatively reviewed query shell command with Git, rg, common file-inspection tools, and TinyFish search/fetch queries. Reviewed | and && chains are supported; cd affects only this call. This text guardrail is not an OS sandbox.",
     promptSnippet:
-      "Run reviewed Git, rg, and file queries with safe pipes, &&, and call-scoped cd.",
+      "Run reviewed Git, rg, and file queries, plus TinyFish search/fetch, with safe pipes, &&, and call-scoped cd.",
     promptGuidelines: [
+      "TinyFish allows only `tinyfish search query <query>` and `tinyfish fetch content get <urls...>` with known query options (such as --pretty, --format, and --per-url-timeout-ms); auth, setup, upgrade, and agent/browser automation are rejected.",
       "Use `cd <dir> && <query>` when needed; directory changes do not persist across bash calls.",
       "Redirects, shell expansion, unlisted programs, and modifying command forms are rejected; use the builtin read/grep/find/ls tools when they fit better.",
     ],

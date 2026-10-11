@@ -178,6 +178,23 @@ const allowedCommands = [
   "basename nested/needle.txt",
   "file --brief 'space name.txt'",
   "rg 'initial|needle;and$(text)&<>`' .",
+  "tinyfish search query 'agentql pricing'",
+  'tinyfish search query "agentql pricing" --pretty',
+  "tinyfish search query pricing --location US --language en --include-domains example.com --exclude-domains other.example --page 1",
+  "tinyfish search query --page=0 --location=US --language=en --include-domains=example.com --exclude-domains=other.example pricing",
+  "tinyfish search query --pretty -- '--output is a search term'",
+  "tinyfish search query 'auth login; $(touch marker)'",
+  "tinyfish search query --help",
+  "tinyfish fetch content get https://example.com",
+  "tinyfish fetch content get https://example.com https://example.org --pretty",
+  "tinyfish fetch content get 'https://example.com/?a=1&b=2' --format markdown --links --image-links --per-url-timeout-ms 15000",
+  "tinyfish fetch content get https://example.com --format=html --per-url-timeout-ms=15000 --include-etag-and-last-modified",
+  "tinyfish fetch content get https://example.com --if-none-match 'etag' --if-modified-since 'Wed, 21 Oct 2015 07:28:00 GMT'",
+  "tinyfish fetch content get -h",
+  "tinyfish fetch content get -- https://example.com",
+  "tinyfish search query pricing | jq '.results' | head -5",
+  "cd nested && tinyfish fetch content get https://example.com --format markdown",
+  "tinyfish search query pricing && tinyfish fetch content get https://example.com",
 ] as const;
 
 const rejectedCommands = [
@@ -267,6 +284,36 @@ const rejectedCommands = [
   ["file magic compilation", "file -C -m magic"],
   ["file abbreviated magic compilation", "file --co -m magic"],
   ["an overlong command", `rg '${"a".repeat(4_096)}'`],
+  ["a bare TinyFish command", "tinyfish"],
+  ["TinyFish authentication", "tinyfish auth login"],
+  ["TinyFish credential modification", "tinyfish auth set"],
+  ["TinyFish agent setup", "tinyfish connect --all"],
+  ["TinyFish configuration", "tinyfish config claude"],
+  ["TinyFish upgrades", "tinyfish upgrade"],
+  ["TinyFish onboarding", "tinyfish onboard"],
+  ["TinyFish diagnostics outside the query scope", "tinyfish doctor"],
+  ["TinyFish automation", "tinyfish agent run 'Buy a product' --url https://example.com"],
+  ["TinyFish browser creation", "tinyfish browser session create"],
+  ["TinyFish vault modification", "tinyfish vault connection add --provider 1password"],
+  ["TinyFish incomplete search", "tinyfish search"],
+  ["TinyFish unknown search action", "tinyfish search update pricing"],
+  ["TinyFish incomplete fetch", "tinyfish fetch content"],
+  ["TinyFish unknown fetch action", "tinyfish fetch content delete https://example.com"],
+  ["TinyFish unknown search option", "tinyfish search query pricing --output results.json"],
+  ["TinyFish unknown fetch option", "tinyfish fetch content get https://example.com --output=page.md"],
+  ["TinyFish abbreviated option", "tinyfish search query pricing --loc US"],
+  ["TinyFish fetch-only option on search", "tinyfish search query pricing --format markdown"],
+  ["TinyFish search-only option on fetch", "tinyfish fetch content get https://example.com --page 0"],
+  ["TinyFish missing option value", "tinyfish search query pricing --location"],
+  ["TinyFish empty option value", "tinyfish fetch content get https://example.com --format="],
+  ["TinyFish option instead of a value", "tinyfish search query pricing --location --output=results.json"],
+  ["TinyFish unreviewed global option", "tinyfish --debug search query pricing"],
+  ["TinyFish option smuggling", "tinyfish search query pricing --location US -- auth login && tinyfish upgrade"],
+  ["TinyFish via an installer", "npx @tiny-fish/cli search query pricing"],
+  ["a TinyFish command path", "/usr/bin/tinyfish search query pricing"],
+  ["TinyFish output redirection", "tinyfish fetch content get https://example.com > page.md"],
+  ["TinyFish shell expansion", 'tinyfish search query "$(touch marker)"'],
+  ["TinyFish unsafe pipeline", "tinyfish search query pricing | sh"],
 ] as const;
 
 describe("createReadOnlyBashTool", { timeout: TEST_TIMEOUT_MS }, () => {
@@ -315,6 +362,36 @@ describe("createReadOnlyBashTool", { timeout: TEST_TIMEOUT_MS }, () => {
     expect(exec).toHaveBeenCalledWith("pwd", cwd, expect.objectContaining({
       env: expect.objectContaining({ GIT_OPTIONAL_LOCKS: "0", GIT_PAGER: "cat" }),
     }));
+  });
+
+  it("executes only the reviewed TinyFish queries through Pi Bash operations", async () => {
+    const exec = vi.fn(async (
+      _command: string,
+      _cwd: string,
+      options: { onData(data: Buffer): void },
+    ) => {
+      options.onData(Buffer.from('{"results":[],"errors":[]}\n'));
+      return { exitCode: 0 };
+    });
+    const tool = createReadOnlyBashTool(cwd, TEST_BASH_PATH, { exec });
+    for (const command of [
+      "tinyfish auth login",
+      "tinyfish agent run 'Buy a product' --url https://example.com",
+      "tinyfish fetch content get https://example.com --output page.md",
+      "tinyfish search query pricing | sh",
+    ]) {
+      await expect(executeTool(tool, { command })).rejects.toThrow(/not executed/i);
+    }
+    expect(exec).not.toHaveBeenCalled();
+
+    for (const command of [
+      "tinyfish search query 'agentql pricing' --pretty",
+      "tinyfish fetch content get https://example.com --format markdown --per-url-timeout-ms 15000",
+    ]) {
+      expect(outputText(await executeTool(tool, { command }))).toContain('"errors":[]');
+      expect(exec).toHaveBeenLastCalledWith(command, cwd, expect.any(Object));
+    }
+    expect(exec).toHaveBeenCalledTimes(2);
   });
 
   it("executes a real rg search with alternation", async () => {
@@ -465,6 +542,9 @@ describe("createReadOnlyBashTool", { timeout: TEST_TIMEOUT_MS }, () => {
     expect(tool.description).not.toMatch(/run_in_background|bash_output|10 minutes|milliseconds/i);
     expect(JSON.stringify(tool.parameters)).toMatch(/timeout.{0,100}seconds/i);
     expect(tool.promptSnippet).toMatch(/Git, rg, and file queries/i);
+    expect(tool.promptSnippet).toMatch(/TinyFish/i);
+    expect(tool.promptGuidelines?.join(" ")).toContain("tinyfish search query");
+    expect(tool.promptGuidelines?.join(" ")).toContain("tinyfish fetch content get");
     expect(tool.promptSnippet).not.toMatch(/run_in_background|bash_output/i);
     expect(tool.promptGuidelines?.join(" ")).not.toMatch(/run_in_background|bash_output/i);
     expect(tool.promptGuidelines).toEqual(expect.arrayContaining([

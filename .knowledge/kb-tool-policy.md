@@ -1,6 +1,6 @@
 # 工具权限
 
-`updated: 2026-10-06`
+`updated: 2026-10-11`
 
 ## 这个模块是干什么的
 
@@ -44,7 +44,9 @@ Actor-owned 会话由 `PiRuntime` 在 session services 解析完成后注入 `so
 
 `bash.timeout` 是整数毫秒，上限 600000；前台默认 120000，后台未显式给出时不设期限；默认前台阻塞到结束，直接返回原生结果，不发布 id。只有显式 `run_in_background:true` 才立即发布当前逻辑 run 的独立 UUID `task_id`；`bash_output` 默认阻塞读取 30000ms（上限 600000），超时或 `block:false` 返回非消费快照，无 id 时立即列有界摘要。`bash_stop({task_id})` 是停止请求，不是停止证明。两个后续工具只控制本 conversation registry 的 task_id，不接收新命令/cwd；句柄跨普通 run 结算仍可用，不扩大查询审查目录。SDK signal 只取消当前等待；真正执行使用独立 controller，预先 aborted 的启动调用仍必须在任何准入/执行前拒绝。权限 gate 保持 sequential；可并发的是已经准入的有限命令，不是工具预检。详见 [kb-server-runtime.md](kb-server-runtime.md) 的 Bash 执行边界。
 
-审查只接受有长度上限、整串锚定的安全词法子集。每个程序名都必须是字面量并属于固定查询目录：受约束的 Git 查询、`rg`，以及目录/文件查看和纯 stdout 变换工具。未引用且处于 word 起始的 `~`（包括 `~/…`、`~user`、`~+`、`~-`）属于 shell expansion，必须在执行前拒绝；引用或 token 中间的字面 `~` 不因此拒绝。 受审查命令可以用 `|` 或 `&&` 组合；每个 segment 都独立复核。`cd [--] path` 只能位于同一次调用的后续查询之前，不能持久改变下一次工具调用的 cwd。换行、`; / || / &`、重定向、Shell 展开、环境赋值、命令路径和未知程序一律拒绝。`find` 的删除/执行/文件输出 action、`rg` 的 preprocessor/hostname program、Git 外部 filter/pager/output、`sort` 文件输出/外部 compressor/显式临时目录、`uniq` 输出文件、`tail` follow 和 `file` 解压/compile 等命令级副作用入口及其实际可用长选项缩写另行拒绝。允许安全的裸参数、单引号字面量，以及不含展开或转义的双引号字面量。
+审查只接受有长度上限、整串锚定的安全词法子集。每个程序名都必须是字面量并属于固定查询目录：受约束的 Git 查询、`rg`、TinyFish `search query / fetch content get`，以及目录/文件查看和纯 stdout 变换工具。未引用且处于 word 起始的 `~`（包括 `~/…`、`~user`、`~+`、`~-`）属于 shell expansion，必须在执行前拒绝；引用或 token 中间的字面 `~` 不因此拒绝。 受审查命令可以用 `|` 或 `&&` 组合；每个 segment 都独立复核。`cd [--] path` 只能位于同一次调用的后续查询之前，不能持久改变下一次工具调用的 cwd。换行、`; / || / &`、重定向、Shell 展开、环境赋值、命令路径和未知程序一律拒绝。`find` 的删除/执行/文件输出 action、`rg` 的 preprocessor/hostname program、Git 外部 filter/pager/output、`sort` 文件输出/外部 compressor/显式临时目录、`uniq` 输出文件、`tail` follow 和 `file` 解压/compile 等命令级副作用入口及其实际可用长选项缩写另行拒绝。允许安全的裸参数、单引号字面量，以及不含展开或转义的双引号字面量。
+
+TinyFish 仅作为已有 `bash` 的查询命令开放，不新增工具、MCP 接入或权限模式：`tinyfish search query <query>` 允许 `--location / --language / --include-domains / --exclude-domains / --page`；`tinyfish fetch content get <urls...>` 允许 `--format / --per-url-timeout-ms / --if-none-match / --if-modified-since` 及 `--links / --image-links / --include-etag-and-last-modified`。两者都可用 `--pretty / --help / -h`，带值选项支持分词或 `=value`，`--` 后按字面 operand 处理；未知/缩写选项、缺失或空值、其它 TinyFish 子命令（包括 auth、connect、upgrade、agent run、browser）仍拒绝。查询使用已安装 CLI 的 PATH 和已有认证，宿主不自动安装、升级或登录；请求会访问网络并可能消耗 TinyFish 额度，不是离线能力或网络 sandbox。
 
 包装器在启动 Pi Bash 时还移除 `BASH_ENV / ENV / BASHOPTS / SHELLOPTS / PS4 / CDPATH / RIPGREP_CONFIG_PATH` 和导出的 `BASH_FUNC_*`，并固定 `GIT_OPTIONAL_LOCKS=0 / GIT_PAGER=cat`，减少审查文本之外的 shell startup、函数遮蔽、rg config、可选 Git 写入与 pager 注入。它的权威事实仍只是“请求文本属于保守的查询 shell 目录”，不是语义或 OS 级只读保证。真实 Bash 仍继承其余进程环境并经 PATH 解析程序；仓库/用户 Git 配置、attributes、pager、fsmonitor、credential/remote helper 和查询命令自身仍可能执行程序或产生写入。可信项目扩展也能绕开工具 gate。需要无人值守或敌对输入隔离时必须使用 OS/container/VM sandbox，不能扩大规则目录来假装获得安全边界。
 
