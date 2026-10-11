@@ -379,6 +379,10 @@ class FakeRuntime implements PiRuntimeLike {
     return this.steeringCaptures.splice(index, 1)[0]!;
   }
 
+  projectTrustNeedsDecision(): boolean {
+    return false;
+  }
+
   async createProjectModelCatalog() {
     return {
       modelRuntime: this.modelRuntime,

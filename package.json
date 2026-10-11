@@ -26,6 +26,7 @@
   "dependencies": {
     "@earendil-works/pi-ai": "1.0.0",
     "@earendil-works/pi-coding-agent": "1.0.0",
+    "@modelcontextprotocol/sdk": "1.31.0",
     "@piweb/context-compressor": "workspace:*",
     "chokidar": "4.0.3",
     "picomatch": "4.0.3",

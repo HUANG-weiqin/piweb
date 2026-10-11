@@ -339,6 +339,8 @@ export interface CreateUserConversationInput {
   title?: string;
   extensionUI?: PortableExtensionUI;
   signal?: AbortSignal;
+  /** False keeps the project's recent conversation unchanged. */
+  updateRecent?: boolean;
 }
 
 export interface StartPeerSessionInput {
@@ -874,6 +876,32 @@ export class ProjectSessionCoordinator {
     return catalog.modelRegistry;
   }
 
+  /**
+   * Whether serving a request now would make Pi ask the user about project
+   * trust. Pi asks while creating the project catalog or any new Pi session;
+   * an existing catalog or a live, healthy actor never asks again. Omitting
+   * `conversationId` means a new session (create or fork).
+   */
+  needsProjectTrustQuestion(
+    handle: ProjectSessionHandle,
+    target: "catalog" | { conversationId?: string },
+  ): boolean {
+    const context = this.requireContext(handle);
+    if (target === "catalog") {
+      if (context.modelCatalog) return false;
+    } else if (target.conversationId !== undefined) {
+      const actor = context.actors.get(target.conversationId);
+      if (
+        actor
+        && !actor.getState().disposed
+        && !actor.isSessionPersistenceQuarantined()
+      ) {
+        return false;
+      }
+    }
+    return this.runtime.projectTrustNeedsDecision(context.project.cwd);
+  }
+
   modelRegistryForProject(handle: ProjectSessionHandle) {
     const context = this.requireContext(handle);
     for (const actor of context.actors.values()) {
@@ -1269,6 +1297,7 @@ export class ProjectSessionCoordinator {
           conversationId,
           profile,
           input.title,
+          input.updateRecent,
         );
         this.throwIfAborted(input.signal);
         return actor;
@@ -1304,7 +1333,7 @@ export class ProjectSessionCoordinator {
   async forkCurrentLeafConversation(
     handle: ProjectSessionHandle,
     sourceConversationId: string,
-    options: { signal?: AbortSignal } = {},
+    options: { signal?: AbortSignal; updateRecent?: boolean } = {},
   ): Promise<ConversationActor> {
     const context = this.requireContext(handle);
     return this.runLifecycle(context, async () => {
@@ -1343,7 +1372,9 @@ export class ProjectSessionCoordinator {
           profile,
         );
         context.project.projectConversationSession(manager);
-        await context.project.setLastConversation(conversationId);
+        if (options.updateRecent !== false) {
+          await context.project.setLastConversation(conversationId);
+        }
         return actor;
       } catch (error) {
         const failures: unknown[] = [error];
@@ -2729,6 +2760,7 @@ export class ProjectSessionCoordinator {
     conversationId: string,
     profile: ConversationMeta,
     title?: string,
+    updateRecent?: boolean,
   ): Promise<ConversationActor> {
     if (context.closing || this.disposed) {
       return Promise.reject(new Error("Project context is closing"));
@@ -2751,6 +2783,7 @@ export class ProjectSessionCoordinator {
       conversationId,
       profile,
       title,
+      updateRecent,
     );
     context.actorOpenings.set(conversationId, creation);
     void creation.finally(() => {
@@ -2766,6 +2799,7 @@ export class ProjectSessionCoordinator {
     conversationId: string,
     profile: ConversationMeta,
     title?: string,
+    updateRecent?: boolean,
   ): Promise<ConversationActor> {
     const lease = this.projects.acquireConversation(
       context.project.cwd,
@@ -2793,7 +2827,7 @@ export class ProjectSessionCoordinator {
       );
       if (title) actor.session.setSessionName(title);
       context.project.projectConversationSession(manager);
-      if (profile.createdBy.kind === "user") {
+      if (profile.createdBy.kind === "user" && updateRecent !== false) {
         // The final writer wins recent ordering, and any failure remains inside
         // the same rollback boundary as the actor, lease, and JSONL file.
         await context.project.setLastConversation(actor.conversationId);

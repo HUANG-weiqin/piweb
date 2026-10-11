@@ -113,11 +113,15 @@ export const MAX_TRANSITION_DIAGNOSTIC_PHASE_MS = 60 * 60 * 1_000;
 // their OpenAI-compatible model list before saving.
 // v59: idle current-leaf fork copies LLM-effective context into a fresh host
 // lifecycle via `fork_conversation`; history anchors stay unsupported.
+// v71: initialize may declare `extensionUi: "none"`; such a connection never
+// becomes an extension dialog delegate, never answers project trust (work that
+// would ask fails instead), and never moves the recent conversation or clears
+// attention. `recent` then opens no conversation.
 // v70: browser prompt receipts now follow durable JSONL admission; Stop keeps
 // un-delivered inputs, and same-ID reconnects reconcile without duplicate runs.
 // v69: connection-scoped session-file inspection and backed-up tail repair,
 // available even when workspace initialization fails; no validation bypass.
-export const PROTOCOL_VERSION = 70;
+export const PROTOCOL_VERSION = 71;
 export const OBSERVATION_FATAL_CLOSE_CODE = 4002;
 export const COLOR_SCHEMES = ["quiet-rebel", "classic-rebel"] as const;
 export type ColorScheme = typeof COLOR_SCHEMES[number];
@@ -680,6 +684,8 @@ const clientCommandUnionSchema = z.discriminatedUnion("type", [
       }),
       z.object({ kind: z.literal("open"), conversationId: conversationIdSchema }),
     ]),
+    /** Omitted means "interactive": the connection answers extension dialogs. */
+    extensionUi: z.enum(["interactive", "none"]).optional(),
   }),
   z.object({
     type: z.literal("focus_conversation"),

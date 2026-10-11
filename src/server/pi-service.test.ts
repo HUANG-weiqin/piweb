@@ -20,12 +20,14 @@ import {
   MAX_PROJECT_CONVERSATIONS,
   MAX_TRANSITION_DIAGNOSTIC_PHASE_MS,
   parseServerEvent,
+  type ClientCommand,
   type ConversationSummary,
   type ServerEvent,
 } from "../shared/protocol.js";
 import type {
   CreatedPiSession,
   CreatePiSessionOptions,
+  CreateProjectModelCatalogOptions,
   CredentialChangeIntent,
   PiRuntimeLike,
   ToolCallGate,
@@ -247,6 +249,8 @@ class FakeRuntime implements PiRuntimeLike {
   readonly createCalls: string[] = [];
   readonly created: FakeSession[] = [];
   projectCatalogCreations = 0;
+  lastProjectCatalogOptions?: CreateProjectModelCatalogOptions;
+  projectTrustDecisionPending = false;
   beforeCreateProjectModelCatalog?: () => Promise<void>;
   sessionModelRegistry?: ModelRegistry;
   projectModelRegistry?: ModelRegistry;
@@ -266,8 +270,16 @@ class FakeRuntime implements PiRuntimeLike {
   private readonly listeners = new Set<() => void>();
   private readonly credentialRevisions = new Map<string, number>();
 
-  async createProjectModelCatalog() {
+  projectTrustNeedsDecision(): boolean {
+    return this.projectTrustDecisionPending;
+  }
+
+  async createProjectModelCatalog(
+    _cwd: string,
+    options: CreateProjectModelCatalogOptions = {},
+  ) {
     this.projectCatalogCreations++;
+    this.lastProjectCatalogOptions = options;
     await this.beforeCreateProjectModelCatalog?.();
     return {
       modelRuntime: this.modelRuntime,
@@ -8199,6 +8211,260 @@ describe("PiConnection coordinated project view", () => {
         roles: [],
       });
     } finally {
+      await harness.cleanup();
+    }
+  });
+});
+
+describe("PiConnection without extension UI", () => {
+  function headlessConnection(harness: CoordinatedHarness) {
+    const events: ServerEvent[] = [];
+    const connection = new PiConnection(
+      (event) => events.push(event),
+      harness.runtime,
+      async () => ({ coordinator: harness.coordinator, roles: harness.roles }),
+    );
+    return { events, connection };
+  }
+
+  function extensionUIEvents(events: ServerEvent[]): ServerEvent[] {
+    return events.filter(({ type }) =>
+      type === "extension_ui_request" || type === "extension_ui_notification"
+    );
+  }
+
+  async function answerBrowserDialog(
+    harness: CoordinatedHarness,
+    title: string,
+  ): Promise<void> {
+    await vi.waitFor(() => {
+      expect(harness.events).toContainEqual(expect.objectContaining({
+        type: "extension_ui_request",
+        sessionId: SESSION_A,
+        request: expect.objectContaining({ title }),
+      }));
+    });
+    const request = harness.events.findLast((event) =>
+      event.type === "extension_ui_request" && event.request.title === title
+    );
+    if (request?.type !== "extension_ui_request") {
+      throw new Error(`browser dialog was not requested: ${title}`);
+    }
+    await harness.connection.handle({
+      type: "extension_ui_response",
+      sessionId: SESSION_A,
+      requestId: request.requestId,
+      response: { kind: "confirm", confirmed: true },
+    });
+  }
+
+  it("keeps conversation dialogs with the browser while a headless connection is focused", async () => {
+    const harness = await coordinatedConnectionHarness();
+    const headless = headlessConnection(harness);
+    try {
+      const conversationId = (await initializeNewConversation(harness))
+        .conversationId!;
+      const ui = harness.runtime.lastCreateOptions?.extensionUI;
+      if (!ui) throw new Error("conversation extension UI was not bound");
+      await headless.connection.handle({
+        type: "initialize",
+        commandId: randomUUID(),
+        sessionId: SESSION_B,
+        cwd: harness.cwd,
+        conversation: { kind: "open", conversationId },
+        extensionUi: "none",
+      });
+      expect(latestState(headless.events).conversationId).toBe(conversationId);
+
+      const browserDialog = ui.confirm("Browser dialog", "Only the browser answers");
+      await answerBrowserDialog(harness, "Browser dialog");
+      await expect(browserDialog).resolves.toBe(true);
+
+      await harness.connection.handle({
+        type: "create_conversation",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        roleId: "default",
+      });
+      const waitingDialog = ui.confirm("Waiting dialog", "Wait for a browser");
+      ui.notify("Waiting note", "info");
+      await headless.connection.handle({
+        type: "focus_conversation",
+        commandId: randomUUID(),
+        sessionId: SESSION_B,
+        conversationId,
+      });
+      await vi.waitFor(() => {
+        expect(headless.events.findLast(
+          (event) => event.type === "project_snapshot",
+        )).toMatchObject({
+          conversations: expect.arrayContaining([
+            expect.objectContaining({ id: conversationId, attention: true }),
+          ]),
+        });
+      });
+
+      await harness.connection.handle({
+        type: "focus_conversation",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        conversationId,
+      });
+      await answerBrowserDialog(harness, "Waiting dialog");
+      await expect(waitingDialog).resolves.toBe(true);
+      expect(extensionUIEvents(headless.events)).toEqual([]);
+    } finally {
+      await headless.connection.dispose();
+      await harness.cleanup();
+    }
+  });
+
+  it("refuses headless work that would ask the user about project trust", async () => {
+    const harness = await coordinatedConnectionHarness();
+    const headless = headlessConnection(harness);
+    let headlessSessionId = SESSION_B;
+    const headlessInitialize = (
+      conversation: Extract<
+        ClientCommand,
+        { type: "initialize" }
+      >["conversation"],
+    ) => {
+      headlessSessionId = randomUUID();
+      return headless.connection.handle({
+        type: "initialize",
+        commandId: randomUUID(),
+        sessionId: headlessSessionId,
+        cwd: harness.cwd,
+        conversation,
+        extensionUi: "none",
+      });
+    };
+    try {
+      harness.runtime.projectTrustDecisionPending = true;
+      await expect(headlessInitialize({ kind: "recent" }))
+        .rejects.toThrow("信任");
+      expect(harness.runtime.projectCatalogCreations).toBe(0);
+
+      const warmId = (await initializeNewConversation(harness)).conversationId!;
+      const coldId = await createColdConversation(harness, "cold");
+      const sessionsBefore = harness.runtime.created.length;
+
+      await expect(headlessInitialize({ kind: "open", conversationId: coldId }))
+        .rejects.toThrow("信任");
+      await expect(headlessInitialize({ kind: "new", roleId: "default" }))
+        .rejects.toThrow("信任");
+      await headlessInitialize({ kind: "open", conversationId: warmId });
+      expect(latestState(headless.events).conversationId).toBe(warmId);
+      await expect(headless.connection.handle({
+        type: "focus_conversation",
+        commandId: randomUUID(),
+        sessionId: headlessSessionId,
+        conversationId: coldId,
+      })).rejects.toThrow("信任");
+      await expect(headless.connection.handle({
+        type: "create_conversation",
+        commandId: randomUUID(),
+        sessionId: headlessSessionId,
+        roleId: "default",
+      })).rejects.toThrow("信任");
+      await expect(headless.connection.handle({
+        type: "fork_conversation",
+        commandId: randomUUID(),
+        sessionId: headlessSessionId,
+        conversationId: warmId,
+      })).rejects.toThrow("信任");
+      expect(latestState(headless.events).conversationId).toBe(warmId);
+
+      expect(harness.runtime.created).toHaveLength(sessionsBefore);
+      expect(extensionUIEvents(headless.events)).toEqual([]);
+    } finally {
+      await headless.connection.dispose();
+      await harness.cleanup();
+    }
+  });
+
+  it("gives a headless project catalog a UI that refuses every dialog", async () => {
+    const harness = await coordinatedConnectionHarness();
+    const headless = headlessConnection(harness);
+    try {
+      await headless.connection.handle({
+        type: "initialize",
+        commandId: randomUUID(),
+        sessionId: SESSION_B,
+        cwd: harness.cwd,
+        conversation: { kind: "recent" },
+        extensionUi: "none",
+      });
+      const ui = harness.runtime.lastProjectCatalogOptions?.extensionUI;
+      if (!ui) throw new Error("project catalog did not receive a UI");
+      await expect(ui.select("是否信任项目资源？", ["信任"])).rejects.toThrow("信任");
+      await expect(ui.confirm("confirm", "message")).rejects.toThrow("信任");
+      ui.notify("note", "warning");
+      expect(extensionUIEvents(headless.events)).toEqual([]);
+    } finally {
+      await headless.connection.dispose();
+      await harness.cleanup();
+    }
+  });
+
+  it("leaves the recent conversation and attention marks to interactive connections", async () => {
+    const harness = await coordinatedConnectionHarness();
+    const headless = headlessConnection(harness);
+    try {
+      const first = (await initializeNewConversation(harness)).conversationId!;
+      await harness.connection.handle({
+        type: "create_conversation",
+        commandId: randomUUID(),
+        sessionId: SESSION_A,
+        roleId: "default",
+      });
+      const second = latestState(harness.events).conversationId!;
+      const handle = await harness.coordinator.acquireProject(
+        harness.cwd,
+        "read_only",
+      );
+      try {
+        expect(handle.project.lastConversationId).toBe(second);
+        projectReferenceState(handle).attention.add(first);
+
+        await headless.connection.handle({
+          type: "initialize",
+          commandId: randomUUID(),
+          sessionId: SESSION_B,
+          cwd: harness.cwd,
+          conversation: { kind: "recent" },
+          extensionUi: "none",
+        });
+        expect(latestState(headless.events)).not.toHaveProperty("conversationId");
+        await headless.connection.handle({
+          type: "focus_conversation",
+          commandId: randomUUID(),
+          sessionId: SESSION_B,
+          conversationId: first,
+        });
+        await headless.connection.handle({
+          type: "create_conversation",
+          commandId: randomUUID(),
+          sessionId: SESSION_B,
+          roleId: "default",
+        });
+        await headless.connection.handle({
+          type: "initialize",
+          commandId: randomUUID(),
+          sessionId: SESSION_C,
+          cwd: harness.cwd,
+          conversation: { kind: "open", conversationId: first },
+          extensionUi: "none",
+        });
+        await new Promise((resolve) => setTimeout(resolve, 50));
+
+        expect(handle.project.lastConversationId).toBe(second);
+        expect(projectReferenceState(handle).attention.has(first)).toBe(true);
+      } finally {
+        handle.release();
+      }
+    } finally {
+      await headless.connection.dispose();
       await harness.cleanup();
     }
   });

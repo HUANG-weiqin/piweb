@@ -19,7 +19,7 @@ import type {
 import { AuthFlowBroker } from "./auth-flow.js";
 import type { ConversationActor } from "./conversation-actor.js";
 import { validateCwd } from "./cwd.js";
-import { ExtensionUIBroker } from "./extension-ui.js";
+import { ExtensionUIBroker, type PortableExtensionUI } from "./extension-ui.js";
 import {
   type CredentialChangeIntent,
   type PiRuntimeLike,
@@ -52,6 +52,12 @@ export type PiConnectionCoordinationProvider =
 interface CoordinatedProjectView {
   sessionId: string;
   generation: number;
+  /**
+   * False for a connection that declared `extensionUi: "none"`: it is never an
+   * extension dialog delegate, never lets Pi ask about trust on its behalf,
+   * and never moves the recent conversation or clears attention.
+   */
+  readonly interactive: boolean;
   extensionScope: number;
   extensionAbort: AbortController;
   coordinator: ProjectSessionCoordinator;
@@ -95,6 +101,23 @@ type ConnectionCommand = Exclude<
       | "probe_custom_provider_models";
   }
 >;
+const UNDECIDED_TRUST_MESSAGE =
+  "此项目的资源信任还没有决定。本连接不接收扩展对话框，不能回答信任询问。"
+  + "请在浏览器中打开此项目或该会话并回答信任询问；选择“记住”后，本连接也能打开新的会话。";
+
+/**
+ * Project catalog UI for a connection without extension UI. Every dialog
+ * fails, so Pi can never settle trust through it (a cancelled answer would
+ * mean "decline once" for the shared catalog).
+ */
+const REFUSING_EXTENSION_UI: PortableExtensionUI = {
+  select: () => Promise.reject(new Error(UNDECIDED_TRUST_MESSAGE)),
+  confirm: () => Promise.reject(new Error(UNDECIDED_TRUST_MESSAGE)),
+  input: () => Promise.reject(new Error(UNDECIDED_TRUST_MESSAGE)),
+  editor: () => Promise.reject(new Error(UNDECIDED_TRUST_MESSAGE)),
+  notify: () => undefined,
+};
+
 function assertNever(value: never): never {
   const type = (value as { type?: unknown }).type;
   throw new Error(`Unhandled command type: ${String(type)}`);
@@ -761,6 +784,7 @@ export class PiConnection {
     let createdConversationId: string | undefined;
     let initialRecentConversations: ConversationSummary[] | undefined;
     let recentSeedInvalidated = false;
+    const interactive = command.extensionUi !== "none";
     try {
       this.throwIfAborted(signal);
 
@@ -780,11 +804,14 @@ export class PiConnection {
           "presentationOrTargetReadMs",
           () => coordinator.listSessionsForDisplay(handle, signal),
         );
-        const knownIds = new Set(recentSeed.map(({ id }) => id));
-        targetConversationId = handle.project.lastConversationId
-          && knownIds.has(handle.project.lastConversationId)
-          ? handle.project.lastConversationId
-          : recentSeed[0]?.id;
+        // A connection without extension UI only observes the project.
+        if (interactive) {
+          const knownIds = new Set(recentSeed.map(({ id }) => id));
+          targetConversationId = handle.project.lastConversationId
+            && knownIds.has(handle.project.lastConversationId)
+            ? handle.project.lastConversationId
+            : recentSeed[0]?.id;
+        }
       }
 
       if (
@@ -822,17 +849,22 @@ export class PiConnection {
       }
 
       extensionScope = ++this.extensionScope;
-      const extensionUI = this.extensionUI.context({
-        sessionId: command.sessionId,
-        generation: extensionScope,
-        signal: extensionAbort.signal,
-      });
+      const extensionUI = interactive
+        ? this.extensionUI.context({
+            sessionId: command.sessionId,
+            generation: extensionScope,
+            signal: extensionAbort.signal,
+          })
+        : undefined;
+      if (!extensionUI) {
+        this.assertNoTrustQuestion(coordinator, handle, "catalog");
+      }
       await this.measureTransitionPhase(
         diagnostics,
         "contextOrCatalogMs",
         () => coordinator.ensureProjectModelCatalog(
           handle,
-          extensionUI,
+          extensionUI ?? REFUSING_EXTENSION_UI,
           signal,
         ),
       );
@@ -845,34 +877,45 @@ export class PiConnection {
             "A role must be selected before creating a conversation",
           );
         }
+        if (!extensionUI) this.assertNoTrustQuestion(coordinator, handle, {});
         actor = await this.measureTransitionPhase(
           diagnostics,
           "actorActivationOrLeaseMs",
           () => coordinator.createUserConversation(handle, {
             roleId,
-            extensionUI,
             signal: extensionAbort.signal,
+            ...(extensionUI
+              ? { extensionUI }
+              : { updateRecent: false }),
           }),
         );
         createdConversationId = actor.conversationId;
-        unsubscribeExtensionUI = coordinator.attachExtensionUI(
-          handle,
-          actor.conversationId,
-          extensionUI,
-        );
+        if (extensionUI) {
+          unsubscribeExtensionUI = coordinator.attachExtensionUI(
+            handle,
+            actor.conversationId,
+            extensionUI,
+          );
+        }
       } else if (targetConversationId !== undefined) {
-        unsubscribeExtensionUI = coordinator.attachExtensionUI(
-          handle,
-          targetConversationId,
-          extensionUI,
-        );
+        if (extensionUI) {
+          unsubscribeExtensionUI = coordinator.attachExtensionUI(
+            handle,
+            targetConversationId,
+            extensionUI,
+          );
+        } else {
+          this.assertNoTrustQuestion(coordinator, handle, {
+            conversationId: targetConversationId,
+          });
+        }
         actor = await this.measureTransitionPhase(
           diagnostics,
           "actorActivationOrLeaseMs",
           () => coordinator.openConversation(
             handle,
             targetConversationId,
-            { signal },
+            extensionUI ? { signal } : { signal, updateRecent: false },
           ),
         );
       }
@@ -892,6 +935,7 @@ export class PiConnection {
       const view: CoordinatedProjectView = {
         sessionId: command.sessionId,
         generation,
+        interactive,
         extensionScope,
         extensionAbort,
         coordinator,
@@ -1036,15 +1080,21 @@ export class PiConnection {
           }
 
           extensionScope = ++this.extensionScope;
-          detachExtensionUI = coordinator.attachExtensionUI(
-            view.handle,
-            command.conversationId,
-            this.extensionUI.context({
-              sessionId: view.sessionId,
-              generation: extensionScope,
-              signal: extensionAbort.signal,
-            }),
-          );
+          if (view.interactive) {
+            detachExtensionUI = coordinator.attachExtensionUI(
+              view.handle,
+              command.conversationId,
+              this.extensionUI.context({
+                sessionId: view.sessionId,
+                generation: extensionScope,
+                signal: extensionAbort.signal,
+              }),
+            );
+          } else {
+            this.assertNoTrustQuestion(coordinator, view.handle, {
+              conversationId: command.conversationId,
+            });
+          }
           const actor = await diagnostics.measure(
             "actorActivationOrLeaseMs",
             () => coordinator.openConversation(
@@ -1065,7 +1115,7 @@ export class PiConnection {
             actor,
             "focus_conversation",
             command.commandId,
-            detachExtensionUI,
+            detachExtensionUI ?? (() => undefined),
             extensionScope,
             extensionAbort,
             diagnostics,
@@ -1093,37 +1143,46 @@ export class PiConnection {
         const { coordinator } = await this.requireCoordination();
         const extensionScope = ++this.extensionScope;
         const extensionAbort = transitionAbort ?? new AbortController();
-        const extensionUI = this.extensionUI.context({
-          sessionId: view.sessionId,
-          generation: extensionScope,
-          signal: extensionAbort.signal,
-        });
+        const extensionUI = view.interactive
+          ? this.extensionUI.context({
+              sessionId: view.sessionId,
+              generation: extensionScope,
+              signal: extensionAbort.signal,
+            })
+          : undefined;
         let detachExtensionUI: (() => void) | undefined;
         let createdConversationId: string | undefined;
         let transferred = false;
         try {
+          if (!extensionUI) {
+            this.assertNoTrustQuestion(coordinator, view.handle, {});
+          }
           const actor = await coordinator.createUserConversation(view.handle, {
             roleId: command.roleId,
             ...(command.title === undefined ? {} : { title: command.title }),
-            extensionUI,
             signal: extensionAbort.signal,
+            ...(extensionUI
+              ? { extensionUI }
+              : { updateRecent: false }),
           });
           createdConversationId = actor.conversationId;
           if (
             extensionAbort.signal.aborted
             || this.coordinatedView !== view
           ) return;
-          detachExtensionUI = coordinator.attachExtensionUI(
-            view.handle,
-            actor.conversationId,
-            extensionUI,
-          );
+          if (extensionUI) {
+            detachExtensionUI = coordinator.attachExtensionUI(
+              view.handle,
+              actor.conversationId,
+              extensionUI,
+            );
+          }
           this.attachCoordinatedFocus(
             view,
             actor,
             "create_conversation",
             command.commandId,
-            detachExtensionUI,
+            detachExtensionUI ?? (() => undefined),
             extensionScope,
             extensionAbort,
           );
@@ -1154,36 +1213,45 @@ export class PiConnection {
         const { coordinator } = await this.requireCoordination();
         const extensionScope = ++this.extensionScope;
         const extensionAbort = transitionAbort ?? new AbortController();
-        const extensionUI = this.extensionUI.context({
-          sessionId: view.sessionId,
-          generation: extensionScope,
-          signal: extensionAbort.signal,
-        });
+        const extensionUI = view.interactive
+          ? this.extensionUI.context({
+              sessionId: view.sessionId,
+              generation: extensionScope,
+              signal: extensionAbort.signal,
+            })
+          : undefined;
         let detachExtensionUI: (() => void) | undefined;
         let createdConversationId: string | undefined;
         let transferred = false;
         try {
+          if (!extensionUI) {
+            this.assertNoTrustQuestion(coordinator, view.handle, {});
+          }
           const actor = await coordinator.forkCurrentLeafConversation(
             view.handle,
             command.conversationId,
-            { signal: extensionAbort.signal },
+            extensionUI
+              ? { signal: extensionAbort.signal }
+              : { signal: extensionAbort.signal, updateRecent: false },
           );
           createdConversationId = actor.conversationId;
           if (
             extensionAbort.signal.aborted
             || this.coordinatedView !== view
           ) return;
-          detachExtensionUI = coordinator.attachExtensionUI(
-            view.handle,
-            actor.conversationId,
-            extensionUI,
-          );
+          if (extensionUI) {
+            detachExtensionUI = coordinator.attachExtensionUI(
+              view.handle,
+              actor.conversationId,
+              extensionUI,
+            );
+          }
           this.attachCoordinatedFocus(
             view,
             actor,
             "fork_conversation",
             command.commandId,
-            detachExtensionUI,
+            detachExtensionUI ?? (() => undefined),
             extensionScope,
             extensionAbort,
           );
@@ -1409,6 +1477,21 @@ case "set_thinking":
       : diagnostics.measure(phase, work);
   }
 
+  /**
+   * A connection without extension UI must not make Pi ask about trust: the
+   * question would reach no one it could show it to, and a new conversation
+   * is not yet listed for the user to answer it.
+   */
+  private assertNoTrustQuestion(
+    coordinator: ProjectSessionCoordinator,
+    handle: ProjectSessionHandle,
+    target: Parameters<ProjectSessionCoordinator["needsProjectTrustQuestion"]>[1],
+  ): void {
+    if (coordinator.needsProjectTrustQuestion(handle, target)) {
+      throw new Error(UNDECIDED_TRUST_MESSAGE);
+    }
+  }
+
   private attachCoordinatedFocus(
     view: CoordinatedProjectView,
     actor: ConversationActor,
@@ -1436,7 +1519,8 @@ case "set_thinking":
     this.emitFocusAttached(view, operation, commandId);
     this.publishCoordinatedState();
     this.publishFocusedConversationSnapshot(diagnostics);
-    if (operation === "focus_conversation") {
+    // Recent marking also acknowledges attention, which only the user may do.
+    if (operation === "focus_conversation" && view.interactive) {
       const attachedFocusId = view.focusId;
       if (attachedFocusId === undefined) {
         throw new Error("Focus identity was not assigned before recent update");

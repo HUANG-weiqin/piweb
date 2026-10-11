@@ -593,6 +593,10 @@ class FakeRuntime implements PiRuntimeLike {
     } as unknown as ModelRegistry;
   }
 
+  projectTrustNeedsDecision(): boolean {
+    return false;
+  }
+
   async createProjectModelCatalog() {
     this.projectCatalogCreations++;
     await this.beforeCreateProjectModelCatalog?.();

@@ -43,7 +43,24 @@ const transitionDiagnostics = {
 
 describe("parseClientCommand", () => {
   it("uses the run-correlated protocol version", () => {
-    expect(PROTOCOL_VERSION).toBe(70);
+    expect(PROTOCOL_VERSION).toBe(71);
+  });
+
+  it("lets initialize declare a connection without extension UI", () => {
+    const initialize = {
+      type: "initialize",
+      commandId,
+      sessionId,
+      cwd: "E:/project",
+      conversation: { kind: "recent" },
+    };
+    expect(parseClientCommand(initialize)).toEqual(initialize);
+    expect(parseClientCommand({ ...initialize, extensionUi: "none" }))
+      .toMatchObject({ extensionUi: "none" });
+    expect(parseClientCommand({ ...initialize, extensionUi: "interactive" }))
+      .toMatchObject({ extensionUi: "interactive" });
+    expect(() => parseClientCommand({ ...initialize, extensionUi: "silent" }))
+      .toThrow();
   });
 
   it("correlates workspace maintenance before initialize and requires explicit tail-loss consent", () => {

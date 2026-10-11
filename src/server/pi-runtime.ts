@@ -646,6 +646,12 @@ export interface PiRuntimeLike {
     cwd: string,
     options?: CreateProjectModelCatalogOptions,
   ): Promise<CreatedProjectModelCatalog>;
+  /**
+   * True when creating a Pi session or project catalog for `cwd` now would
+   * ask the user whether to trust project resources: none is saved and the
+   * global default policy is "ask".
+   */
+  projectTrustNeedsDecision(cwd: string): boolean;
   beginCredentialChange(provider: string): CredentialChangeIntent;
   commitCredentialChange(
     intent: CredentialChangeIntent,
@@ -2102,6 +2108,26 @@ export class PiRuntime implements PiRuntimeLike {
     };
   }
 
+  projectTrustNeedsDecision(cwd: string): boolean {
+    return hasTrustRequiringProjectResources(cwd)
+      && this.decidedProjectTrust(cwd, this.createSettings(cwd)) === undefined;
+  }
+
+  /** The saved decision or the default policy; undefined means Pi must ask. */
+  private decidedProjectTrust(
+    cwd: string,
+    settings: SettingsManager,
+  ): boolean | undefined {
+    const saved = this.projectTrustStore.get(cwd);
+    if (saved !== null) return saved;
+    // Pi deliberately reads this policy from global settings, never project settings.
+    switch (settings.getDefaultProjectTrust()) {
+      case "always": return true;
+      case "never": return false;
+      case "ask": return undefined;
+    }
+  }
+
   private async resolveProjectTrust(
     cwd: string,
     settings: SettingsManager,
@@ -2109,19 +2135,10 @@ export class PiRuntime implements PiRuntimeLike {
   ): Promise<boolean> {
     if (!hasTrustRequiringProjectResources(cwd)) return true;
     const deniedMessage = "项目资源未受信任，已跳过项目设置、skills 和 extensions。";
-    const saved = this.projectTrustStore.get(cwd);
-    if (saved !== null) {
-      if (!saved) ui?.notify(deniedMessage, "warning");
-      return saved;
-    }
-
-    // Pi deliberately reads this policy from global settings, never project settings.
-    switch (settings.getDefaultProjectTrust()) {
-      case "always": return true;
-      case "never":
-        ui?.notify(deniedMessage, "warning");
-        return false;
-      case "ask": break;
+    const decided = this.decidedProjectTrust(cwd, settings);
+    if (decided !== undefined) {
+      if (!decided) ui?.notify(deniedMessage, "warning");
+      return decided;
     }
     if (!ui) return false;
 

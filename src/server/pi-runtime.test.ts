@@ -2997,6 +2997,63 @@ describe("PiRuntime session ownership", () => {
     await created.dispose();
   });
 
+  it("reports undecided project trust and never settles it through a refusing UI", async () => {
+    const cwd = await temporaryDirectory("piweb-runtime-undecided-project-");
+    const plainCwd = await temporaryDirectory("piweb-runtime-plain-project-");
+    const agentDir = await temporaryDirectory("piweb-runtime-undecided-agent-");
+    await mkdir(join(cwd, ".pi"), { recursive: true });
+    await writeFile(join(cwd, ".pi", "settings.json"), "{}\n", "utf8");
+    const remembered = new Map<string, boolean>();
+    const writes: unknown[] = [];
+    let defaultProjectTrust: "ask" | "never" = "ask";
+    const runtime = await PiRuntime.create({
+      credentialStore: new InMemoryCredentialStore(),
+      modelsStore: new InMemoryModelsStore(),
+      createModelsStore: () => new InMemoryModelsStore(),
+      createSettings: (projectCwd) => {
+        const settings = SettingsManager.create(
+          projectCwd,
+          agentDir,
+          { projectTrusted: false },
+        );
+        vi.spyOn(settings, "getDefaultProjectTrust")
+          .mockImplementation(() => defaultProjectTrust);
+        return settings;
+      },
+      createServices: (options) => createAgentSessionServices({
+        ...options,
+        agentDir,
+      }),
+      projectTrustStore: {
+        get: (projectCwd) => remembered.get(projectCwd) ?? null,
+        set: (projectCwd, trusted) => {
+          writes.push([projectCwd, trusted]);
+        },
+      },
+    });
+
+    expect(runtime.projectTrustNeedsDecision(cwd)).toBe(true);
+    expect(runtime.projectTrustNeedsDecision(plainCwd)).toBe(false);
+    const refusal = new Error("信任尚未决定");
+    const refuse = () => Promise.reject(refusal);
+    await expect(runtime.createProjectModelCatalog(cwd, {
+      extensionUI: {
+        select: refuse,
+        confirm: refuse,
+        input: refuse,
+        editor: refuse,
+        notify: () => undefined,
+      },
+    })).rejects.toBe(refusal);
+    expect(writes).toEqual([]);
+
+    defaultProjectTrust = "never";
+    expect(runtime.projectTrustNeedsDecision(cwd)).toBe(false);
+    defaultProjectTrust = "ask";
+    remembered.set(cwd, true);
+    expect(runtime.projectTrustNeedsDecision(cwd)).toBe(false);
+  });
+
   it("registers project providers before restoring a persisted model", async () => {
     const cwd = await temporaryDirectory("piweb-runtime-restore-provider-");
     const credentialStore = new InMemoryCredentialStore();

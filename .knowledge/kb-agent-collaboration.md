@@ -62,7 +62,7 @@ initial disposition 必须 started，busy browser/显式 steer 必须 queued，h
 
 ### Extension UI
 
-扩展 UI 只在线路上路由到当前被该浏览器 focus 的 conversation。后台 actor 暂无 UI delegate 时，请求留在 conversation router 中并把目标标为 attention，不会抢走用户焦点；用户切换到该会话后才发出对话框并可正常回答。等待 focus 期间仍遵守 extension 的 AbortSignal/timeout；切走 focus 会取消已经发给浏览器的旧对话框，项目关闭会用取消值结算全部待处理请求。角色提示词 editor 额外绑定当前工具调用的 AbortSignal：无 delegate 或已发到浏览器时取消 run 都会结算 router/broker pending、关闭对话框并禁止迟到回答落版。
+扩展 UI 只在线路上路由到当前被该浏览器 focus 的 conversation；initialize 声明 `extensionUi:"none"` 的连接（MCP 桥）即使 focus 也不成为 delegate，不会接走浏览器的对话框。后台 actor 暂无 UI delegate 时，请求留在 conversation router 中并把目标标为 attention，不会抢走用户焦点；用户切换到该会话后才发出对话框并可正常回答。等待 focus 期间仍遵守 extension 的 AbortSignal/timeout；切走 focus 会取消已经发给浏览器的旧对话框，项目关闭会用取消值结算全部待处理请求。角色提示词 editor 额外绑定当前工具调用的 AbortSignal：无 delegate 或已发到浏览器时取消 run 都会结算 router/broker pending、关闭对话框并禁止迟到回答落版。
 
 ## 持久通信
 

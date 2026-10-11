@@ -1,6 +1,6 @@
 # 仓库总览
 
-`updated: 2026-10-06`
+`updated: 2026-10-11`
 
 ## 这个模块是干什么的
 
@@ -43,6 +43,7 @@ Pi Web = 项目持久状态 + WebSocket 控制循环 + Pi SDK 工具循环 + 本
 - 不内建第二套 diff/history/revert、文件管理器或通用终端。未来若需要，只做无状态交接或薄集成。
 - 当前 AgentSession 使用项目自有 sessionDir 的 `SessionManager`；持久 conversation 与临时 session epoch 明确分离。
 - WebSocket 只做传输；会话身份和 SDK 事件都不能由 socket 隐式定义。
+- 外部 Agent（如 Claude Code）经 `src/mcp` 的 MCP 桥以浏览器同等身份接入，不在核心里为它开特例；它不回答扩展对话框，见 [MCP 桥](kb-mcp-bridge.md)。
 - 远程访问只支持显式启用的 Tailscale Serve：服务仍仅监听 loopback，WebSocket 以同源 `.ts.net` HTTPS 与 Serve 身份头为边界，授权归 tailnet access rules/设备分享；通用反向代理、局域网/公网监听和 Funnel 不受支持。OS 级隔离仍需单独设计，持久化与二元角色工具权限都不能替代 sandbox。
 
 ## 认知模型
@@ -67,6 +68,7 @@ Pi Web = 项目持久状态 + WebSocket 控制循环 + Pi SDK 工具循环 + 本
 - `src/server/conversation-history.ts`
 - `src/shared/protocol.ts`
 - `src/client/App.tsx`
+- `src/mcp/index.ts`
 - `npm test`
 - `npm run typecheck`
 
@@ -85,3 +87,4 @@ Pi Web = 项目持久状态 + WebSocket 控制循环 + Pi SDK 工具循环 + 本
 - [kb-server-runtime.md](kb-server-runtime.md)
 - [kb-project-sessions.md](kb-project-sessions.md)
 - [kb-client-state.md](kb-client-state.md)
+- [kb-mcp-bridge.md](kb-mcp-bridge.md)

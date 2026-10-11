@@ -52,6 +52,10 @@ class SocketTestRuntime implements PiRuntimeLike {
     throw new Error("not used");
   }
 
+  projectTrustNeedsDecision(): boolean {
+    return false;
+  }
+
   beginCredentialChange(provider: string): CredentialChangeIntent {
     return { provider, revision: 1 };
   }

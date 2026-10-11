@@ -1,6 +1,6 @@
 # 线协议
 
-`updated: 2026-10-10`
+`updated: 2026-10-11`
 
 ## 这个模块是干什么的
 
@@ -38,6 +38,7 @@ ClientCommand
 ## 决策
 
 - 协议只暴露 UI 实际消费的稳定事件。
+- 协议有两个消费方：浏览器 `src/client` 与 MCP 桥 `src/mcp`（外部 Agent 以浏览器同等身份接入）。两者都只导入 `src/shared/`；改动桥用到的命令、事件或回执语义时必须同时更新桥，清单见 [MCP 桥坑点](kb-mcp-bridge.md#坑点)。
 - projectId/conversationId 是持久身份，sessionId 是浏览器项目观察 epoch，focusId 是一次 conversation attach，runId 是一次逻辑执行（可在宿主恢复中保持）；协议必须显式携带消费方需要的身份，不能混用。projectId 与所有 ephemeral correlation ID 是 UUID；conversationId 使用 Pi Web 的兼容策略（1–256 个 ASCII 字母数字及 `._-`，首尾为字母数字），以接纳常见的旧 durable Pi 非 UUID 会话，同时给 metadata、notebook 与 wire 一个共同的宿主上限；这不是 Pi SDK 自身的长度合同。
 - v70 更改浏览器 prompt 接收语义但不新增命令或事件字段：`run_queued` / `prompt_admitted` 均要求先持久 admission，Stop 不撤销已接收输入，同 ID 断线重发由服务端精确对账；旧浏览器恢复面板不能与新语义混用，因此协议版本推进。
 - `project_snapshot` 与 `role_catalog_snapshot` 用 `sessionId + projectId` 过滤；它们描述整个项目，不能因更新来自后台 conversation 就丢弃。
@@ -60,6 +61,7 @@ ClientCommand
 - `extension_ui_request → extension_ui_response → extension_ui_closed` 是当前 focus 的临时 rendezvous，不是持久状态；断线或 focus change 会销毁浏览器 route，但不会销毁 conversation actor。request 可在首个 PublicState 前出现。
 - 扩展 `notify` 是有界、session-scoped 的 fire-and-forget 事件，不赋予任何工具许可。
 - initialize 的 conversation target 是 `recent | new(roleId) | open(conversationId)`；客户端不能提交 session 文件路径。空项目的 `recent` 返回“项目已打开、没有 active conversation”，不会偷偷创建 default 会话。
+- v71 的 initialize 可选 `extensionUi: "interactive" | "none"`，省略即 interactive（浏览器）。`none` 是通用能力声明，不是桥专属准入：该连接在 initialize/focus/create/fork 都不附着 conversation 扩展 UI router，收不到 `extension_ui_request` 或 `extension_ui_notification`；对话框照常留在 router 并标 attention，等浏览器 focus。它触发的工作若会让 Pi 询问项目信任（无保存决定且默认策略为 ask，同时需要新建模型目录、冷打开、新建或 fork），服务端以该命令的 error 拒绝，从不询问、不写 trust store；已存活的 actor 与已有模型目录不再询问，可照常使用。`none` 连接不更新 `lastConversationId`、不清 attention，`recent` 只观察项目、不打开会话。role switch/rewind 这类重建 runtime 的操作仍经 router 询问浏览器。
 - `focus_conversation` 和 `create_conversation` 使用一次性 commandId；服务端用同 commandId 的 `focus_attached` 确认新 focus。客户端在精确确认前不能把 pending target 当成当前 transcript。
 - v42 的可选 `transitionDiagnostics` 只属于成功的 `initialize | focus_conversation` 调用，不覆盖独立 `create_conversation` 命令、错误或后续 refresh。非空 focus 只把它附在本次 attach 后的首个 `conversation_snapshot`；空项目 `initialize(recent)` 没有 snapshot，才附在无 conversation/focus 的 `focus_attached`，且 `snapshotProjectionMs=null`。payload 使用同一 commandId 与 operation 关联，version 固定为 1；`validationMs / contextOrCatalogMs / presentationOrTargetReadMs / actorActivationOrLeaseMs` 以及非空 focus 的 `snapshotProjectionMs` 都是 0–3,600,000 的有限非负整数。actor phase 是 lease、权威文件证明与 runtime activation 的整体 envelope；snapshot phase 只测同步构建，不含 enqueue、delivery 或异步 `project_snapshot`。它不进入 `PublicState` 或磁盘，失败仍只走既有 error，浏览器必须再匹配 active transition 的 session、command、operation 与已 attach focus 后才消费。
 - `conversation_preview` 是 v33 的只读展示事件，只携带 `sessionId + commandId + projectId + conversationId` 关联的 cwd、toolMode、可选固化角色和有界 items/window；它没有 focusId，不是 transcript 或命令 authority。只有 cold exact/recent/focus 在只读完整性证明、当前命令身份以及 emit 前同步 actor/opening gate 都仍有效时才可能发送；display projection 失败可静默跳过，warm actor 直接等待其 live snapshot。后续精确 `focus_attached + conversation_snapshot` 才建立可执行 focus 并替换 preview。
@@ -111,6 +113,7 @@ ClientCommand
 - `src/server/session-events.ts`
 - `src/server/session-events.test.ts`
 - `src/client/lib/socket.ts`
+- `src/mcp/piweb-session.ts`（第二个协议客户端）
 
 ## 坑点
 
