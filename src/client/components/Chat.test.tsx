@@ -65,6 +65,26 @@ function firstMessage(chat: ChatState): ChatMessageFixture {
 
 const emptyChat: ChatState = { items: [] };
 
+function stubMissionViewport(initialWide: boolean) {
+  let wide = initialWide;
+  const listeners = new Set<(event: MediaQueryListEvent) => void>();
+  const query = {
+    media: "(min-width: 1400px)",
+    get matches() { return wide; },
+    addEventListener: (_type: string, listener: (event: MediaQueryListEvent) => void) => {
+      listeners.add(listener);
+    },
+    removeEventListener: (_type: string, listener: (event: MediaQueryListEvent) => void) => {
+      listeners.delete(listener);
+    },
+  };
+  vi.stubGlobal("matchMedia", vi.fn(() => query));
+  return (nextWide: boolean) => {
+    wide = nextWide;
+    act(() => listeners.forEach((listener) => listener({ matches: wide } as MediaQueryListEvent)));
+  };
+}
+
 function view(
   chat: ChatState,
   draft = "",
@@ -767,6 +787,184 @@ describe("Chat", () => {
     expect(within(mission).queryByRole("heading", { name: "ACTIVITY" }))
       .not.toBeInTheDocument();
     expect(within(mission).queryByRole("button")).not.toBeInTheDocument();
+  });
+
+  it("switches wide Mission between Objectives and bounded workspace file status without changing Context", () => {
+    stubMissionViewport(true);
+    const onRefreshWorkspaceChanges = vi.fn();
+    const onWorkspaceChangesVisibilityChange = vi.fn();
+    const files = [
+      { path: "src/a.ts", status: "modified" as const, label: "MODIFIED" },
+      { path: "src/new.ts", status: "added" as const, label: "ADDED" },
+      { path: "src/gone.ts", status: "deleted" as const, label: "DELETED" },
+      { path: "src/renamed.ts", status: "renamed" as const, label: "RENAMED" },
+      { path: "src/copied.ts", status: "copied" as const, label: "COPIED" },
+      { path: "src/unknown.ts", status: "untracked" as const, label: "UNTRACKED" },
+      { path: "src/conflict.ts", status: "conflicted" as const, label: "CONFLICTED" },
+      { path: "src/type.ts", status: "type_changed" as const, label: "TYPE CHANGED" },
+    ];
+    const props = {
+      loopList: { armed: false, items: [{ id: "objective", text: "Keep objective", status: "active" as const }] },
+      workspaceChanges: { state: "ready" as const, total: files.length, truncated: false,
+        files: files.map(({ path, status }) => ({ path, status })) },
+      onRefreshWorkspaceChanges,
+      onWorkspaceChangesVisibilityChange,
+      contextPercent: 62,
+    };
+    const rendered = render(view(emptyChat, "", undefined, props));
+    const mission = screen.getByRole("complementary", { name: "Mission Command" });
+    expect(within(mission).getByText("Keep objective")).toBeInTheDocument();
+    expect(within(mission).getByRole("meter", { name: "上下文使用 62%" }))
+      .toBeInTheDocument();
+    expect(onWorkspaceChangesVisibilityChange).not.toHaveBeenCalledWith(true);
+
+    fireEvent.click(within(mission).getByRole("button", { name: "工作区改动" }));
+    expect(onWorkspaceChangesVisibilityChange).toHaveBeenLastCalledWith(true);
+    expect(within(mission).queryByText("Keep objective")).not.toBeInTheDocument();
+    const changes = within(mission).getByRole("region", { name: "工作区改动" });
+    expect(changes.querySelector(".workspace-changes-count"))
+      .toHaveTextContent("8 个改动文件");
+    for (const { path, label } of files) {
+      expect(within(changes).getByText(path).closest("li")).toHaveTextContent(label);
+    }
+    expect(within(mission).getByRole("meter", { name: "上下文使用 62%" }))
+      .toBeInTheDocument();
+    fireEvent.click(within(changes).getByRole("button", { name: "刷新工作区改动" }));
+    expect(onRefreshWorkspaceChanges).toHaveBeenCalledOnce();
+
+    rendered.rerender(view(emptyChat, "", undefined, {
+      ...props, workspaceChangesLoading: true,
+    }));
+    expect(within(changes).getByText("src/a.ts")).toBeInTheDocument();
+    expect(within(changes).getByText(/刷新中/)).toBeInTheDocument();
+    expect(within(changes).getByRole("button", { name: "刷新工作区改动" }))
+      .toBeDisabled();
+    expect(changes.querySelector(".workspace-changes-count"))
+      .toHaveTextContent("8 个改动文件（上次读取）");
+    fireEvent.click(within(changes).getByRole("button", { name: "刷新工作区改动" }));
+    expect(onRefreshWorkspaceChanges).toHaveBeenCalledOnce();
+    fireEvent.click(within(mission).getByRole("button", { name: "OBJECTIVES" }));
+    expect(onWorkspaceChangesVisibilityChange).toHaveBeenLastCalledWith(false);
+    expect(within(mission).getByText("Keep objective")).toBeInTheDocument();
+  });
+
+  it("distinguishes empty, not-git, failed, unread, and truncated workspace observations", () => {
+    stubMissionViewport(true);
+    const onWorkspaceChangesVisibilityChange = vi.fn();
+    const onRefreshWorkspaceChanges = vi.fn();
+    const props = { onWorkspaceChangesVisibilityChange, onRefreshWorkspaceChanges };
+    const rendered = render(view(emptyChat, "", undefined, props));
+    const mission = screen.getByRole("complementary", { name: "Mission Command" });
+    fireEvent.click(within(mission).getByRole("button", { name: "工作区改动" }));
+    expect(within(mission).getByText("尚未读取工作区改动。")).toBeInTheDocument();
+    expect(within(mission).queryByText("工作区没有文件改动。")).not.toBeInTheDocument();
+
+    rendered.rerender(view(emptyChat, "", undefined, {
+      ...props, workspaceChangesLoading: true,
+    }));
+    expect(within(mission).getByText("正在读取工作区改动…")).toBeInTheDocument();
+    rendered.rerender(view(emptyChat, "", undefined, {
+      ...props, workspaceChanges: { state: "not_git" },
+    }));
+    expect(within(mission).getByText("当前目录没有 Git 工作树。")).toBeInTheDocument();
+    rendered.rerender(view(emptyChat, "", undefined, {
+      ...props, workspaceChanges: { state: "error", message: "permission denied" },
+    }));
+    expect(within(mission).getByText(/permission denied/)).toBeInTheDocument();
+    expect(within(mission).queryByText("工作区没有文件改动。")).not.toBeInTheDocument();
+    rendered.rerender(view(emptyChat, "", undefined, {
+      ...props, workspaceChanges: { state: "ready", files: [], total: 0, truncated: false },
+    }));
+    expect(mission.querySelector(".workspace-changes-count"))
+      .toHaveTextContent("0 个改动文件");
+    expect(within(mission).getByText("工作区没有文件改动。")).toBeInTheDocument();
+
+    const files = Array.from({ length: 500 }, (_, index) => ({
+      path: `src/file-${index}.ts`, status: "modified" as const,
+    }));
+    rendered.rerender(view(emptyChat, "", undefined, {
+      ...props, workspaceChanges: { state: "ready", files, total: 501, truncated: true },
+    }));
+    expect(mission.querySelector(".workspace-changes-count"))
+      .toHaveTextContent("501 个改动文件");
+    expect(within(mission).getByText("仅显示前 500 个文件（共 501 个）。"))
+      .toBeInTheDocument();
+    expect(within(mission).getByText("src/file-499.ts")).toBeInTheDocument();
+  });
+
+  it("keeps the workspace tab across focus changes in one cwd and resets it for a new cwd", () => {
+    stubMissionViewport(true);
+    const onWorkspaceChangesVisibilityChange = vi.fn();
+    const changes = { state: "ready" as const, files: [
+      { path: "shared/work.ts", status: "untracked" as const },
+    ], total: 1, truncated: false };
+    const focus = (conversationId: string): ChatState => ({
+      items: [], focus: { sessionId: "session", conversationId, focusId: `focus-${conversationId}` },
+    });
+    const props = { workspaceChanges: changes, onWorkspaceChangesVisibilityChange };
+    const rendered = render(view(focus("a"), "", undefined, props));
+    const mission = screen.getByRole("complementary", { name: "Mission Command" });
+    fireEvent.click(within(mission).getByRole("button", { name: "工作区改动" }));
+    rendered.rerender(view(focus("b"), "", undefined, props));
+    expect(within(mission).getByText("shared/work.ts")).toBeInTheDocument();
+    expect(onWorkspaceChangesVisibilityChange).toHaveBeenLastCalledWith(true);
+
+    rendered.rerender(view(focus("b"), "", undefined, {
+      ...props, cwd: "E:\\other",
+    }));
+    expect(within(mission).getByText("OBJECTIVES", { selector: "h2" }))
+      .toBeInTheDocument();
+    expect(within(mission).queryByText("shared/work.ts")).not.toBeInTheDocument();
+    expect(onWorkspaceChangesVisibilityChange).toHaveBeenLastCalledWith(false);
+  });
+
+  it("offers Git without Tasks on narrow desktop and only observes an open phone Tasks sheet", () => {
+    const resize = stubMissionViewport(false);
+    const onWorkspaceChangesVisibilityChange = vi.fn();
+    const props = {
+      workspaceChanges: { state: "ready" as const, files: [
+        { path: "path with spaces/深层/file.ts", status: "modified" as const },
+      ], total: 1, truncated: false },
+      onWorkspaceChangesVisibilityChange,
+    };
+    const rendered = render(view(emptyChat, "", undefined, props));
+    const tasks = screen.getByRole("region", { name: "Tasks" });
+    expect(within(tasks).getByRole("button", { name: "工作区改动" }))
+      .toBeInTheDocument();
+    fireEvent.click(within(tasks).getByRole("button", { name: "工作区改动" }));
+    expect(within(tasks).getByText("path with spaces/深层/file.ts"))
+      .toBeInTheDocument();
+    expect(onWorkspaceChangesVisibilityChange).toHaveBeenLastCalledWith(true);
+    resize(true);
+    expect(onWorkspaceChangesVisibilityChange).toHaveBeenLastCalledWith(true);
+    resize(false);
+    expect(onWorkspaceChangesVisibilityChange).toHaveBeenLastCalledWith(true);
+    fireEvent.click(within(tasks).getByRole("button", { name: "OBJECTIVES" }));
+    expect(onWorkspaceChangesVisibilityChange).toHaveBeenLastCalledWith(false);
+
+    onWorkspaceChangesVisibilityChange.mockClear();
+    const mobile = { title: "会话", onBack: vi.fn() };
+    rendered.rerender(view(emptyChat, "", undefined, { ...props, mobile }));
+    expect(screen.getByRole("button", { name: "打开任务" }))
+      .toHaveTextContent("改动");
+    expect(onWorkspaceChangesVisibilityChange).not.toHaveBeenCalledWith(true);
+    fireEvent.click(screen.getByRole("button", { name: "打开任务" }));
+    const sheet = screen.getByRole("dialog", { name: "任务" });
+    fireEvent.click(within(sheet).getByRole("button", { name: "工作区改动" }));
+    expect(onWorkspaceChangesVisibilityChange).toHaveBeenLastCalledWith(true);
+    fireEvent.click(within(sheet).getByRole("button", { name: "关闭任务" }));
+    expect(onWorkspaceChangesVisibilityChange).toHaveBeenLastCalledWith(false);
+    fireEvent.click(screen.getByRole("button", { name: "打开任务" }));
+    expect(onWorkspaceChangesVisibilityChange).toHaveBeenLastCalledWith(true);
+    rendered.rerender(view(emptyChat, "", undefined, {
+      ...props, mobile: { ...mobile, active: false },
+    }));
+    expect(onWorkspaceChangesVisibilityChange).toHaveBeenLastCalledWith(false);
+    rendered.rerender(view(emptyChat, "", undefined, { ...props, mobile }));
+    fireEvent.click(screen.getByRole("button", { name: "打开任务" }));
+    expect(onWorkspaceChangesVisibilityChange).toHaveBeenLastCalledWith(true);
+    rendered.unmount();
+    expect(onWorkspaceChangesVisibilityChange).toHaveBeenLastCalledWith(false);
   });
 
   it.each([

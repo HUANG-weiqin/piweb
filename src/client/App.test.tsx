@@ -645,6 +645,43 @@ async function pasteDraftImage(name = "draft.png"): Promise<void> {
 }
 
 describe("App", () => {
+  it.each(["ready", "not_git", "error"] as const)(
+    "reads workspace changes on demand without using focus or changing a draft (%s)", (outcome) => {
+      const sessionId = startFocusReplacementProject();
+      const tasks = screen.getByRole("region", { name: "Tasks" });
+      const draft = screen.getByRole("textbox", { name: "给 Pi 发送消息" });
+      fireEvent.change(draft, { target: { value: "keep this draft" } });
+      expect(socketMock.send.mock.calls.some(([command]) => command.type === "refresh_workspace_changes")).toBe(false);
+      fireEvent.click(within(tasks).getByRole("button", { name: "工作区改动" }));
+      const command = latestCommand("refresh_workspace_changes");
+      expect(command).toMatchObject({ sessionId, projectId: PROJECT_ID });
+      expect(command).not.toHaveProperty("conversationId");
+      expect(command).not.toHaveProperty("focusId");
+      act(() => socketMock.rawEmit?.({
+        ...command, type: "workspace_changes", projectId: crypto.randomUUID(), snapshot: { state: "not_git" },
+      }));
+      expect(within(tasks).getByText("正在读取工作区改动…")).toBeInTheDocument();
+      if (outcome === "ready") {
+        fireEvent.click(screen.getByRole("button", { name: "打开会话 B" }));
+      }
+      act(() => socketMock.rawEmit?.(outcome === "error" ? {
+        type: "error", operation: "refresh_workspace_changes", scope: "command",
+        sessionId: command.sessionId, commandId: command.commandId, message: "Git unavailable",
+      } : {
+        ...command, type: "workspace_changes", snapshot: outcome === "ready"
+          ? { state: "ready", files: [{ path: "src/file.ts", status: "modified" }], total: 1, truncated: false }
+          : { state: "not_git" },
+      }));
+      const currentTasks = screen.getByRole("region", { name: "Tasks" });
+      expect(within(currentTasks).getByRole("button", { name: "工作区改动" })).toHaveAttribute("aria-pressed", "true");
+      expect(within(currentTasks).getByText(outcome === "ready" ? "src/file.ts"
+        : outcome === "not_git" ? "当前目录没有 Git 工作树。"
+          : "读取工作区改动失败：Git unavailable")).toBeInTheDocument();
+      if (outcome !== "ready") expect(draft).toHaveValue("keep this draft");
+      expect(socketMock.send.mock.calls.filter(([sent]) => sent.type === "refresh_workspace_changes")).toHaveLength(1);
+    },
+  );
+
   it("sends an exact durable image request from a clicked placeholder", () => {
     const target = {
       close: vi.fn(),
@@ -2268,7 +2305,10 @@ describe("App", () => {
         window: completeConversationWindow,
       });
     });
-    expect(screen.queryByRole("region", { name: "Tasks" })).not.toBeInTheDocument();
+    const tasks = screen.getByRole("region", { name: "Tasks" });
+    expect(within(tasks).getByText("当前没有计划目标。")).toBeInTheDocument();
+    expect(within(tasks).getByRole("button", { name: "工作区改动" })).toBeInTheDocument();
+    expect(tasks.querySelectorAll("li")).toHaveLength(0);
     expect(screen.queryByRole("status", { name: "后台命令状态" }))
       .not.toBeInTheDocument();
   });

@@ -1,7 +1,9 @@
 import type {
   LoopList,
   LoopListItemStatus,
+  WorkspaceChangesSnapshot,
 } from "../../shared/protocol";
+import { WorkspaceChangesPanel } from "./WorkspaceChangesPanel";
 
 const MISSION_OBJECTIVE_STATUS_LABELS: Record<LoopListItemStatus, string> = {
   pending: "REMAINING",
@@ -22,8 +24,15 @@ function formatOutputTokenRate(tokensPerSecond: number, estimated = false): stri
 }
 
 export type MissionCommandStatus = "paused" | "executing" | "completed";
+export type MissionCommandView = "objectives" | "changes";
 
 interface MissionCommandSurfaceProps {
+  view: MissionCommandView;
+  showWorkspaceChanges: boolean;
+  workspaceChanges?: WorkspaceChangesSnapshot;
+  workspaceChangesLoading?: boolean;
+  onRefreshWorkspaceChanges?(): void;
+  onSelectView(view: MissionCommandView): void;
   loopListItems: LoopList["items"];
   completedItemCount: number;
   remainingItemCount: number;
@@ -38,6 +47,12 @@ interface MissionCommandSurfaceProps {
 }
 
 export function MissionCommandSurface({
+  view,
+  showWorkspaceChanges,
+  workspaceChanges,
+  workspaceChangesLoading,
+  onRefreshWorkspaceChanges,
+  onSelectView,
   loopListItems,
   completedItemCount,
   remainingItemCount,
@@ -58,38 +73,52 @@ export function MissionCommandSurface({
     <header className="mission-command-header">
       <p className="mission-command-kicker">
         <span>MISSION</span>
-        {loopListStatusLabel && <span
+        {view === "objectives" && loopListStatusLabel && <span
           className={`mission-command-status is-${loopListStatusKey}`}
         >STATUS · {loopListStatusLabel}</span>}
       </p>
+      {showWorkspaceChanges && <div className="mission-view-tabs" role="group" aria-label="Mission view">
+        <button type="button" aria-pressed={view === "objectives"} onClick={() => onSelectView("objectives")}>
+          OBJECTIVES
+        </button>
+        <button type="button" aria-pressed={view === "changes"} onClick={() => onSelectView("changes")}>
+          工作区改动
+        </button>
+      </div>}
       <div className="mission-command-title-row">
-        <h2>OBJECTIVES</h2>
-        <p
+        <h2>{view === "changes" ? "WORKSPACE CHANGES" : "OBJECTIVES"}</h2>
+        {view === "objectives" && <p
           className="mission-objective-count"
           aria-label={`${remainingItemCount} 个未完成目标`}
         >
           <strong>{remainingItemCount}</strong>
           <span>REMAINING<br />{completedItemCount} CLEARED</span>
-        </p>
+        </p>}
       </div>
     </header>
 
-    <section className="mission-objectives" aria-label="Objectives">
-      {loopListItems.length === 0
-        ? <p className="mission-objectives-empty">当前没有计划目标。</p>
-        : <ol className="mission-objective-list">
-          {loopListItems.map((item) => <li
-            key={item.id}
-            className={`mission-objective is-${item.status}`}
-          >
-            <span className="mission-objective-mark" aria-hidden="true" />
-            <span className="mission-objective-copy">
-              <small>{MISSION_OBJECTIVE_STATUS_LABELS[item.status]}</small>
-              <span>{item.text}</span>
-            </span>
-          </li>)}
-        </ol>}
-    </section>
+    {view === "changes" && showWorkspaceChanges
+      ? <WorkspaceChangesPanel
+        snapshot={workspaceChanges}
+        loading={workspaceChangesLoading}
+        onRefresh={onRefreshWorkspaceChanges}
+      />
+      : <section className="mission-objectives" aria-label="Objectives">
+        {loopListItems.length === 0
+          ? <p className="mission-objectives-empty">当前没有计划目标。</p>
+          : <ol className="mission-objective-list">
+            {loopListItems.map((item) => <li
+              key={item.id}
+              className={`mission-objective is-${item.status}`}
+            >
+              <span className="mission-objective-mark" aria-hidden="true" />
+              <span className="mission-objective-copy">
+                <small>{MISSION_OBJECTIVE_STATUS_LABELS[item.status]}</small>
+                <span>{item.text}</span>
+              </span>
+            </li>)}
+          </ol>}
+      </section>}
 
     <section className="mission-context" aria-label="Context Compaction">
       <div className="mission-section-heading">

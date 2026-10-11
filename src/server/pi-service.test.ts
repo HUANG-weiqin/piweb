@@ -48,6 +48,7 @@ import { ProjectStoreRegistry } from "./project-store-registry.js";
 import { ProjectSessionCoordinator } from "./project-session-coordinator.js";
 import { RoleCatalog } from "./role-catalog.js";
 import * as localImage from "./local-image.js";
+import * as workspaceChanges from "./workspace-changes.js";
 
 const SESSION_A = "0dd23f7c-80c8-4713-b7a7-33c00177a101";
 const SESSION_B = "e15c861c-e18f-4290-bc22-8932f3caaf4e";
@@ -7977,6 +7978,90 @@ describe("PiConnection coordinated project view", () => {
       promptFinished.resolve();
       await running;
     } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it("reads project-scoped workspace changes without mutating Agent history", async () => {
+    const harness = await coordinatedConnectionHarness();
+    const snapshot = { state: "ready" as const, files: [], total: 0, truncated: false };
+    const read = vi.spyOn(workspaceChanges, "readWorkspaceChanges").mockResolvedValue(snapshot);
+    try {
+      const focused = await initializeNewConversation(harness);
+      const manager = harness.runtime.created[0]!.persistentManager!;
+      const before = manager.getEntries();
+      const command = {
+        type: "refresh_workspace_changes" as const, commandId: randomUUID(),
+        sessionId: SESSION_A, projectId: focused.projectId!,
+      };
+      await expect(harness.connection.handle({ ...command, commandId: randomUUID(), projectId: randomUUID() }))
+        .rejects.toThrow("no longer current");
+      await expect(harness.connection.handle({ ...command, commandId: randomUUID(), sessionId: SESSION_B }))
+        .rejects.toThrow("not initialized");
+      expect(read).not.toHaveBeenCalled();
+      await harness.connection.handle(command);
+      expect(read).toHaveBeenCalledWith(harness.cwd, expect.any(AbortSignal));
+      const response = harness.events.findLast((event) => event.type === "workspace_changes");
+      expect(response).toEqual({ ...command, type: "workspace_changes", snapshot });
+      expect(parseServerEvent(response)).toEqual(response);
+      expect(manager.getEntries()).toEqual(before);
+      await expect(harness.connection.handle(command)).rejects.toThrow("already used");
+    } finally {
+      read.mockRestore();
+      await harness.cleanup();
+    }
+  });
+
+  it("bounds workspace reads and keeps their response valid across same-project focus changes", async () => {
+    const harness = await coordinatedConnectionHarness();
+    let resolveRead!: (value: { state: "not_git" }) => void;
+    const result = new Promise<{ state: "not_git" }>((resolve) => { resolveRead = resolve; });
+    const read = vi.spyOn(workspaceChanges, "readWorkspaceChanges").mockReturnValue(result);
+    try {
+      const focused = await initializeNewConversation(harness);
+      const command = {
+        type: "refresh_workspace_changes" as const, commandId: randomUUID(),
+        sessionId: SESSION_A, projectId: focused.projectId!,
+      };
+      const reading = harness.connection.handle(command);
+      await expect(harness.connection.handle({ ...command, commandId: randomUUID() }))
+        .rejects.toThrow("already in progress");
+      await harness.connection.handle({
+        type: "create_conversation", commandId: randomUUID(), sessionId: SESSION_A, roleId: "default",
+      });
+      expect(latestState(harness.events).conversationId).not.toBe(focused.conversationId);
+      resolveRead({ state: "not_git" });
+      await reading;
+      expect(harness.events).toContainEqual({ ...command, type: "workspace_changes", snapshot: { state: "not_git" } });
+      expect(read).toHaveBeenCalledTimes(1);
+    } finally {
+      read.mockRestore();
+      await harness.cleanup();
+    }
+  });
+
+  it("cancels and discards a workspace read after project observation replacement", async () => {
+    const harness = await coordinatedConnectionHarness();
+    let resolveRead!: (value: { state: "not_git" }) => void;
+    const result = new Promise<{ state: "not_git" }>((resolve) => { resolveRead = resolve; });
+    const read = vi.spyOn(workspaceChanges, "readWorkspaceChanges").mockReturnValue(result);
+    try {
+      const focused = await initializeNewConversation(harness);
+      const commandId = randomUUID();
+      const reading = harness.connection.handle({
+        type: "refresh_workspace_changes", commandId, sessionId: SESSION_A, projectId: focused.projectId!,
+      });
+      const signal = read.mock.calls[0]![1]!;
+      await harness.connection.handle({
+        type: "initialize", commandId: randomUUID(), sessionId: SESSION_B,
+        cwd: harness.cwd, conversation: { kind: "recent" },
+      });
+      expect(signal.aborted).toBe(true);
+      resolveRead({ state: "not_git" });
+      await reading;
+      expect(harness.events).not.toContainEqual(expect.objectContaining({ type: "workspace_changes", commandId }));
+    } finally {
+      read.mockRestore();
       await harness.cleanup();
     }
   });

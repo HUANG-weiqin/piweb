@@ -63,8 +63,39 @@ describe("parseClientCommand", () => {
     }
   });
 
+  it("correlates read-only workspace changes with the project, not conversation focus", () => {
+    const command = { type: "refresh_workspace_changes", sessionId, projectId, commandId };
+    expect(parseClientCommand(command)).toEqual(command);
+    for (const key of ["sessionId", "projectId", "commandId"]) {
+      expect(() => parseClientCommand({ ...command, [key]: undefined })).toThrow();
+    }
+    expect(() => parseClientCommand({ ...command, cwd: "E:/other" })).toThrow();
+    expect(() => parseClientCommand({ ...command, conversationId, focusId })).toThrow();
+    const response = {
+      type: "workspace_changes", sessionId, projectId, commandId,
+      snapshot: { state: "ready", files: [{ path: "src/中文 file.ts", status: "modified" }], total: 1, truncated: false },
+    };
+    expect(parseServerEvent(response)).toEqual(response);
+    expect(parseServerEvent({ ...response, snapshot: { state: "not_git" } })).toMatchObject({ snapshot: { state: "not_git" } });
+    expect(parseServerEvent({ ...response, snapshot: { state: "error", message: "Git 不可用" } })).toMatchObject({ snapshot: { state: "error" } });
+    for (const key of ["sessionId", "projectId", "commandId"]) {
+      expect(() => parseServerEvent({ ...response, [key]: undefined })).toThrow();
+    }
+    expect(() => parseServerEvent({ ...response, focusId })).toThrow();
+    expect(() => parseServerEvent({ ...response, snapshot: { ...response.snapshot, total: 0 } })).toThrow();
+    expect(() => parseServerEvent({ ...response, snapshot: { ...response.snapshot, total: 2 } })).toThrow();
+    expect(() => parseServerEvent({ ...response, snapshot: { ...response.snapshot, truncated: true } })).toThrow();
+    expect(() => parseServerEvent({ ...response, snapshot: { ...response.snapshot, files: [...response.snapshot.files, ...response.snapshot.files], total: 2 } })).toThrow();
+    expect(() => parseServerEvent({ ...response, snapshot: { ...response.snapshot, files: [{ path: "a", status: "unknown" }] } })).toThrow();
+    const error = { type: "error", scope: "command", operation: "refresh_workspace_changes", sessionId, commandId, message: "busy" };
+    expect(parseServerEvent(error)).toEqual(error);
+    for (const key of ["sessionId", "commandId"]) {
+      expect(() => parseServerEvent({ ...error, [key]: undefined })).toThrow();
+    }
+  });
+
   it("uses the run-correlated protocol version", () => {
-    expect(PROTOCOL_VERSION).toBe(72);
+    expect(PROTOCOL_VERSION).toBe(73);
   });
 
   it("lets initialize declare a connection without extension UI", () => {

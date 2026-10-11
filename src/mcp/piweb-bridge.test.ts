@@ -371,13 +371,17 @@ async function fakePiWeb(
 }
 
 describe("PiWebBridge safety boundaries", () => {
-  it("accepts the current protocol but ignores browser-only local image bytes", async () => {
+  it("accepts the current protocol but ignores browser-only image bytes and workspace changes", async () => {
     const { baseUrl } = await fakePiWeb((command, send) => {
       if (command.type !== "refresh_view") return;
       send({
         type: "local_image", sessionId: command.sessionId,
         conversationId: randomUUID(), focusId: randomUUID(), commandId: randomUUID(),
         path: "E:/a.png", mimeType: "image/png", data: "iVBORw0KGgo=",
+      });
+      send({
+        type: "workspace_changes", sessionId: command.sessionId,
+        projectId: command.projectId, commandId: randomUUID(), snapshot: { state: "not_git" },
       });
       send({ type: "project_snapshot", sessionId: command.sessionId, projectId: command.projectId,
         conversations: [], truncated: false, coverage: "complete" });
@@ -389,6 +393,7 @@ describe("PiWebBridge safety boundaries", () => {
       session.send({ type: "refresh_view", sessionId: session.sessionId, projectId: randomUUID() });
       await expect(waiting).resolves.toBe(true);
       expect(check.mock.calls.some(([event]) => event?.type === "local_image")).toBe(false);
+      expect(check.mock.calls.some(([event]) => event?.type === "workspace_changes")).toBe(false);
     } finally {
       await session.close();
     }

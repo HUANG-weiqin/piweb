@@ -127,7 +127,9 @@ export const MAX_TRANSITION_DIAGNOSTIC_PHASE_MS = 60 * 60 * 1_000;
 // available even when workspace initialization fails; no validation bypass.
 // v72: user-triggered local raster previews have an exact-focus path response,
 // separate from persisted conversation image locators.
-export const PROTOCOL_VERSION = 72;
+// v73: on-demand, read-only workspace changes are project-scoped snapshots,
+// never Agent tools, conversation history, or high-frequency PublicState.
+export const PROTOCOL_VERSION = 73;
 export const OBSERVATION_FATAL_CLOSE_CODE = 4002;
 export const COLOR_SCHEMES = ["quiet-rebel", "classic-rebel"] as const;
 export type ColorScheme = typeof COLOR_SCHEMES[number];
@@ -589,6 +591,39 @@ const extensionUIResponseSchema = z.discriminatedUnion("kind", [
 export type ExtensionUIRequest = z.infer<typeof extensionUIRequestSchema>;
 export type ExtensionUIResponse = z.infer<typeof extensionUIResponseSchema>;
 
+export const MAX_WORKSPACE_CHANGE_FILES = 500;
+const workspaceFileChangeSchema = z.object({
+  path: z.string().min(1).max(4096),
+  status: z.enum([
+    "modified", "added", "deleted", "renamed", "copied", "untracked",
+    "conflicted", "type_changed",
+  ]),
+}).strict();
+export type WorkspaceFileChange = z.infer<typeof workspaceFileChangeSchema>;
+const workspaceChangesSnapshotSchema = z.discriminatedUnion("state", [
+  z.object({
+    state: z.literal("ready"),
+    files: z.array(workspaceFileChangeSchema).max(MAX_WORKSPACE_CHANGE_FILES),
+    total: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    truncated: z.boolean(),
+  }).strict(),
+  z.object({ state: z.literal("not_git") }).strict(),
+  z.object({ state: z.literal("error"), message: z.string().min(1).max(4096) }).strict(),
+]).superRefine((snapshot, context) => {
+  if (snapshot.state !== "ready") return;
+  if (
+    snapshot.total < snapshot.files.length
+    || snapshot.truncated !== (snapshot.total > snapshot.files.length)
+    || new Set(snapshot.files.map(({ path }) => path)).size !== snapshot.files.length
+  ) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "Workspace change count, coverage, and unique paths must agree",
+    });
+  }
+});
+export type WorkspaceChangesSnapshot = z.infer<typeof workspaceChangesSnapshotSchema>;
+
 const sessionRepairFileNameSchema = z.string().min(1).max(255)
   .regex(/^[^/\\\x00]+\.jsonl$/);
 const sessionRepairRevisionSchema = z.string().regex(/^[a-f0-9]{64}$/);
@@ -706,6 +741,12 @@ const clientCommandUnionSchema = z.discriminatedUnion("type", [
     conversationId: conversationIdSchema.optional(),
     focusId: focusIdSchema.optional(),
   }),
+  z.object({
+    type: z.literal("refresh_workspace_changes"),
+    sessionId: sessionIdSchema,
+    projectId: z.string().uuid(),
+    commandId: commandIdSchema,
+  }).strict(),
   z.object({
     type: z.literal("create_conversation"),
     commandId: commandIdSchema,
@@ -1423,6 +1464,13 @@ export type ServerEvent =
       coverage: ProjectSnapshotCoverage;
     }
   | {
+      type: "workspace_changes";
+      sessionId: string;
+      projectId: string;
+      commandId: string;
+      snapshot: WorkspaceChangesSnapshot;
+    }
+  | {
       type: "project_activity_snapshot";
       projects: ProjectActivitySummary[];
       /** Only the shared activity catalog may be clipped, never one project's counters. */
@@ -1762,6 +1810,7 @@ const commandTypeSchema = z.enum([
   "initialize",
   "focus_conversation",
   "refresh_view",
+  "refresh_workspace_changes",
   "create_conversation",
   "fork_conversation",
   "prompt",
@@ -2210,6 +2259,13 @@ const serverEventUnionSchema = z.discriminatedUnion("type", [
     roles: z.array(roleTemplateSchema).max(MAX_ROLE_COUNT),
   }),
   z.object({
+    type: z.literal("workspace_changes"),
+    sessionId: sessionIdSchema,
+    projectId: z.string().uuid(),
+    commandId: commandIdSchema,
+    snapshot: workspaceChangesSnapshotSchema,
+  }).strict(),
+  z.object({
     type: z.literal("project_snapshot"),
     sessionId: sessionIdSchema,
     projectId: z.string().uuid(),
@@ -2637,12 +2693,12 @@ export const serverEventSchema: z.ZodType<ServerEvent> = serverEventUnionSchema.
     }
     if (
       event.type === "error"
-      && event.operation === "rename_conversation"
+      && (event.operation === "rename_conversation" || event.operation === "refresh_workspace_changes")
       && (event.sessionId === undefined || event.commandId === undefined)
     ) {
       context.addIssue({
         code: z.ZodIssueCode.custom,
-        message: "Rename command errors require a sessionId and commandId",
+        message: "Command errors require a sessionId and commandId",
         path: [event.sessionId === undefined ? "sessionId" : "commandId"],
       });
     }

@@ -223,8 +223,11 @@ export class PiWebSession {
   }
 
   private observe(event: ServerEvent): void {
-    // Raster previews belong to an explicit browser click, never an MCP waiter.
-    if (event.type === "local_image" || event.type === "conversation_image") return;
+    // Browser-only previews and Git observations never enter an MCP waiter.
+    if (
+      event.type === "local_image" || event.type === "conversation_image"
+      || event.type === "workspace_changes"
+    ) return;
     if (event.type === "extension_ui_request") {
       const conversation = this.focus === undefined
         ? ""

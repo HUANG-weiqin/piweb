@@ -41,6 +41,7 @@ import { ManualModelRefreshGate } from "./manual-model-refresh.js";
 import { SerialTaskQueue } from "./serial-task-queue.js";
 import { resolveContextUsage } from "./session-usage.js";
 import { readLocalImage } from "./local-image.js";
+import { readWorkspaceChanges } from "./workspace-changes.js";
 
 export interface PiConnectionCoordination {
   coordinator: ProjectSessionCoordinator;
@@ -316,6 +317,7 @@ export class PiConnection {
   private readonly credentialIntents = new WeakMap<object, CredentialChangeIntent>();
   private generation = 0;
   private initializationAbort?: AbortController;
+  private workspaceChangesRead?: AbortController;
   private coordinatedTransitionAbort?: AbortController;
   private readonly manualModelRefresh: ManualModelRefreshGate;
   private disposed = false;
@@ -362,6 +364,35 @@ export class PiConnection {
     if (command.type === "refresh_view") {
       this.refreshCoordinatedView(command);
       return Promise.resolve();
+    }
+    if (command.type === "refresh_workspace_changes") {
+      // A project observation must not wait behind an Agent turn or bind to focus.
+      try {
+        if (this.usedCommandIds.has(command.commandId)) {
+          throw new Error("Command ID was already used on this connection");
+        }
+        this.usedCommandIds.add(command.commandId);
+        const view = this.requireCoordinatedView(command.sessionId);
+        if (view.handle.project.id !== command.projectId) {
+          throw new Error("Workspace changes project is no longer current");
+        }
+        if (this.workspaceChangesRead) {
+          throw new Error("A workspace changes read is already in progress");
+        }
+        const controller = new AbortController();
+        this.workspaceChangesRead = controller;
+        return readWorkspaceChanges(view.handle.project.cwd, controller.signal).then((snapshot) => {
+          if (!this.isCurrentCoordinatedView(view) || controller.signal.aborted) return;
+          this.emit({
+            type: "workspace_changes", sessionId: command.sessionId,
+            projectId: command.projectId, commandId: command.commandId, snapshot,
+          });
+        }).finally(() => {
+          if (this.workspaceChangesRead === controller) this.workspaceChangesRead = undefined;
+        });
+      } catch (error) {
+        return Promise.reject(error);
+      }
     }
     if (command.type === "abort") {
       try {
@@ -733,6 +764,8 @@ export class PiConnection {
     }
 
     this.manualModelRefresh.cancel("Model refresh cancelled by connection lifecycle");
+    this.workspaceChangesRead?.abort();
+    this.workspaceChangesRead = undefined;
     this.cancelCoordinatedTransition();
     this.coordinatedView?.extensionAbort.abort();
     this.initializationAbort?.abort();
@@ -1058,6 +1091,7 @@ export class PiConnection {
       | { type: "prompt" }
       | { type: "refresh_models" }
       | { type: "refresh_view" }
+      | { type: "refresh_workspace_changes" }
       | { type: "steer" }
       | { type: "withdraw_prompt" }
       | { type: "switch_conversation_role" }
@@ -2390,6 +2424,8 @@ case "set_thinking":
   private closeCoordinatedSession(sessionId: string): Promise<void> {
     if (this.requestedSessionId !== sessionId) return Promise.resolve();
     this.manualModelRefresh.cancel("Model refresh cancelled by connection lifecycle");
+    this.workspaceChangesRead?.abort();
+    this.workspaceChangesRead = undefined;
     this.generation++;
     this.requestedSessionId = undefined;
     this.cancelCoordinatedTransition();
@@ -2615,6 +2651,8 @@ case "set_thinking":
 
   dispose(): Promise<void> {
     this.manualModelRefresh.cancel("Model refresh cancelled by connection lifecycle");
+    this.workspaceChangesRead?.abort();
+    this.workspaceChangesRead = undefined;
     if (this.disposePromise) return this.disposePromise;
     this.disposed = true;
     this.generation++;

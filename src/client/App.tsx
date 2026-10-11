@@ -100,6 +100,7 @@ import { useLatestCallback } from "./lib/use-latest-callback";
 import { useModalFocus } from "./lib/use-modal-focus";
 import { usePhoneSceneFocus } from "./lib/use-phone-scene-focus";
 import { usePhoneViewport } from "./lib/use-phone-viewport";
+import { useWorkspaceChanges } from "./lib/use-workspace-changes";
 
 const WORKSPACES_KEY = "piweb.workspaces";
 const MAX_WORKSPACES = 30;
@@ -2006,6 +2007,15 @@ export function App() {
       const transitionEvents = transitionEventBufferRef.current;
       if (transitionEvents) {
         transitionEvents.push(event);
+        return;
+      }
+      if (
+        event.type === "workspace_changes"
+        || (event.type === "error" && event.operation === "refresh_workspace_changes")
+      ) {
+        if (event.sessionId !== sessionIdRef.current) return;
+        if (event.type === "workspace_changes" && event.projectId !== projectIdRef.current) return;
+        workspaceChanges.observe(event);
         return;
       }
       if (event.type === "workspace_sessions_inspected") {
@@ -5608,6 +5618,22 @@ export function App() {
   const handleChatSwitchRole = useLatestCallback(switchConversationRole);
   const handleChatRewind = useLatestCallback(truncateConversation);
   const online = transportOnline && protocolReady;
+  const sessionControlsEnabled = online
+    && sessionControlReady?.sessionId === sessionIdRef.current
+    && sessionControlReady?.projectId === projectIdRef.current;
+  const workspaceChanges = useWorkspaceChanges({
+    sessionId: sessionControlsEnabled ? sessionControlReady?.sessionId : undefined,
+    projectId: sessionControlsEnabled ? sessionControlReady?.projectId : undefined,
+    online,
+    send: (command) => {
+      if (
+        command.sessionId !== sessionIdRef.current
+        || command.projectId !== projectIdRef.current
+        || !transportOnlineRef.current || !protocolReadyRef.current
+      ) return false;
+      return socketRef.current?.send(command) ?? false;
+    },
+  });
   const authModalVisible = Boolean(auth.request || auth.progress);
   const extensionPending = online
     && !authModalVisible
@@ -6134,9 +6160,6 @@ export function App() {
     && !transitioning
     && !focusAwaitingSnapshot
     && !attachedRuntimeUnknown;
-  const sessionControlsEnabled = online
-    && sessionControlReady?.sessionId === sessionIdRef.current
-    && sessionControlReady?.projectId === projectIdRef.current;
   const visibleCompacting = transitioning ? false : conversationCompacting;
   const visibleCompactionAttempt = runtimeState?.compacting === true
     ? runtimeState.compactionAttempt
@@ -6350,6 +6373,10 @@ export function App() {
               compacting={visibleCompacting}
               compactionAttempt={visibleCompactionAttempt}
               cwd={visiblePresentation.cwd}
+              workspaceChanges={workspaceChanges.snapshot}
+              workspaceChangesLoading={workspaceChanges.loading}
+              onRefreshWorkspaceChanges={workspaceChanges.refresh}
+              onWorkspaceChangesVisibilityChange={workspaceChanges.onVisibilityChange}
               conversationContext={visibleConversationContext}
               conversationTitleLookup={visibleConversationTitleLookup}
               mobile={phoneViewport ? {
