@@ -181,7 +181,7 @@ export class PiWebSession {
 
   private unreachable(detail: string): PiWebBridgeError {
     return new PiWebBridgeError(
-      `无法连接 Pi Web（${this.origin}）：${detail}。请确认 Pi Web 已启动。`,
+      `无法连接 Pi Web（${this.origin}）：${detail}。Pi Web 可能没有运行；征得用户同意后可以调用 piweb_start 启动。`,
       "unreachable",
     );
   }

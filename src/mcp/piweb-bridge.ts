@@ -7,6 +7,7 @@ import {
   type RoleTemplate,
 } from "../shared/protocol.js";
 import { CLAUDE_MESSAGE_PREFIX, lastAgentReply } from "./conversation-text.js";
+import { startPiWeb, type StartOptions, type StartResult } from "./piweb-launcher.js";
 import {
   PiWebBridgeError,
   PiWebSession,
@@ -23,6 +24,10 @@ export interface BridgeOptions {
   readonly defaultCwd: string;
   /** 单步命令（握手、打开会话、发送确认）的超时。 */
   readonly commandTimeoutMs?: number;
+  /** 本桥所在的 Pi Web 仓库；piweb_start 只从这里启动，保证服务端与桥是同一份代码。 */
+  readonly repoRoot?: string;
+  /** 测试注入：替换真实的分离启动与就绪等待参数。 */
+  readonly launcher?: Pick<StartOptions, "launch" | "readyTimeoutMs" | "pollIntervalMs">;
 }
 
 export interface ConversationListResult {
@@ -93,6 +98,36 @@ export class PiWebBridge {
   constructor(private readonly options: BridgeOptions) {
     this.defaultCwd = resolve(options.defaultCwd);
     this.commandTimeoutMs = options.commandTimeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS;
+  }
+
+  /** 已在运行就不启动；启动或复用后都用一次握手确认协议版本与本桥一致。 */
+  async start(signal?: AbortSignal): Promise<StartResult> {
+    if (this.options.repoRoot === undefined) {
+      throw new PiWebBridgeError("没有配置 Pi Web 项目目录，无法启动", "invalid_input");
+    }
+    const launch = await startPiWeb({
+      baseUrl: this.options.baseUrl,
+      repoRoot: this.options.repoRoot,
+      ...this.options.launcher,
+      ...(signal === undefined ? {} : { signal }),
+    });
+    try {
+      const session = await PiWebSession.connect(this.options.baseUrl, signal);
+      await session.close();
+    } catch (error) {
+      if (
+        launch.kind === "already_running"
+        && error instanceof PiWebBridgeError
+        && error.code === "protocol_mismatch"
+      ) {
+        throw new PiWebBridgeError(
+          `Pi Web 已在运行，但它和转接程序不是同一版本代码。${error.message}`,
+          "protocol_mismatch",
+        );
+      }
+      throw error;
+    }
+    return launch;
   }
 
   resolveCwd(cwd: string | undefined): string {

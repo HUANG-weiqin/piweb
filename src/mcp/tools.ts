@@ -14,6 +14,7 @@ import type {
   PiWebBridge,
   WaitResult,
 } from "./piweb-bridge.js";
+import type { StartResult } from "./piweb-launcher.js";
 import { PiWebBridgeError, type PromptAck } from "./piweb-session.js";
 
 const DEFAULT_LAST_ITEMS = 8;
@@ -29,6 +30,7 @@ export function piWebInstructions(defaultCwd: string): string {
     "- 你发出的消息会自动加上 \"[Claude Code] \" 前缀，在 Pi Web 中显示为用户消息；对方 Agent 据此知道是你在说话。",
     "- 发消息后用 piweb_wait 等待本轮结束；它会返回 Agent 的最新回复。需要更多上下文时再用 piweb_read_conversation。",
     "- 工具若报告项目信任还没有决定，或 Pi Web 弹出了对话框，不要绕过或重试，把内容告诉用户，由用户在浏览器中处理。",
+    "- 连不上 Pi Web 时可以用 piweb_start 启动它，但必须先征得用户同意：服务会长时间运行，里面的 Agent 会改代码。",
     "- 本工具集不提供删除会话、修改角色或认证的操作。",
     `- 省略 cwd 时使用默认项目目录：${defaultCwd}`,
   ].join("\n");
@@ -264,4 +266,21 @@ export function registerPiWebTools(server: McpServer, bridge: PiWebBridge): void
       signal: extra.signal,
     }),
   )));
+
+  server.registerTool("piweb_start", {
+    title: "启动 Pi Web 服务",
+    description: "启动本机 Pi Web 服务：与 open-piweb 相同，在一个新的可见命令行窗口运行 npm start，等它准备好并确认协议版本一致。已在运行时不重复启动。调用前必须先征得用户同意。",
+    inputSchema: {},
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  }, (_args, extra) => run(async () => formatStart(await bridge.start(extra.signal))));
+}
+
+export function formatStart(result: StartResult): string {
+  if (result.kind === "already_running") {
+    return "Pi Web 已经在运行，协议版本与转接程序一致，没有重复启动。";
+  }
+  const seconds = Math.max(1, Math.round(result.elapsedMs / 1000));
+  return result.logFile === undefined
+    ? `已在新的命令行窗口启动 Pi Web（npm run start），用时约 ${seconds} 秒，协议版本一致。用户关闭那个窗口即可停止服务。`
+    : `已在后台启动 Pi Web（npm run start），用时约 ${seconds} 秒，协议版本一致。输出写在 ${result.logFile}。`;
 }

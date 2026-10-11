@@ -117,6 +117,7 @@ describe("MCP tool registration", () => {
         "piweb_list_roles",
         "piweb_read_conversation",
         "piweb_send_message",
+        "piweb_start",
         "piweb_wait",
       ]);
       const wait = tools.find(({ name }) => name === "piweb_wait")!;

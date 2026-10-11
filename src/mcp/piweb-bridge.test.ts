@@ -323,7 +323,10 @@ async function fakePiWeb(
   onCommand: (command: ClientCommand, send: (event: ServerEvent) => void) => void,
   protocolVersion = PROTOCOL_VERSION,
 ) {
-  const server = createServer();
+  const server = createServer((request, response) => {
+    response.writeHead(request.url === "/health" ? 200 : 404, { "content-type": "application/json" });
+    response.end(JSON.stringify({ ok: request.url === "/health" }));
+  });
   const sockets = new WebSocketServer({ server, path: "/ws" });
   const received: ClientCommand[] = [];
   const closed = deferred();
@@ -359,6 +362,34 @@ describe("PiWebBridge safety boundaries", () => {
       code: "protocol_mismatch",
     });
     expect(received).toEqual([]);
+  });
+
+  it("does not start a second Pi Web and reports an already running older version", async () => {
+    const { baseUrl } = await fakePiWeb(() => undefined, PROTOCOL_VERSION - 1);
+    const launch = vi.fn();
+    const bridge = new PiWebBridge({
+      baseUrl,
+      defaultCwd: tmpdir(),
+      repoRoot: process.cwd(),
+      launcher: { launch },
+    });
+    const error = await bridge.start().catch((caught: unknown) => caught);
+    expect(error).toMatchObject({ code: "protocol_mismatch" });
+    expect((error as Error).message).toContain("Pi Web 已在运行");
+    expect(launch).not.toHaveBeenCalled();
+  });
+
+  it("reports an already running Pi Web with the same version as already running", async () => {
+    const { baseUrl } = await fakePiWeb(() => undefined);
+    const launch = vi.fn();
+    const bridge = new PiWebBridge({
+      baseUrl,
+      defaultCwd: tmpdir(),
+      repoRoot: process.cwd(),
+      launcher: { launch },
+    });
+    await expect(bridge.start()).resolves.toEqual({ kind: "already_running" });
+    expect(launch).not.toHaveBeenCalled();
   });
 
   it("never answers an extension dialog and disconnects so the server settles it", async () => {

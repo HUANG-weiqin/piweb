@@ -4,14 +4,14 @@
 
 ## 这个模块是干什么的
 
-`src/mcp/` 让 Claude Code 等外部 Agent 通过 MCP 使用工作台：列出会话与角色、读历史、新建会话派任务、发消息、等待一轮结束、停止运行。它是浏览器之外的**第二个线协议客户端**，与 `src/client` 同级，只导入 `src/shared/`。
+`src/mcp/` 让 Claude Code 等外部 Agent 通过 MCP 使用工作台：列出会话与角色、读历史、新建会话派任务、发消息、等待一轮结束、停止运行，以及在服务未运行时经用户同意启动它。它是浏览器之外的**第二个线协议客户端**，与 `src/client` 同级，只导入 `src/shared/`。
 
 不负责：回答扩展对话框或决定项目信任（扩展确认、角色提示词 editor 都留给浏览器）、删除会话、修改角色或认证、远程访问、让工作台 Agent 主动呼叫外部 Agent。这些要么属于用户，要么需要先改核心协议。
 
 ## 架构
 
 ```text
-Claude Code ──stdio(MCP)──> src/mcp/index.ts（McpServer + 7 个工具）
+Claude Code ──stdio(MCP)──> src/mcp/index.ts（McpServer + 8 个工具）
   → PiWebBridge：每次工具调用一条短连接
   → PiWebSession ──ws://127.0.0.1:<port>/ws──> socket-server → PiConnection
        hello 版本校验 → initialize(cwd, recent|open|new, extensionUi=none) → focus/prompt/abort/refresh_view
@@ -27,6 +27,7 @@ Claude Code ──stdio(MCP)──> src/mcp/index.ts（McpServer + 7 个工具�
 | `piweb_send_message` | initialize(open) → prompt | idle 的 `run_queued(runId)` 或 busy 的 `prompt_admitted(promptId)` |
 | `piweb_wait` | initialize(recent，不打开会话) | `conversation_run_settled`；列表空闲后 1.5s 仍无结算才按空闲返回 |
 | `piweb_abort` | initialize(open) → abort(activeRun) | 该 runId 的 `conversation_run_settled`，30s 内无确认报告 unknown |
+| `piweb_start` | 不走 WebSocket：先查 `/health`；未运行才在桥所在仓库执行 `npm run start` | `/health` 60s 内就绪，再一次 hello 版本校验 |
 
 消息正文自动加 `[Claude Code] ` 前缀，在工作台中仍是普通用户消息；准入、投递证明、Stop 语义与浏览器输入完全相同，见[浏览器消息准入](kb-agent-collaboration.md#浏览器消息准入)。`conversation_run_settled` 对项目观察广播、不要求 focus，所以 wait 不必聚焦目标。
 
@@ -40,6 +41,7 @@ Claude Code ──stdio(MCP)──> src/mcp/index.ts（McpServer + 7 个工具�
 - 只连本机：`PIWEB_URL` 只接受 127.0.0.1 / localhost / [::1]；Origin 设为服务地址本身，处在既有“本机进程可信”模型内，不扩展远程访问。
 - 共享 schema 加 hello 版本校验：服务端与桥代码不一致时显式失败，不能按旧结构运行。
 - `@modelcontextprotocol/sdk` 精确锁定版本；只用 server + stdio，不用其 OAuth client。
+- 启动是显式工具而不是连不上时自动拉起：服务长期运行、Agent 会改代码，调用前必须征得用户同意。只从桥所在仓库（`dist-server/mcp/` 上两级）启动，与 `open-piweb` 相同运行 `npm run start`，因此服务端与桥一定是同一份代码；不自动 build、不开浏览器。Windows 用 `start` 开独立可见控制台，用户关窗口即停止；其它平台分离运行并把输出追加到 `<repo>/piweb-mcp-start.log`。服务不随 Claude Code 退出。已在运行时只做版本校验，不重复启动；版本不同只报告，reload 仍由用户决定。
 
 ## 认知模型
 
@@ -51,7 +53,8 @@ Claude Code ──stdio(MCP)──> src/mcp/index.ts（McpServer + 7 个工具�
 - `src/mcp/piweb-session.ts`：单连接握手、身份关联、等待条件、对话框中断。
 - `src/mcp/piweb-bridge.ts`：七个操作与 wait/park 逻辑。
 - `src/mcp/tools.ts`、`src/mcp/conversation-text.ts`：工具 schema 与面向调用方的文本投影。
-- 测试：`src/mcp/piweb-bridge.test.ts`（真实 socket server + FakeRuntime）、`src/mcp/tools.test.ts`（投影与 MCP 注册）。
+- `src/mcp/piweb-launcher.ts`：仓库校验、启动命令、分离启动与 `/health` 就绪等待。
+- 测试：`src/mcp/piweb-bridge.test.ts`（真实 socket server + FakeRuntime）、`src/mcp/tools.test.ts`（投影与 MCP 注册）、`src/mcp/piweb-launcher.test.ts`（注入 launch，不开真实窗口）。
 - 构建产物：`npm run build` 生成 `dist-server/mcp/index.js`。注册（用户级）：`claude mcp add --scope user piweb -- node <repo>/dist-server/mcp/index.js`；改代码后需重新 build 并在 Claude Code 中重连该 MCP。
 - 调试：`PIWEB_MCP_DEBUG=1` 把收发帧类型与身份写到 stderr（stdout 属于 MCP 协议）。
 
@@ -64,6 +67,9 @@ Claude Code ──stdio(MCP)──> src/mcp/index.ts（McpServer + 7 个工具�
 - 信任未决定时，桥在本进程内第一次打开该项目（还没有模型目录）就会失败，连列表也拿不到；用户先在浏览器打开项目并回答即可。默认策略为 ask 且每次只选“仅本次信任”的项目，桥只能使用浏览器已打开的会话，冷会话与新建都会报错，选“记住”后才解除。
 - 残余窗口：服务端检查通过之后、Pi 真正创建 session 之前，若用户恰好删除了保存的信任决定，这次询问会交给浏览器或标 attention，仍不会到桥，也不会被当成“不信任”。
 - 测试 fake 的用户消息必须先发 raw user `message_end` 再由同一 SessionManager `appendMessage`，否则缺投递标记会使 actor fatal。
+- 启动的服务绝不能继承桥的 stdio：桥的 stdout 是 MCP 协议通道。Windows 外层 cmd 以 `stdio: ignore` + 隐藏窗口运行，`start` 新开的控制台有自己的输出；直接 `detached` + `ignore` 会得到空白窗口，继承则会污染 MCP。
+- 同一仓库与 PORT 的重复启动由 supervisor 的控制描述符拒绝，桥不另加锁；窗口标题会被 npm 改成 “npm run start”，与用户自己 `open-piweb` 开的窗口同名。
+- 自动化测试不得真实开窗口；真实启动路径要用假仓库（`package.json` name 为 `piweb` 且含 `scripts/piweb-supervisor.mjs`）和空闲端口手工验证，事后只结束那棵进程树。
 
 ## 关联模块
 
