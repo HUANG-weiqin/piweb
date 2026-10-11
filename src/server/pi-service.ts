@@ -40,6 +40,7 @@ import type { RoleCatalog } from "./role-catalog.js";
 import { ManualModelRefreshGate } from "./manual-model-refresh.js";
 import { SerialTaskQueue } from "./serial-task-queue.js";
 import { resolveContextUsage } from "./session-usage.js";
+import { readLocalImage } from "./local-image.js";
 
 export interface PiConnectionCoordination {
   coordinator: ProjectSessionCoordinator;
@@ -464,6 +465,37 @@ export class PiConnection {
           )
         ).then(() => {
           this.emitCommandComplete(command);
+        });
+      } catch (error) {
+        return Promise.reject(error);
+      }
+    }
+    if (command.type === "open_local_image") {
+      try {
+        if (this.usedCommandIds.has(command.commandId)) {
+          return Promise.reject(new Error("Command ID was already used on this connection"));
+        }
+        this.usedCommandIds.add(command.commandId);
+        const generation = this.generation;
+        const view = this.requireCoordinatedFocus(
+          command.sessionId, command.conversationId, command.focusId,
+        );
+        return readLocalImage(view.handle.project.cwd, command.path).then((image) => {
+          if (!this.isCoordinatedSession(command.sessionId, generation)) return;
+          if (
+            this.coordinatedView !== view
+            || view.conversationId !== command.conversationId
+            || view.focusId !== command.focusId
+          ) return;
+          this.emit({
+            type: "local_image",
+            sessionId: command.sessionId,
+            conversationId: command.conversationId,
+            focusId: command.focusId,
+            commandId: command.commandId,
+            path: command.path,
+            ...image,
+          });
         });
       } catch (error) {
         return Promise.reject(error);
@@ -1022,6 +1054,7 @@ export class PiConnection {
       | { type: "extension_ui_response" }
       | { type: "initialize" }
       | { type: "open_image" }
+      | { type: "open_local_image" }
       | { type: "prompt" }
       | { type: "refresh_models" }
       | { type: "refresh_view" }

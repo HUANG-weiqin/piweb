@@ -192,6 +192,7 @@ interface ChatProps {
   onOpenConversation?(conversationId: string): void;
   onBlockingModalChange?(blocking: boolean): void;
   onOpenImage?(source: ConversationImageLocator): void;
+  onOpenLocalImage?(path: string): void;
   onRewind(messageId: string, text: string): void;
   rewindingMessageId?: string;
 }
@@ -349,6 +350,7 @@ function ChatView({
   onOpenConversation,
   onBlockingModalChange,
   onOpenImage,
+  onOpenLocalImage,
   onRewind,
   rewindingMessageId,
 }: ChatProps) {
@@ -936,6 +938,7 @@ function ChatView({
           key={`${transcriptRenderScopeKey}:message:${block.message.id}`}
           message={block.message}
           onOpenImage={onOpenImage}
+          onOpenLocalImage={onOpenLocalImage}
           onRewind={block.message.role === "user" ? handleRewind : undefined}
           rewindDisabled={
             busy

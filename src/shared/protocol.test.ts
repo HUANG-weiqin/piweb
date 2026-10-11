@@ -42,8 +42,29 @@ const transitionDiagnostics = {
 };
 
 describe("parseClientCommand", () => {
+  it("correlates local image previews separately from durable image locators", () => {
+    const identity = {
+      sessionId: crypto.randomUUID(), conversationId: crypto.randomUUID(),
+      focusId: crypto.randomUUID(), commandId: crypto.randomUUID(),
+    };
+    const command = { type: "open_local_image", ...identity, path: "E:/图片/a.png" };
+    expect(parseClientCommand(command)).toEqual(command);
+    const response = { type: "local_image", ...identity, path: command.path, mimeType: "image/png", data: "iVBORw0KGgo=" };
+    expect(parseServerEvent(response)).toEqual(response);
+    expect(() => parseServerEvent({ ...response, focusId: undefined })).toThrow();
+    expect(() => parseClientCommand({ ...command, path: "file://server/a.png" })).toThrow();
+    expect(() => parseClientCommand({ ...command, path: "a.html" })).toThrow();
+    expect(() => parseClientCommand({ ...command, messageId: "not-a-history-image" })).toThrow();
+    expect(() => parseServerEvent({ ...response, imageOrdinal: 0 })).toThrow();
+    const error = { type: "error", scope: "command", operation: "open_local_image", message: "missing", ...identity };
+    expect(parseServerEvent(error)).toEqual(error);
+    for (const key of ["sessionId", "conversationId", "focusId", "commandId"]) {
+      expect(() => parseServerEvent({ ...error, [key]: undefined })).toThrow();
+    }
+  });
+
   it("uses the run-correlated protocol version", () => {
-    expect(PROTOCOL_VERSION).toBe(71);
+    expect(PROTOCOL_VERSION).toBe(72);
   });
 
   it("lets initialize declare a connection without extension UI", () => {

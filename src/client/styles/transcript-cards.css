@@ -685,7 +685,8 @@
   color: var(--rebel-paper-muted);
 }
 
-.transcript .markdown a {
+.transcript .markdown a,
+.transcript .markdown .local-image-link {
   color: color-mix(in srgb, var(--rebel-red) 68%, var(--rebel-paper));
 }
 

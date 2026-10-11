@@ -688,6 +688,48 @@ describe("App", () => {
     });
   });
 
+  it.each(["matching", "wrong-path", "wrong-focus", "error"] as const)(
+    "opens local image paths only for an exact response (%s)", (outcome) => {
+      const target = { close: vi.fn(), location: { replace: vi.fn() } } as unknown as Window;
+      vi.spyOn(window, "open").mockReturnValue(target);
+      const createObjectURL = vi.fn().mockReturnValue("blob:local-image");
+      vi.stubGlobal("URL", Object.assign(class extends URL {}, { createObjectURL }));
+      const sessionId = startFocusReplacementProject();
+      act(() => socketMock.rawEmit?.({
+        type: "conversation_snapshot", sessionId, conversationId: CONVERSATION_ID, focusId: FOCUS_A,
+        items: snapshotItems([{
+          id: "local-path-message", role: "assistant", text: "[查看成图](file:///E:/images/a.png)",
+          thinking: "", tools: [],
+        }]), window: completeConversationWindow,
+      }));
+      fireEvent.click(screen.getByRole("button", { name: "查看成图 ↗" }));
+      expect(window.open).toHaveBeenCalledWith("about:blank", "_blank");
+      const command = latestCommand("open_local_image");
+      expect(command).toMatchObject({
+        sessionId, conversationId: CONVERSATION_ID, focusId: FOCUS_A, path: "E:/images/a.png",
+      });
+      expect(createObjectURL).not.toHaveBeenCalled();
+      act(() => socketMock.rawEmit?.(outcome === "error" ? {
+        type: "error", scope: "command", operation: "open_local_image", message: "图片不存在",
+        sessionId, conversationId: CONVERSATION_ID, focusId: FOCUS_A, commandId: command.commandId,
+      } : {
+        ...command, type: "local_image", mimeType: "image/png", data: "iVBORw0KGgo=",
+        ...(outcome === "wrong-path" ? { path: "E:/images/other.png" } : {}),
+        ...(outcome === "wrong-focus" ? { focusId: FOCUS_A_SECOND } : {}),
+      }));
+      if (outcome === "matching") {
+        expect(createObjectURL).toHaveBeenCalledWith(expect.any(Blob));
+        expect(target.location.replace).toHaveBeenCalledWith("blob:local-image");
+        expect(target.close).not.toHaveBeenCalled();
+      } else {
+        expect(target.close).toHaveBeenCalled();
+        expect(createObjectURL).not.toHaveBeenCalled();
+        expect(target.location.replace).not.toHaveBeenCalled();
+        if (outcome === "error") expect(screen.getByText("打开图片失败：图片不存在")).toBeVisible();
+      }
+    },
+  );
+
   it("opens an initial phone chat route with an exact conversation open", () => {
     mockPhoneViewport();
     phoneRoute({

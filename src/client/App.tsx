@@ -252,8 +252,7 @@ interface PendingPromptWithdrawal extends ActiveFocus {
 
 interface PendingImageOpen extends ActiveFocus {
   commandId: string;
-  messageId: string;
-  imageOrdinal: number;
+  source: ConversationImageLocator | { path: string };
   target: Window;
 }
 
@@ -2940,16 +2939,20 @@ export function App() {
         if (pending?.promptId === event.promptId && pending.runId === event.runId) {
           updatePendingPromptWithdrawal(undefined);
         }
-      } else if (event.type === "conversation_image") {
+      } else if (event.type === "conversation_image" || event.type === "local_image") {
         const pending = pendingImageOpensRef.current.get(event.commandId);
         if (!pending) return;
         pendingImageOpensRef.current.delete(event.commandId);
+        const matchesSource = event.type === "local_image"
+          ? "path" in pending.source && pending.source.path === event.path
+          : "messageId" in pending.source
+            && pending.source.messageId === event.messageId
+            && pending.source.imageOrdinal === event.imageOrdinal;
         if (
           pending.sessionId !== event.sessionId
           || pending.conversationId !== event.conversationId
           || pending.focusId !== event.focusId
-          || pending.messageId !== event.messageId
-          || pending.imageOrdinal !== event.imageOrdinal
+          || !matchesSource
           || !matchesFocus(event.sessionId, event.conversationId, event.focusId)
         ) {
           pending.target.close();
@@ -3357,11 +3360,12 @@ export function App() {
           }
           return;
         }
-        const pendingImageOpen = event.operation === "open_image" && event.commandId
-          ? pendingImageOpensRef.current.get(event.commandId)
-          : undefined;
+        const pendingImageOpen = (
+          event.operation === "open_image" || event.operation === "open_local_image"
+        ) && event.commandId ? pendingImageOpensRef.current.get(event.commandId) : undefined;
         if (
           pendingImageOpen
+          && event.operation === ("path" in pendingImageOpen.source ? "open_local_image" : "open_image")
           && pendingImageOpen.sessionId === event.sessionId
           && pendingImageOpen.conversationId === event.conversationId
           && pendingImageOpen.focusId === event.focusId
@@ -4177,10 +4181,7 @@ export function App() {
     }
     return commandId;
   };
-  const openImage = useCallback(({
-    messageId,
-    imageOrdinal,
-  }: ConversationImageLocator) => {
+  const openImageSource = useCallback((source: ConversationImageLocator | { path: string }) => {
     const focus = focusRef.current;
     if (!focus || !conversationReadyRef.current || !protocolReady) {
       setError("当前对话尚未准备好打开图片");
@@ -4195,26 +4196,31 @@ export function App() {
     const pending: PendingImageOpen = {
       ...focus,
       commandId,
-      messageId,
-      imageOrdinal,
+      source,
       target,
     };
     pendingImageOpensRef.current.set(commandId, pending);
-    const sent = socketRef.current?.send({
-      type: "open_image",
+    const identity = {
       commandId,
       sessionId: focus.sessionId,
       conversationId: focus.conversationId,
       focusId: focus.focusId,
-      messageId,
-      imageOrdinal,
-    }) ?? false;
+    };
+    const sent = socketRef.current?.send("path" in source
+      ? { type: "open_local_image", ...identity, path: source.path }
+      : { type: "open_image", ...identity, ...source }) ?? false;
     if (!sent) {
       pendingImageOpensRef.current.delete(commandId);
       target.close();
       setError("本地服务未连接");
     }
   }, [protocolReady]);
+  const openImage = useCallback((source: ConversationImageLocator) => {
+    openImageSource(source);
+  }, [openImageSource]);
+  const openLocalImage = useCallback((path: string) => {
+    openImageSource({ path });
+  }, [openImageSource]);
   useEffect(() => {
     if (
       !chat.projectionGap
@@ -6378,6 +6384,7 @@ export function App() {
               onChangeCwd={handleWorkspaceAdd}
               onOpenConversation={handleConversationSelect}
               onOpenImage={openImage}
+              onOpenLocalImage={openLocalImage}
               onRewind={handleChatRewind}
               rewindingMessageId={pendingConversationTruncation?.messageId}
             />}

@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
-import { mkdtemp, readFile, realpath, rm } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type {
@@ -47,6 +47,7 @@ import { SessionDirectoryChangedError } from "./project-store.js";
 import { ProjectStoreRegistry } from "./project-store-registry.js";
 import { ProjectSessionCoordinator } from "./project-session-coordinator.js";
 import { RoleCatalog } from "./role-catalog.js";
+import * as localImage from "./local-image.js";
 
 const SESSION_A = "0dd23f7c-80c8-4713-b7a7-33c00177a101";
 const SESSION_B = "e15c861c-e18f-4290-bc22-8932f3caaf4e";
@@ -7976,6 +7977,60 @@ describe("PiConnection coordinated project view", () => {
       promptFinished.resolve();
       await running;
     } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it("reads a clicked local image with exact focus/path correlation and no history mutation", async () => {
+    const harness = await coordinatedConnectionHarness();
+    try {
+      const focused = await initializeNewConversation(harness);
+      const file = join(harness.cwd, "result.png");
+      await writeFile(file, Buffer.from("iVBORw0KGgo=", "base64"));
+      const manager = harness.runtime.created[0]!.persistentManager!;
+      const before = manager.getEntries();
+      const command = {
+        type: "open_local_image" as const, commandId: randomUUID(), sessionId: SESSION_A,
+        conversationId: focused.conversationId!, focusId: focused.focusId!, path: "result.png",
+      };
+      await harness.connection.handle(command);
+      const response = harness.events.findLast((event) => event.type === "local_image");
+      expect(response).toEqual({
+        ...command, type: "local_image", mimeType: "image/png", data: "iVBORw0KGgo=",
+      });
+      expect(parseServerEvent(response)).toEqual(response);
+      expect(manager.getEntries()).toEqual(before);
+      await expect(harness.connection.handle(command)).rejects.toThrow("already used");
+      await expect(harness.connection.handle({ ...command, commandId: randomUUID(), focusId: randomUUID() }))
+        .rejects.toThrow();
+      await expect(harness.connection.handle({ ...command, commandId: randomUUID(), path: "missing.png" }))
+        .rejects.toThrow(/ENOENT/);
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it("drops an in-flight local image response after focus/observation replacement", async () => {
+    const harness = await coordinatedConnectionHarness();
+    let resolveImage!: (image: { mimeType: "image/png"; data: string }) => void;
+    const image = new Promise<{ mimeType: "image/png"; data: string }>((resolve) => { resolveImage = resolve; });
+    const read = vi.spyOn(localImage, "readLocalImage").mockReturnValue(image);
+    try {
+      const focused = await initializeNewConversation(harness);
+      const commandId = randomUUID();
+      const opening = harness.connection.handle({
+        type: "open_local_image", commandId, sessionId: SESSION_A,
+        conversationId: focused.conversationId!, focusId: focused.focusId!, path: "a.png",
+      });
+      await harness.connection.handle({
+        type: "initialize", commandId: randomUUID(), sessionId: SESSION_B,
+        cwd: harness.cwd, conversation: { kind: "recent" },
+      });
+      resolveImage({ mimeType: "image/png", data: "iVBORw0KGgo=" });
+      await opening;
+      expect(harness.events).not.toContainEqual(expect.objectContaining({ type: "local_image", commandId }));
+    } finally {
+      read.mockRestore();
       await harness.cleanup();
     }
   });

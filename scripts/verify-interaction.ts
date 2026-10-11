@@ -10,7 +10,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import WebSocket from "ws";
 import {
-  BUSY_PROMPT, FIRST_PROMPT, STEER_PROMPT, TITLE, startInteractionFixture,
+  BUSY_PROMPT, FIRST_PROMPT, LOCAL_IMAGE_DATA, LOCAL_IMAGE_NAME, STEER_PROMPT, TITLE, startInteractionFixture,
 } from "./interaction-fixture.js";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -280,6 +280,44 @@ async function main(): Promise<void> {
     await waitFor("first response rendered", () => ui.evaluate('document.body.innerText.includes("FIRST RESPONSE")'));
     evidence.titleDidNotGateFirstRun = true;
     console.log("E2E: first model call, settlement and JSONL precede title release");
+
+    assert(!received((event) => event.type === "local_image"), "local files must not load before a click");
+    const imagePoint = await waitFor("local image link rendered", () => ui.evaluate(`(() => {
+      const link = document.querySelector('button[data-piweb-local-image]');
+      if (!link) return undefined;
+      link.scrollIntoView({ block: 'center' });
+      const rect = link.getBoundingClientRect();
+      return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+    })()`));
+    await ui.call("Input.dispatchMouseEvent", { type: "mousePressed", button: "left", clickCount: 1, ...imagePoint });
+    await ui.call("Input.dispatchMouseEvent", { type: "mouseReleased", button: "left", clickCount: 1, ...imagePoint });
+    const localResponse = await waitFor("local file preview response", () => received((event) => event.type === "local_image"));
+    const localCommand = ui.frames.find((frame) => frame.direction === "sent" && frame.payload.type === "open_local_image")?.payload;
+    assert(localCommand);
+    assert.equal(localResponse.commandId, localCommand.commandId);
+    assert.equal(localResponse.sessionId, initialSnapshot.sessionId);
+    assert.equal(localResponse.conversationId, conversationId);
+    assert.equal(localResponse.focusId, initialSnapshot.focusId);
+    assert.equal(localResponse.path, `./${LOCAL_IMAGE_NAME}`);
+    assert.equal(localResponse.data, LOCAL_IMAGE_DATA);
+    const popup = await waitFor("native image popup", async () => {
+      const pages = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json() as any[];
+      return pages.find((page) => page.type === "page" && page.url.startsWith("blob:"));
+    });
+    const imageViewer = new CdpClient(popup.webSocketDebuggerUrl);
+    try {
+      await imageViewer.open();
+      await waitFor("browser decoded the local image", () => imageViewer.evaluate(
+        'Boolean(document.querySelector("img")?.complete && document.querySelector("img")?.naturalWidth === 1)',
+      ));
+      const screenshot = await imageViewer.call("Page.captureScreenshot", { format: "png" });
+      await writeFile(join(artifactDir, "local-image.png"), Buffer.from(screenshot.data, "base64"));
+    } finally {
+      imageViewer.close();
+    }
+    assert.equal((await diskConversation(fixture.cwd, conversationId)).raw, firstDisk.raw, "local preview must not mutate history");
+    evidence.localImagePreview = { clickOnly: true, exactBytes: true, nativePopupDecoded: true, historyUnchanged: true };
+    console.log("E2E: clicked local Unicode/space path opened in a native image tab without history writes");
 
     const busyCommand = await send(BUSY_PROMPT);
     await waitFor("held streaming model call", () => fixture.log.some((event) => event.kind === "model_requested" && event.text?.includes(BUSY_PROMPT)));

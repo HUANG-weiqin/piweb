@@ -28,10 +28,13 @@ ClientCommand
 | prompt/steer 图片 | PNG/JPEG/WebP/GIF、canonical Base64；最多 4 张，单张解码后 8 MiB、合计 16 MiB |
 | 客户端命令帧 | 完整 JSON 的 UTF-8 字节数最多 24 MiB，包含 Base64、文本转义和身份；发送前、共享 parser、WebSocket maxPayload 共用上限 |
 | 历史图片读取 | `open_image` 单张解码后 16 MiB；与上传预算独立，cold reopen 不套上传帧限制 |
+| 本地图片预览 | `open_local_image` 路径最多 4096 字符、普通文件原字节最多 16 MiB；仅 PNG/JPEG/WebP/GIF |
 | 服务端事件 | 独立 64 MiB；发送前必须复验 schema、序列化及字节数，失败用固定 protocol error + 专用 close code 终止已丢帧的 observation |
 | 目录浏览 | 列表字节预算为 1,000,000 减 64 KiB，另受项数限制，不随命令帧扩大 |
 
 浏览器上传读取原文件，不为上传预算强制缩放；Pi 的 `images.autoResize` 仍按用户偏好执行。图片随原始 user/tool-result message 持久化，普通 wire/history 只投影 marker 与精确 active-branch locator `{messageId: entry.id, imageOrdinal}`（user 用 offset，tool result 用 contentIndex）。`open_image → conversation_image` 是一次性、完整 focus + command + locator 关联的读取，服务端复验 MIME、Base64 和签名；客户端仅点击时建立临时 Blob URL。被预算裁掉 locator 的 marker 必须显示“图片已省略”，不能猜测图片来源。桌面截图另遵守[运行时截图边界](kb-server-runtime.md#桌面截图与坐标授权)。
+
+本地路径预览独立使用 `open_local_image → local_image`：两端均携带完整 `sessionId + conversationId + focusId + commandId + path`，错误也要求完整 focus + command identity；只读取点击时的当前磁盘，不产生 durable locator、不进 history/state/provider 上下文。路径拒绝网络共享、设备路径、drive-relative、ADS 与其它 URI scheme；相对路径以已提交项目 cwd 解析，用户显式点击的绝对图片路径允许在工作区外。服务端复核普通文件、大小、读取前后文件状态及 raster 签名，不开放静态目录或 SVG/HTML/任意文件内容。
 
 协议版本历史以 `PROTOCOL_VERSION` 旁摘要为准，不在知识页复制版本流水账。当前不接受旧 `messages[]` transcript、缺少 ordered parts、直接 `select_model` 或项目级工具模式切换；持久格式的兼容范围与尚未兑现的承诺见[会话兼容性](kb-project-sessions.md#兼容性合同差异)。
 

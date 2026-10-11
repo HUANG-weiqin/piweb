@@ -39,7 +39,7 @@ Claude Code ──stdio(MCP)──> src/mcp/index.ts（McpServer + 8 个工具�
 - 从不回答对话框：服务端不会再发给桥；万一收到 `extension_ui_request` 仍立即断开，让服务端按取消结算，工具把对话框内容返回给调用方，由用户决定。
 - 短连接：每次调用结束即断开，不长期占用项目 handle。
 - 只连本机：`PIWEB_URL` 只接受 127.0.0.1 / localhost / [::1]；Origin 设为服务地址本身，处在既有“本机进程可信”模型内，不扩展远程访问。
-- 共享 schema 加 hello 版本校验：服务端与桥代码不一致时显式失败，不能按旧结构运行。
+- 共享 schema 加 hello 版本校验：服务端与桥代码不一致时显式失败，不能按旧结构运行。浏览器点击本地图片的 `open_local_image/local_image` 与持久图片 `open_image/conversation_image` 不属于 MCP 工具；桥仍按共享 schema 校验响应，但不保留或交给 waiter，不以图片响应结算会话操作。协议版本推进后必须同步构建服务端与桥。
 - `@modelcontextprotocol/sdk` 精确锁定版本；只用 server + stdio，不用其 OAuth client。
 - 启动是显式工具而不是连不上时自动拉起：服务长期运行、Agent 会改代码，调用前必须征得用户同意。只从桥所在仓库（`dist-server/mcp/` 上两级）启动，与 `open-piweb` 相同运行 `npm run start`，因此服务端与桥一定是同一份代码；不自动 build、不开浏览器。Windows 用 `start` 开独立可见控制台，用户关窗口即停止；其它平台分离运行并把输出追加到 `<repo>/piweb-mcp-start.log`。服务不随 Claude Code 退出。已在运行时只做版本校验，不重复启动；版本不同只报告，reload 仍由用户决定。
 

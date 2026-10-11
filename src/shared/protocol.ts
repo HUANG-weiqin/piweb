@@ -1,4 +1,8 @@
 import { z } from "zod";
+import { localImagePath, MAX_LOCAL_IMAGE_PATH_CHARACTERS } from "./local-image-path.js";
+
+const localImagePathSchema = z.string().max(MAX_LOCAL_IMAGE_PATH_CHARACTERS)
+  .refine((value) => localImagePath(value) !== undefined, "Expected a local raster image path");
 
 /** Complete client JSON frames, including Base64 images and escaped text. */
 export const MAX_MESSAGE_BYTES = 24 * 1024 * 1024;
@@ -121,7 +125,9 @@ export const MAX_TRANSITION_DIAGNOSTIC_PHASE_MS = 60 * 60 * 1_000;
 // un-delivered inputs, and same-ID reconnects reconcile without duplicate runs.
 // v69: connection-scoped session-file inspection and backed-up tail repair,
 // available even when workspace initialization fails; no validation bypass.
-export const PROTOCOL_VERSION = 71;
+// v72: user-triggered local raster previews have an exact-focus path response,
+// separate from persisted conversation image locators.
+export const PROTOCOL_VERSION = 72;
 export const OBSERVATION_FATAL_CLOSE_CODE = 4002;
 export const COLOR_SCHEMES = ["quiet-rebel", "classic-rebel"] as const;
 export type ColorScheme = typeof COLOR_SCHEMES[number];
@@ -823,6 +829,14 @@ const clientCommandUnionSchema = z.discriminatedUnion("type", [
     messageId: conversationMessageIdSchema,
   }),
   z.object({
+    type: z.literal("open_local_image"),
+    commandId: commandIdSchema,
+    sessionId: sessionIdSchema,
+    conversationId: conversationIdSchema,
+    focusId: focusIdSchema,
+    path: localImagePathSchema,
+  }).strict(),
+  z.object({
     type: z.literal("open_image"),
     commandId: commandIdSchema,
     sessionId: sessionIdSchema,
@@ -1458,6 +1472,17 @@ export type ServerEvent =
       reason: "manual" | "abort";
     }
   | {
+      type: "local_image";
+      sessionId: string;
+      conversationId: string;
+      focusId: string;
+      commandId: string;
+      path: string;
+      mimeType: PromptImageMimeType;
+      /** Current disk bytes only; never included in snapshots or persistence. */
+      data: string;
+    }
+  | {
       type: "conversation_image";
       sessionId: string;
       conversationId: string;
@@ -1753,6 +1778,7 @@ const commandTypeSchema = z.enum([
   "delete_conversation",
   "truncate_conversation",
   "open_image",
+  "open_local_image",
   "create_role",
   "update_role",
   "delete_role",
@@ -2271,6 +2297,14 @@ const serverEventUnionSchema = z.discriminatedUnion("type", [
     reason: z.enum(["manual", "abort"]),
   }).strict(),
   conversationImageSchema.extend({
+    type: z.literal("local_image"),
+    sessionId: sessionIdSchema,
+    conversationId: conversationIdSchema,
+    focusId: focusIdSchema,
+    commandId: commandIdSchema,
+    path: localImagePathSchema,
+  }).strict(),
+  conversationImageSchema.extend({
     type: z.literal("conversation_image"),
     sessionId: sessionIdSchema,
     conversationId: conversationIdSchema,
@@ -2564,6 +2598,7 @@ export const serverEventSchema: z.ZodType<ServerEvent> = serverEventUnionSchema.
       && (
         event.operation === "set_service_tier"
         || event.operation === "open_image"
+        || event.operation === "open_local_image"
       )
       && (
         event.sessionId === undefined
@@ -2590,6 +2625,7 @@ export const serverEventSchema: z.ZodType<ServerEvent> = serverEventUnionSchema.
         || event.operation === "delete_conversation"
         || event.operation === "truncate_conversation"
         || event.operation === "open_image"
+        || event.operation === "open_local_image"
       )
       && !event.sessionId
     ) {
