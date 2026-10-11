@@ -91,7 +91,7 @@ full_access + canManageSessions: wait_for_session / abort_session / delete_sessi
 
 `history_search({type, query?, toolName?, maxHits?})` 先定位，`history_context({ref, before?, after?})` 看跨角色的连续顺序，`history_read({ref})` 读一条原文。搜索是大小写不敏感的 literal，省略 query 可按类型浏览；不搜索 thinking/signature/system/internal metadata，也不自动跨 fork 读父会话。raw 历史可以包含已被 context_edit 替换或省略的正文，不等于当前有效指令或磁盘事实。
 
-引用和游标绑定 conversation 与活动祖先记录；Agent 应复制宿主返回的完整 nextCall，不计算 offset。游标续读不能混合初始参数；追加或 reset 不使旧祖先引用失效，rewind 移出当前分支、缺失和 scope mismatch 必须明确失败。搜索输出上限 16 KiB，连续窗口与单条文本精读 32 KiB，扫描还有独立预算；partial 不能被解释成无匹配或完整正文。连续窗口按记录槽位给邻居，巨型日志不得挤掉后来的用户改口；较早/较晚窗口与一条正文的续读是不同导航。
+引用和游标用物理祖先历史中的稳定序号定位，不用界面列表序号；短校验绑定 conversation、冻结上界、目标记录身份与分页参数，由宿主按 fresh branch 重算，不能让同位置的新记录接管旧引用。不建短号映射表；旧 `hist1` 引用与游标仍可读取。Agent 应复制宿主返回的完整 nextCall，不计算 offset。游标续读不能混合初始参数；追加或 reset 不使旧祖先引用失效，rewind 移出当前分支、缺失和 scope mismatch 必须明确失败。搜索输出上限 16 KiB，连续窗口与单条文本精读 32 KiB，扫描还有独立预算；partial 不能被解释成无匹配或完整正文。连续窗口按记录槽位给邻居，巨型日志不得挤掉后来的用户改口；较早/较晚窗口与一条正文的续读是不同导航。
 
 默认图片只有 marker 和作用域引用；显式 `history_read({ref, image:true})` 仅返回一张标准 image block，原始输入最多 16 MiB，provider 图像归一化最大 2000×2000、base64 严格小于 4.5 MiB（独立于文本预算）。历史图片从不授予 computer 坐标权限，下一次操作仍须新 observe。复用 Pi `resizeImage` 时注意其合规小图会原样返回 MIME，历史输入须接受协议已支持的 PNG/JPEG/GIF/WebP，不能套用 computer 的 PNG 捕获→PNG/JPEG 输出约束；两处入口的原始格式边界不同。
 

@@ -87,23 +87,79 @@ function fingerprint(entry: Readonly<SessionEntry>): string {
   if (entry.timestamp.length > 128) throw new Error("Invalid history timestamp");
   return createHash("sha256").update(JSON.stringify([entry.id, entry.parentId, entry.timestamp])).digest("hex");
 }
-function encode(token: Token): string {
-  const value = `hist1.${Buffer.from(JSON.stringify(token), "utf8").toString("base64url")}`;
+const LOCATOR_KINDS: Record<string, string> = { ref: "r", search: "s", context: "c", read: "d" };
+const LOCATOR_FIELDS: Record<string, readonly (keyof Token)[]> = {
+  ref: ["f", "imageOrdinal"],
+  search: ["index", "part", "offset", "type", "query", "toolName", "maxHits"],
+  context: ["f", "imageOrdinal", "before", "after", "left", "right"],
+  read: ["f", "imageOrdinal", "offset", "direction"],
+};
+function locatorCheck(token: Token, payload: string): string {
+  // A copy/identity check, not an authorization capability. Bind fresh entry
+  // identities as well as positions so a replacement branch cannot rebind it.
+  return createHash("sha256")
+    .update(JSON.stringify([token.c, token.u, token.uh, token.i, token.ih, payload]))
+    .digest().subarray(0, 16).toString("base64url");
+}
+function encode(token: Token, branch: Branch): string {
+  const upper = upperIndex(branch, token);
+  const target = token.i === undefined ? "-" : targetIndex(branch, token, upper).toString(36);
+  const fields = LOCATOR_FIELDS[token.tool];
+  if (!fields) throw new Error("Invalid history locator kind");
+  const values = fields.map((field) => token[field] ?? null);
+  while (values.at(-1) === null) values.pop();
+  const data = Buffer.from(JSON.stringify(values), "utf8").toString("base64url");
+  const payload = `h2.${LOCATOR_KINDS[token.tool]}.${upper.toString(36)}.${target}.${data}`;
+  const value = `${payload}.${locatorCheck(token, payload)}`;
   if (value.length > TOKEN_CHARS) throw new Error("History locator exceeds its bound");
   return value;
 }
-function decode(value: string, tool: string, conversationId: string): Token {
+function decodeJson(value: string): unknown {
+  const bytes = Buffer.from(value, "base64url");
+  if (bytes.toString("base64url") !== value) throw new Error();
+  return JSON.parse(bytes.toString("utf8"));
+}
+function decodePosition(value: string): number {
+  const position = Number.parseInt(value, 36);
+  if (!Number.isSafeInteger(position) || position < 0 || position.toString(36) !== value) throw new Error();
+  return position;
+}
+function decode(value: string, tool: string, conversationId: string, branch: Branch): Token {
   try {
-    if (!value.startsWith("hist1.") || value.length > TOKEN_CHARS) throw new Error();
-    const bytes = Buffer.from(value.slice(6), "base64url");
-    if (bytes.toString("base64url") !== value.slice(6)) throw new Error();
-    const token: unknown = JSON.parse(bytes.toString("utf8"));
+    if (value.length > TOKEN_CHARS) throw new Error();
+    // Previously issued locators can remain in handoffs and notebooks.
+    if (value.startsWith("hist1.")) {
+      const token = decodeJson(value.slice(6));
+      if (!Check(tokenSchema, token)) throw new Error();
+      const parsed = token as Token;
+      if (parsed.c !== conversationId || parsed.tool !== tool) throw new Error();
+      return parsed;
+    }
+    const [version, kind, upperText, targetText, data, check, ...extra] = value.split(".");
+    const fields = LOCATOR_FIELDS[tool];
+    if (version !== "h2" || !fields || kind !== LOCATOR_KINDS[tool] || extra.length
+      || upperText === undefined || targetText === undefined || data === undefined || check === undefined) throw new Error();
+    const upper = decodePosition(upperText);
+    if (!branch[upper]) throw new Error();
+    const token: Record<string, unknown> = { ...baseToken(conversationId, branch, upper), tool };
+    if (targetText !== "-") {
+      const target = decodePosition(targetText);
+      const entry = branch[target];
+      if (!entry || target > upper) throw new Error();
+      token.i = entry.id; token.ih = fingerprint(entry);
+    }
+    const values = decodeJson(data);
+    if (!Array.isArray(values) || values.length > fields.length) throw new Error();
+    for (let index = 0; index < values.length; index += 1) {
+      if (values[index] !== null) token[fields[index]!] = values[index];
+    }
     if (!Check(tokenSchema, token)) throw new Error();
     const parsed = token as Token;
-    if (parsed.c !== conversationId || parsed.tool !== tool) throw new Error();
+    const payload = value.slice(0, value.lastIndexOf("."));
+    if (locatorCheck(parsed, payload) !== check) throw new Error();
     return parsed;
   } catch {
-    throw new Error("Invalid or cross-conversation history reference/cursor");
+    throw new Error("Invalid or cross-conversation history reference/cursor (changed locator or stale branch/rewind)");
   }
 }
 function upperIndex(branch: Branch, token: Token): number {
@@ -129,8 +185,8 @@ function reference(base: Token, entry: Readonly<SessionEntry>, focus = 0, imageO
     i: entry.id, ih: fingerprint(entry), f: focus,
     ...(imageOrdinal === undefined ? {} : { imageOrdinal }) };
 }
-function cursorCall(tool: string, token: Token): Call {
-  return { tool, args: { cursor: encode({ ...token, tool: tool.slice("history_".length) }) } };
+function cursorCall(tool: string, token: Token, branch: Branch): Call {
+  return { tool, args: { cursor: encode({ ...token, tool: tool.slice("history_".length) }, branch) } };
 }
 function cursorOnly(input: { cursor?: string }): boolean {
   if (input.cursor === undefined) return false;
@@ -308,7 +364,7 @@ function related(branch: Branch, doc: Document, base: Token, upper: number) {
       const entry = branch[index]!;
       if (entry.type !== "message" || entry.message.role !== "assistant") continue;
       if (entry.message.content.some((block) => block.type === "toolCall" && block.id === doc.resultCallId && !excludedTool(block.name))) {
-        links.push({ toolCallRef: encode(reference(base, entry)), toolResultRef: encode(reference(base, doc.entry)) }); break;
+        links.push({ toolCallRef: encode(reference(base, entry), branch), toolResultRef: encode(reference(base, doc.entry), branch) }); break;
       }
     }
   } else {
@@ -316,7 +372,7 @@ function related(branch: Branch, doc: Document, base: Token, upper: number) {
       for (let index = at + 1; index <= upper && inspected < HISTORY_SCAN_ENTRIES; index += 1, inspected += 1) {
         const entry = branch[index]!;
         if (entry.type === "message" && entry.message.role === "toolResult" && entry.message.toolCallId === call.id && !excludedTool(entry.message.toolName)) {
-          links.push({ toolCallRef: encode(reference(base, doc.entry, call.focus)), toolResultRef: encode(reference(base, entry)) }); break;
+          links.push({ toolCallRef: encode(reference(base, doc.entry, call.focus), branch), toolResultRef: encode(reference(base, entry), branch) }); break;
         }
       }
     }
@@ -335,25 +391,25 @@ function finish(tool: string, payload: Record<string, unknown>, cap: number) {
   if (bytes(result) > cap) throw new Error("History response metadata exceeds the JSON byte budget");
   return result;
 }
-function images(doc: Document, base: Token, start: number, end: number) {
+function images(doc: Document, base: Token, start: number, end: number, branch: Branch) {
   return doc.images.filter((image) => image.start < end && image.end > start).map((image) => {
-    const ref = encode(reference(base, doc.entry, image.start, image.ordinal));
+    const ref = encode(reference(base, doc.entry, image.start, image.ordinal), branch);
     return { imageOrdinal: image.ordinal, ref, imageCall: { name: "history_read", arguments: { ref, image: true } } };
   });
 }
-function readCall(ref: Token, position: number, direction: "older" | "newer"): Call {
-  return cursorCall("history_read", { ...ref, offset: position, direction });
+function readCall(ref: Token, position: number, direction: "older" | "newer", branch: Branch): Call {
+  return cursorCall("history_read", { ...ref, offset: position, direction }, branch);
 }
-function fragment(doc: Document, base: Token, start: number, end: number) {
+function fragment(doc: Document, base: Token, start: number, end: number, branch: Branch) {
   const ref = reference(base, doc.entry, start);
   return {
-    ...metadata(doc), ref: encode(ref), text: slice(doc, start, end),
+    ...metadata(doc), ref: encode(ref, branch), text: slice(doc, start, end),
     range: { offset: start, endOffset: end, totalCharacters: doc.length, unit: "0-based UTF-16" },
     entryTextComplete: start === 0 && end === doc.length,
-    readMoreCall: start > 0 ? readCall(ref, start, "older") : end < doc.length ? readCall(ref, end, "newer") : null,
-    olderCall: start > 0 ? readCall(ref, start, "older") : null,
-    newerCall: end < doc.length ? readCall(ref, end, "newer") : null,
-    images: images(doc, base, start, end),
+    readMoreCall: start > 0 ? readCall(ref, start, "older", branch) : end < doc.length ? readCall(ref, end, "newer", branch) : null,
+    olderCall: start > 0 ? readCall(ref, start, "older", branch) : null,
+    newerCall: end < doc.length ? readCall(ref, end, "newer", branch) : null,
+    images: images(doc, base, start, end, branch),
   };
 }
 function resolve(branch: Branch, token: Token) {
@@ -378,7 +434,7 @@ function imageBytes(data: string, cap: number): Buffer {
   return bytes;
 }
 async function readImage(source: HistoryToolSource, branch: Branch, c: string, ref: string, signal?: AbortSignal) {
-  const token = decode(ref, "ref", c);
+  const token = decode(ref, "ref", c, branch);
   const { doc } = resolve(branch, token);
   const image = doc.images.find((item) => item.ordinal === token.imageOrdinal);
   if (!image || !IMAGE_MIME_TYPES.has(image.block.mimeType)) throw new Error("Invalid history image reference or unsupported MIME type");
@@ -422,7 +478,7 @@ function foldedMatch(text: string, query: string): number {
 }
 function search(branch: Branch, c: string, input: Static<typeof searchParameters>, signal?: AbortSignal) {
   let token: Token;
-  if (cursorOnly(input)) token = decode(input.cursor!, "search", c);
+  if (cursorOnly(input)) token = decode(input.cursor!, "search", c, branch);
   else {
     if (!input.type || !TYPES.includes(input.type as SearchType)) throw new Error("history_search initial type is required");
     if (input.query !== undefined && (!input.query.length || input.query.length > 256)) throw new Error("Invalid literal query length");
@@ -441,7 +497,7 @@ function search(branch: Branch, c: string, input: Static<typeof searchParameters
   let reason = "complete";
   const hits: Array<Record<string, unknown>> = [];
   const query = token.query === undefined ? undefined : [...token.query].map((character) => character.toLowerCase()).join("");
-  const next = (): Call | null => index >= 0 ? cursorCall("history_search", { ...token, index, part, offset }) : null;
+  const next = (): Call | null => index >= 0 ? cursorCall("history_search", { ...token, index, part, offset }, branch) : null;
   const payload = () => ({ hits, upperBoundEntryId: token.u, returnedHits: hits.length, totalMatches: null, scanComplete: index < 0,
     truncated: index >= 0, stopReason: reason, scan: { entries: scannedEntries, characters: scannedCharacters, characterUnit: "UTF-16" }, nextCall: next() });
   outer: while (index >= 0) {
@@ -475,7 +531,7 @@ function search(branch: Branch, c: string, input: Static<typeof searchParameters
       }
       if (found) {
         const image = doc.images.find((marker) => marker.start <= focus && focus < marker.end);
-        const ref = encode(reference(token, doc.entry, focus, image?.ordinal));
+        const ref = encode(reference(token, doc.entry, focus, image?.ordinal), branch);
         const hit = { ...metadata(doc), type: segment.type,
           ...(segment.toolName ? { toolName: segment.toolName } : {}), ref,
           ...(image ? { imageCall: { name: "history_read", arguments: { ref, image: true } } } : {}),
@@ -500,7 +556,7 @@ function search(branch: Branch, c: string, input: Static<typeof searchParameters
 function read(branch: Branch, c: string, input: Static<typeof readParameters>) {
   const continued = cursorOnly(input);
   if (!continued && !input.ref) throw new Error("history_read requires ref or cursor-only continuation");
-  const token = decode(continued ? input.cursor! : input.ref!, continued ? "read" : "ref", c);
+  const token = decode(continued ? input.cursor! : input.ref!, continued ? "read" : "ref", c, branch);
   const { upper, doc } = resolve(branch, token);
   if (continued && (token.offset === undefined || token.offset > doc.length || !token.direction)) throw new Error("Invalid read cursor");
   const older = continued && token.direction === "older";
@@ -511,8 +567,8 @@ function read(branch: Branch, c: string, input: Static<typeof readParameters>) {
   const payload = (count: number) => {
     const start = older ? position - count : position;
     const end = older ? position : position + count;
-    const item = fragment(doc, token, start, end);
-    return { ...item, ...annotations, ref: encode(ref), upperBoundEntryId: token.u, truncated: !item.entryTextComplete,
+    const item = fragment(doc, token, start, end, branch);
+    return { ...item, ...annotations, ref: encode(ref, branch), upperBoundEntryId: token.u, truncated: !item.entryTextComplete,
       nextCall: older ? item.olderCall : item.newerCall };
   };
   let low = 0; let high = maximum;
@@ -527,7 +583,7 @@ function read(branch: Branch, c: string, input: Static<typeof readParameters>) {
 function context(branch: Branch, c: string, input: Static<typeof contextParameters>) {
   const continued = cursorOnly(input);
   if (!continued && !input.ref) throw new Error("history_context requires ref or cursor-only continuation");
-  const token = decode(continued ? input.cursor! : input.ref!, continued ? "context" : "ref", c);
+  const token = decode(continued ? input.cursor! : input.ref!, continued ? "context" : "ref", c, branch);
   const { upper, index, doc: target } = resolve(branch, token);
   const before = continued ? token.before : input.before ?? 2;
   const after = continued ? token.after : input.after ?? 2;
@@ -551,10 +607,10 @@ function context(branch: Branch, c: string, input: Static<typeof contextParamete
   const newerAnchor = following.at(-1) ?? { doc: target, index };
   const olderCall = left >= 0 ? cursorCall("history_context", {
     ...reference(token, olderAnchor.doc.entry), before: Math.max(1, before), after: 0, left, right: olderAnchor.index + 1,
-  }) : null;
+  }, branch) : null;
   const newerCall = right <= upper ? cursorCall("history_context", {
     ...reference(token, newerAnchor.doc.entry), before: 0, after: Math.max(1, after), left: newerAnchor.index - 1, right,
-  }) : null;
+  }, branch) : null;
   const selected = [...preceding.reverse(), { doc: target, index }, ...following];
   const annotations = selected.map(({ doc }) => ({ historicalContextEdit: rawEdit(branch, doc.entry.id, upper), related: related(branch, doc, token, upper) }));
   const payload = (characters: number) => {
@@ -562,7 +618,7 @@ function context(branch: Branch, c: string, input: Static<typeof contextParamete
       const focus = entryIndex === index ? token.f! : entryIndex < index ? Math.max(0, doc.length - characters) : 0;
       const start = entryIndex === index ? Math.max(0, focus - Math.min(128, Math.floor(characters / 4))) : focus;
       const end = Math.min(doc.length, start + characters);
-      return { ...fragment(doc, token, start, end), target: entryIndex === index, ...annotations[itemIndex] };
+      return { ...fragment(doc, token, start, end, branch), target: entryIndex === index, ...annotations[itemIndex] };
     });
     const entryTextComplete = items.every((item) => item.entryTextComplete);
     return { items, upperBoundEntryId: token.u, order: "ancestor_chronological", entrySequenceComplete: sequenceComplete, entryTextComplete,

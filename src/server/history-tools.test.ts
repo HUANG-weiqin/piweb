@@ -1,3 +1,7 @@
+import { createHash } from "node:crypto";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { SessionManager, resizeImage, type SessionEntry, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MAX_CONVERSATION_IMAGE_BYTES } from "../shared/protocol.js";
@@ -48,9 +52,14 @@ function assistant(manager: SessionManager, content: unknown[]): string {
 function result(manager: SessionManager, text: string, toolName = "bash", toolCallId = "call-1"): string {
   return manager.appendMessage({ role: "toolResult", toolName, toolCallId, content: [{ type: "text", text }], isError: false, timestamp: 3 });
 }
-function mutateToken(value: string, changes: Data): string {
-  const parsed = JSON.parse(Buffer.from(value.slice(6), "base64url").toString("utf8"));
-  return `hist1.${Buffer.from(JSON.stringify({ ...parsed, ...changes })).toString("base64url")}`;
+function legacyToken(conversationId: string, branch: readonly SessionEntry[], target?: number, changes: Data = {}): string {
+  const fingerprint = (entry: SessionEntry) => createHash("sha256")
+    .update(JSON.stringify([entry.id, entry.parentId, entry.timestamp])).digest("hex");
+  const upper = branch.at(-1)!;
+  const entry = target === undefined ? undefined : branch[target]!;
+  const token = { v: 1, c: conversationId, tool: "ref", u: upper.id, uh: fingerprint(upper),
+    ...(entry ? { i: entry.id, ih: fingerprint(entry), f: 0 } : {}), ...changes };
+  return `hist1.${Buffer.from(JSON.stringify(token)).toString("base64url")}`;
 }
 
 async function readAll(tools: ToolDefinition[], ref: string): Promise<string> {
@@ -151,10 +160,89 @@ describe("history tools", () => {
     const b = createHistoryTools({ conversationId: "b", getBranch: () => [entry] });
     await expect(run(b, "history_read", { ref })).rejects.toThrow(/cross-conversation/);
     await expect(run(tools, "history_read", { ref: "same-id" })).rejects.toThrow(/Invalid/);
-    await expect(run(tools, "history_read", { ref: mutateToken(ref, { i: "missing" }) })).rejects.toThrow(/target unavailable/);
-    await expect(run(tools, "history_read", { ref: mutateToken(ref, { extra: "unknown" }) })).rejects.toThrow(/Invalid/);
+    await expect(run(tools, "history_read", { ref: legacyToken("a", branch, 0, { i: "missing" }) })).rejects.toThrow(/target unavailable/);
+    await expect(run(tools, "history_read", { ref: legacyToken("a", branch, 0, { extra: "unknown" }) })).rejects.toThrow(/Invalid/);
     branch = [];
     await expect(run(tools, "history_read", { ref })).rejects.toThrow(/rewind/);
+  });
+
+  it("keeps short positional refs/cursors valid after retain-none reset and native disk reopen without a lookup table", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "piweb-history-locator-"));
+    try {
+      const { manager, tools, source } = harness(SessionManager.create(directory, directory));
+      user(manager, "older needle");
+      const target = user(manager, "needle " + "x".repeat(10000));
+      assistant(manager, [{ type: "text", text: "persist the native session" }]);
+      const page = await run(tools, "history_search", { type: "user", query: "needle", maxHits: 1 });
+      const ref = page.hits[0].ref;
+      expect(ref).toMatch(/^h2\.r\./);
+      expect(ref.length).toBeLessThanOrEqual(64);
+      expect(page.nextCall.args.cursor.length).toBeLessThanOrEqual(128);
+      const read = await run(tools, "history_read", { ref });
+      expect(read.nextCall.args.cursor.length).toBeLessThanOrEqual(96);
+      const window = await run(tools, "history_context", { ref, before: 0, after: 0 });
+      expect(window.olderCall.args.cursor.length).toBeLessThanOrEqual(96);
+      manager.appendCompaction("retain-none reset", null, 9000);
+      user(manager, "future needle");
+      const reopened = SessionManager.open(manager.getSessionFile()!, directory);
+      const rebuilt = createHistoryTools({ conversationId: source.conversationId, getBranch: () => reopened.getBranch() });
+      expect((await run(rebuilt, "history_read", { ref })).entryId).toBe(target);
+      expect((await follow(rebuilt, read.nextCall)).range.offset).toBe(read.range.endOffset);
+      expect((await follow(rebuilt, page.nextCall)).hits.map((hit: Data) => hit.snippet)).toEqual(["older needle"]);
+      expect((await follow(rebuilt, window.olderCall)).items.map((item: Data) => item.text)).toEqual(["older needle", "needle " + "x".repeat(2041)]);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects copy errors and same-position replacement of either target or frozen upper identity", async () => {
+    const { manager, source } = harness();
+    user(manager, "target"); user(manager, "upper");
+    let branch = manager.getBranch();
+    const original = branch;
+    const tools = createHistoryTools({ ...source, getBranch: () => branch });
+    const ref: string = (await run(tools, "history_search", { type: "user", query: "target" })).hits[0].ref;
+    const parts = ref.split(".");
+    const changed = (index: number, value: string) => parts.map((part, at) => at === index ? value : part).join(".");
+    const changedFocus = Buffer.from(JSON.stringify([1])).toString("base64url");
+    for (const broken of [ref + ".extra", changed(0, "h3"), changed(1, "d"), changed(2, "01"),
+      changed(3, "1"), changed(4, changedFocus), changed(4, "not-json"), changed(5, "x".repeat(22)), ref.slice(0, 8) + " " + ref.slice(8)]) {
+      await expect(run(tools, "history_read", { ref: broken })).rejects.toThrow(/Invalid/);
+    }
+    for (const at of [0, 1]) {
+      for (const change of [{ id: "replacement" }, { timestamp: "2030-01-01T00:00:00Z" }, { parentId: "different-parent" }]) {
+        branch = original.map((entry, index) => index === at ? { ...entry, ...change } : entry);
+        await expect(run(tools, "history_read", { ref })).rejects.toThrow(/branch/);
+      }
+    }
+  });
+
+  it("continues previously issued hist1 refs and all three cursor kinds", async () => {
+    const { manager, tools, source } = harness();
+    user(manager, "older needle"); user(manager, "x".repeat(10000)); user(manager, "upper");
+    const branch = manager.getBranch();
+    const ref = legacyToken(source.conversationId, branch, 1);
+    expect((await run(tools, "history_read", { ref })).text).toBe("x".repeat(4096));
+    const cursor = (target: number | undefined, changes: Data) => legacyToken(source.conversationId, branch, target, changes);
+    const read = await run(tools, "history_read", { cursor: cursor(1, { tool: "read", offset: 4096, direction: "newer" }) });
+    expect(read.range.offset).toBe(4096);
+    expect(read.nextCall.args.cursor).toMatch(/^h2\./);
+    const search = await run(tools, "history_search", { cursor: cursor(undefined, { tool: "search", index: 0, part: -1, offset: 0, type: "user", query: "needle", maxHits: 1 }) });
+    expect(search.hits[0].snippet).toBe("older needle");
+    const context = await run(tools, "history_context", { cursor: cursor(1, { tool: "context", before: 1, after: 1, left: 0, right: 2 }) });
+    expect(context.items.map((item: Data) => item.entryId)).toEqual(branch.map((entry) => entry.id));
+  });
+
+  it("retains long Unicode search filters in compact cursors instead of hiding them in ephemeral state", async () => {
+    const { manager, tools } = harness();
+    const query = "历史😀".repeat(60);
+    const toolName = "inspect";
+    result(manager, "x".repeat(HISTORY_SCAN_CHARACTERS + 1000) + query, toolName);
+    let page = await run(tools, "history_search", { type: "tool_result", query, toolName, maxHits: 1 });
+    expect(page.hits).toEqual([]);
+    page = await follow(createHistoryTools({ conversationId: "conversation-a", getBranch: () => manager.getBranch() }), page.nextCall);
+    expect(page.hits[0].toolName).toBe(toolName);
+    expect(page.hits[0].snippet).toContain(query.slice(0, 100));
   });
 
   it("fresh snapshots see appends while existing search/read/context continuations keep their frozen upper bound", async () => {
