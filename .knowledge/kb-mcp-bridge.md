@@ -33,6 +33,8 @@ Claude Code ──stdio(MCP)──> src/mcp/index.ts（McpServer + 8 个工具�
 
 ## 决策
 
+- 共享默认自动压缩阈值为 80%，已有会话的显式覆盖不改写；桥直接消费服务端 state，不维护自己的默认。Agent 内部 `reset_context/history_*` 不新增 MCP 或 WebSocket 命令；reset 仍在同一 conversation/run 内，桥继续按原 run settlement 等待。
+
 - 协议只为桥加了一个通用能力声明：initialize 带 `extensionUi: "none"`。除此之外桥就是另一个 observation，准入与 focus 校验和浏览器相同；后台 actor 与浏览器观察互不影响；unread 按连接计。
 - 不接收扩展 UI：服务端不让桥成为任何会话的对话框 delegate，聚焦会话也不会接走浏览器的对话框；没有浏览器聚焦时对话框照常挂起并标 attention。桥不改项目“最近会话”，不清 attention；`recent` 只观察项目，不打开会话，所以 wait 不再需要停靠。
 - 不决定信任：桥的请求若会让 Pi 询问项目信任（无保存决定、默认策略 ask，且需新建模型目录、冷打开或新建会话），服务端直接返回中文错误，不询问、不写 trust store。浏览器已打开（actor 存活）的会话不会再问，可照常读写。

@@ -33,7 +33,7 @@ conversation role snapshot
 ## 策略
 
 - `full_access` 在角色授权层允许所有工具和命令，不区分来源或目标位置；项目外路径和 `.piweb` 也不额外拦截。ConversationActor 另对 builtin `edit/write` 执行 run-scoped 首次写入 LoopList 门；Pi 原生 codemode 经 `ctx.executeTool()` 嵌套调用这些 builtin 时同样经过该门。它是认知承诺而不是权限或路径 sandbox：`bash`、脚本自身和可信扩展直接产生的文件副作用仍可绕过。
-- `read_only` 对模型只展示 `source=builtin` 的 Pi 原生 `read / grep / find / ls`，以及 `source=sdk` 的宿主受审查 `bash` 及本会话后台任务的 `bash_output / bash_stop`、conversation-scoped `notebook_write / notebook_list / notebook_grep / notebook_read`、本机时间 `current_time`、只读 LSP `lsp_symbols / lsp_definition / lsp_references`、LoopList `todo_read / todo_write / todo_pause`、`request_context_compaction` 和 `list_roles / read_role / propose_role_revision`；builtin `bash`、`edit / write`、会话编排 meta 和其他扩展工具不进入有效 registry、model tools 或 system prompt。Pi 原生 MCP/codemode/tool_search factory 只在 `full_access` 会话加载；只读会话不会仅因项目配置存在而连接或启动 MCP 服务。
+- `read_only` 对模型只展示 `source=builtin` 的 Pi 原生 `read / grep / find / ls`，以及 `source=sdk` 的宿主受审查 `bash` 及本会话后台任务的 `bash_output / bash_stop`、conversation-scoped `notebook_write / notebook_list / notebook_grep / notebook_read`、本机时间 `current_time`、只读 LSP `lsp_symbols / lsp_definition / lsp_references`、LoopList `todo_read / todo_write / todo_pause`、`reset_context / history_search / history_context / history_read` 和 `list_roles / read_role / propose_role_revision`；builtin `bash`、`edit / write`、会话编排 meta 和其他扩展工具不进入有效 registry、model tools 或 system prompt。Pi 原生 MCP/codemode/tool_search factory 只在 `full_access` 会话加载；只读会话不会仅因项目配置存在而连接或启动 MCP 服务。
 - 执行 gate 独立重复同一 identity 约束；`read_only` 直接拒绝项目写入、unknown、会话编排 meta，以及同名 builtin/extension/project Bash。宿主 `bash / bash_output / bash_stop`、`current_time` 和三个角色工具只有 `source=sdk` 时放行；工具不可见不是权限边界，硬拒绝仍不可删除。
 - 扩展可以用 `read` 等名称覆盖内置工具；策略必须同时检查最终 `toolName` 和 SDK `ToolInfo.sourceInfo.source`，不能只按名称放行。PiRuntime 对每次 `setActiveToolsByName`（包括 extension refresh 和 `setActiveTools`）重新做 source-aware 投影，同名覆盖发生后宁可移除该工具，也不把扩展 schema/snippet 暴露给只读模型。
 - Agent 的 `read_only` 只限制经过 Pi 工具入口的调用；工作台宿主仍会写 manifest 和 transcript。
@@ -75,7 +75,7 @@ all roles: notebook_write / notebook_list / notebook_grep / notebook_read
 all roles: current_time（本机 RFC 3339 offset 时间与 IANA 时区）
 all roles: lsp_symbols / lsp_definition / lsp_references（已配置启用的本机 LSP，无信任询问）
 all roles: todo_read / todo_write / todo_pause
-all roles: request_context_compaction
+all roles: reset_context / history_search / history_context / history_read
 all roles: list_roles / read_role / propose_role_revision
 full_access only: computer（截图与坐标授权见运行时）
 full_access + canManageSessions: list_sessions / current_session / peek_session
@@ -86,6 +86,14 @@ full_access + canManageSessions: wait_for_session / abort_session / delete_sessi
 这些宿主 schema 同样避免 `anyOf/oneOf`，以兼容对工具 schema 子集较严格的 provider。`current_time` 在单次调用中读取本机 civil clock，返回带 offset 的 RFC 3339 `localTime` 和 IANA `timeZone`；它不从模型知识推测时间、不持久化，也不扩大浏览器协议。
 
 `computer` 的截图持久化、坐标几何与 exact next-decision 授权见[运行时](kb-server-runtime.md#桌面截图与坐标授权)；LoopList 状态、计时重放与续跑见[Actor owner](kb-agent-collaboration.md#looplist-状态与续跑)。
+
+### 同会话历史恢复
+
+`history_search({type, query?, toolName?, maxHits?})` 先定位，`history_context({ref, before?, after?})` 看跨角色的连续顺序，`history_read({ref})` 读一条原文。搜索是大小写不敏感的 literal，省略 query 可按类型浏览；不搜索 thinking/signature/system/internal metadata，也不自动跨 fork 读父会话。raw 历史可以包含已被 context_edit 替换或省略的正文，不等于当前有效指令或磁盘事实。
+
+引用和游标绑定 conversation 与活动祖先记录；Agent 应复制宿主返回的完整 nextCall，不计算 offset。游标续读不能混合初始参数；追加或 reset 不使旧祖先引用失效，rewind 移出当前分支、缺失和 scope mismatch 必须明确失败。搜索输出上限 16 KiB，连续窗口与单条文本精读 32 KiB，扫描还有独立预算；partial 不能被解释成无匹配或完整正文。连续窗口按记录槽位给邻居，巨型日志不得挤掉后来的用户改口；较早/较晚窗口与一条正文的续读是不同导航。
+
+默认图片只有 marker 和作用域引用；显式 `history_read({ref, image:true})` 仅返回一张标准 image block，原始输入最多 16 MiB，provider 图像归一化最大 2000×2000、base64 严格小于 4.5 MiB（独立于文本预算）。历史图片从不授予 computer 坐标权限，下一次操作仍须新 observe。复用 Pi `resizeImage` 时注意其合规小图会原样返回 MIME，历史输入须接受协议已支持的 PNG/JPEG/GIF/WebP，不能套用 computer 的 PNG 捕获→PNG/JPEG 输出约束；两处入口的原始格式边界不同。
 
 ### 首次写入 LoopList 门控
 
@@ -98,7 +106,7 @@ recovered exact run 从 active branch 的 marker 恢复该 latch。为保持旧 
 - 项目 extension `tool_call` hook 先观察/变换调用，宿主再按最终工具 identity 与 run ownership 决策；
 - 工具闭包固定来源 conversation 和 canonical project，参数不能提交 cwd/projectId；
 - `read_only` 允许 `notebook_write`，因为它只写当前 conversation 的宿主工作记忆 sidecar，生命周期等同 transcript，不是项目源码写入；
-- `read_only` 允许 `request_context_compaction`，因为它只预约当前 run 的安全轮次边界并最终写 Pi 原生 compaction entry，不修改项目源码；请求是易失控制意图，工具结果不冒充持久成功证明；
+- `read_only` 允许 `reset_context` 与三个历史查询工具，因为它们只控制本 conversation 的上下文或读取已有历史；仍要求最终 `source=sdk`。旧 `request_context_compaction` 已退役。reset 的易失请求不是完成证明，提交路径、保留范围和限制见[运行时](kb-server-runtime.md#上下文压缩与安全停点)；
 - `read_only` 允许读取所有用户级角色 prompt，它们会进入调用模型与当前 transcript，因此角色 prompt 不能保存秘密；`propose_role_revision` 的 Agent 参数只包含目标、expected revision、完整替换 prompt 和理由，名称、模型及权限字段不存在于 schema。取消有效到 `RoleStore` commit 开始；CAS queue race 返回 `stale`，commit 开始后按已授权提交处理；用户取消或中止 run 在此之前都不会落版；
 - `read_only` 不因 list/peek 看似只读而部分开放会话控制面；八个会话编排工具仍全部拒绝；
 - `full_access` 才允许 Agent 创建、通信、等待、中止和删除 peer conversation；删除会级联 metadata descendants，但 self delete、级联删除自身、self abort/wait、busy delete、stale runId 等生命周期约束仍由 coordinator 独立校验；

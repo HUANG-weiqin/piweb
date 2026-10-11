@@ -31,7 +31,10 @@ describe("defaultToolPolicy", () => {
     "todo_read",
     "todo_write",
     "todo_pause",
-    "request_context_compaction",
+    "reset_context",
+    "history_search",
+    "history_context",
+    "history_read",
   ])(
     "allows the host-owned %s tool in read-only mode",
     (toolName) => {
@@ -78,6 +81,11 @@ describe("defaultToolPolicy", () => {
     ["todo_write", "project"],
     ["todo_pause", "extension"],
     ["request_context_compaction", "extension"],
+    ["request_context_compaction", "sdk"],
+    ["reset_context", "extension"],
+    ["history_search", "builtin"],
+    ["history_read", "project"],
+    ["history_context", "extension"],
     ["list_sessions", "sdk"],
     ["current_session", "sdk"],
     ["start_session", "sdk"],

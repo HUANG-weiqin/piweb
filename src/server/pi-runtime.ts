@@ -608,6 +608,7 @@ export interface CreatedPiSession {
   modelRuntime: ModelRuntime;
   modelRegistry: ModelRegistry;
   releaseTurnBoundaryPause?(): void;
+  observedContextLeafId?(): string | null | undefined;
   withdrawSteeringMessage(message: AgentMessage): boolean;
   captureSteeringMessage<T>(
     onMessage: (message: AgentMessage) => void,
@@ -1765,6 +1766,7 @@ export class PiRuntime implements PiRuntimeLike {
       releaseTurnBoundaryPause: () => {
         turnBoundaryController?.releaseQueuePause();
       },
+      observedContextLeafId: () => turnBoundaryController?.observedLeafId(),
       withdrawSteeringMessage: (message) => {
         if (!steeringCaptureAdapter) {
           throw new Error("Pi steering identity boundary is not available");

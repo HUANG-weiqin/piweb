@@ -113,8 +113,8 @@ sender card 的 `running/delivered` 更新可因 active actor 的观察时点出
 - 当前角色完整修订由 base conversation metadata 加后续角色变更记录得出；重新打开会话使用最后一次成功应用的角色。角色模板后续编辑不会自动改变既有会话，只有用户显式切换才会从下一轮改变 system prompt、模型、默认思考强度、默认服务层级、权限与 meta 工具 schema。聊天页的思考强度控制仍只修改当前运行会话，不反写角色模板或角色快照。
 - 卡片状态、run settlement、message delivery receipt、meta operation 和 conversation metadata 使用普通 `custom` entry；SDK 的 `buildSessionProjection().messages` 会忽略它们，因此状态更新既不改旧消息，也不污染模型缓存前缀。
 - 当前会话可用 `piweb.service_tier.v1` 覆盖角色默认服务层级；没有该记录时使用冻结角色默认，显式 `null` 记录则覆盖为供应商默认。切换角色会重置为新角色默认，但不会把会话覆盖反写角色模板或快照。
-- 会话阈值以非上下文 `piweb.compaction_threshold.v1` 保存，缺省 70%、允许 20%–90%。摘要模型、Pi 接点、认证后 stream 捕获和失败边界只在[运行时压缩章节](kb-server-runtime.md#上下文压缩与安全停点)维护。
-- 用户可在会话空闲时发送精确关联的 `compact_context` 命令手动调用 Pi 标准 `compact()`；运行中会话拒绝手动压缩，成功后重新发布 state 与 snapshot。Agent 可调用 conversation-scoped `request_context_compaction` 提交一次易失请求；工具结果只证明请求被接受，不证明压缩成功。Actor 会等当前 assistant/tool turn 完整结束，再复用阈值压缩的安全 checkpoint，在同一 `runId` 内压缩并恢复未完成任务；该 checkpoint 经 Agent `finishTurn` 保留上游 decision/error/abort，只在 host pause 期间遮蔽 queued-message 观察、不清空实际队列。实际成功仍只由 Pi 原生 compaction entry 证明。
+- 会话阈值以非上下文 `piweb.compaction_threshold.v1` 保存，缺省 80%、允许 20%–90%，已有显式覆盖保持不变。摘要模型、Pi 接点、认证后 stream 捕获和失败边界只在[运行时压缩章节](kb-server-runtime.md#上下文压缩与安全停点)维护。
+- 用户可在会话空闲时发送精确关联的 `compact_context` 命令手动调用 Pi 标准 `compact()`；运行中会话拒绝手动压缩，成功后重新发布 state 与 snapshot。Agent 可用 `reset_context({handoff})` 预约完整工具轮次后的同 conversation/run 工作上下文重置，不调用摘要模型，旧主动压缩工具已退役。accepted 不是提交证明；输入保护、拒绝条件与原生 retain-none 提交边界只在[运行时](kb-server-runtime.md#上下文压缩与安全停点)维护。`history_search/history_context/history_read` 从活动祖先物理历史恢复有界证据，Notebook/LoopList 仍由原 owner 持有。
 - 明确例外会有意改变模型输入：Pi 在上下文逼近上限时追加 compaction summary 并以摘要替换活动上下文，原生 `context_edit` 通过新 entry 替换/省略投影中的旧消息，以及重新启动后项目资源本身发生变化导致基础 system prompt 变化。压缩是继续运行所需，资源变化反映用户真实修改；这些都不等于改写物理旧 entry，工作台不为提高命中率伪装旧项目状态。
 
 ## Agent meta 工具

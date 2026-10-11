@@ -4154,7 +4154,7 @@ describe("PiConnection coordinated project view", () => {
         roleId: "default",
       });
       const focused = latestState(harness.events);
-      expect(focused.compactionThresholdPercent).toBe(70);
+      expect(focused.compactionThresholdPercent).toBe(80);
       const commandId = randomUUID();
 
       await harness.connection.handle({

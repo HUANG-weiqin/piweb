@@ -117,6 +117,8 @@ interface FakeSession extends AgentSession {
   abortCompactionCalls: number;
   compactCalls: number;
   compactImplementation(): Promise<unknown>;
+  refreshContextCalls: number;
+  refreshContextImplementation(): void;
   contextPercent: number | null;
   contextTokens?: number | null;
   clearQueueCalls: number;
@@ -167,6 +169,12 @@ function fakeSession(): FakeSession {
     abortCompactionCalls: 0,
     compactCalls: 0,
     compactImplementation: async () => ({}),
+    refreshContextCalls: 0,
+    refreshContextImplementation: () => undefined,
+    refreshContext: function () {
+      this.refreshContextCalls++;
+      this.refreshContextImplementation();
+    },
     contextPercent: 0,
     clearQueueCalls: 0,
     disposeCalls: 0,
@@ -192,11 +200,13 @@ function fakeSession(): FakeSession {
         },
       },
       transport: "sse",
+      hasQueuedMessages: () => !session.turnBoundaryPaused
+        && session.steeringAgentMessages.length > 0,
     },
     model: {
       provider: "test",
       id: "model",
-      contextWindow: 1_000,
+      contextWindow: 200_000,
       input: ["text", "image"],
       cost: { input: 10, output: 1, cacheRead: 1, cacheWrite: 1 },
     },
@@ -356,6 +366,7 @@ class FakeRuntime implements PiRuntimeLike {
   enableBackgroundBashBinding = false;
   bashBinding?: BashExecutionBinding;
   createOptions?: CreatePiSessionOptions;
+  observedLeafId: string | null | undefined;
   disposeCalls = 0;
   activationError?: Error;
   pendingExtensionErrors: ExtensionError[] = [];
@@ -408,6 +419,12 @@ class FakeRuntime implements PiRuntimeLike {
         : undefined,
     };
     this.session.toolCallGate = options.toolCallGate;
+    this.session.refreshContextImplementation = () => {
+      const messages = options.sessionManager!.buildSessionProjection().messages;
+      this.session.agent.state.messages = messages;
+      Object.assign(this.session, { messages });
+      this.session.contextPercent = null;
+    };
     const thinkingLevel = options.thinkingLevel ?? "off";
     this.session.agent.state.thinkingLevel = thinkingLevel;
     Object.assign(this.session, { thinkingLevel });
@@ -438,6 +455,7 @@ class FakeRuntime implements PiRuntimeLike {
       settings: this.settings,
       modelRuntime: this.modelRuntime,
       modelRegistry: this.modelRegistry,
+      observedContextLeafId: () => this.observedLeafId,
       releaseTurnBoundaryPause: () => {
         if (!this.session.turnBoundaryPaused) return;
         this.session.turnBoundaryPaused = false;
@@ -768,6 +786,39 @@ function checkToolTurnBoundary(runtime: FakeRuntime): boolean {
   return Boolean(runtime.createOptions?.turnBoundaryCheck?.({
     contextUsage: runtime.session.getContextUsage(),
   }));
+}
+
+async function acceptContextReset(fixture: ActorFixture, text: string): Promise<void> {
+  const { runtime, manager } = fixture;
+  const tool = runtime.createOptions?.workbenchCustomTools?.find(
+    ({ name }) => name === "reset_context",
+  );
+  expect(tool).toBeDefined();
+  const user = agentMessage({ role: "user", content: text, timestamp: 1 });
+  runtime.session.eventListener?.(nativeEvent({ type: "message_end", message: user }));
+  manager.appendMessage(user);
+  // prepareRequest's public getter captures after the current input was persisted,
+  // before this sole direct tool decision is appended by Pi.
+  runtime.observedLeafId = manager.getLeafId();
+  const assistant: AssistantMessage = {
+    ...automaticTitleMessage(""),
+    content: [{ type: "toolCall", id: "reset-call", name: "reset_context",
+      arguments: { handoff: "Continue verification; do not repeat completed writes." } }],
+    stopReason: "toolUse",
+  };
+  runtime.session.eventListener?.(nativeEvent({ type: "message_end", message: assistant }));
+  manager.appendMessage(assistant);
+  const result = await tool!.execute("reset-call", {
+    handoff: "Continue verification; do not repeat completed writes.",
+  });
+  expect(result).toMatchObject({ details: { accepted: true, committed: false } });
+  expect(runtime.session.compactCalls).toBe(0);
+  expect(runtime.session.refreshContextCalls).toBe(0);
+  expect(manager.getBranch().some((entry) => entry.type === "compaction")).toBe(false);
+  manager.appendMessage({ role: "toolResult", toolCallId: "reset-call",
+    toolName: "reset_context", content: result.content, details: result.details,
+    isError: false, timestamp: 2 });
+  runtime.session.contextPercent = 40;
 }
 
 function fakeBashLifecycle() {
@@ -4631,10 +4682,10 @@ describe("ConversationActor", () => {
   it("persists and triggers a per-conversation compaction threshold", async () => {
     const fixture = await openActor();
 
-    expect(fixture.actor.getCompactionThresholdPercent()).toBe(70);
+    expect(fixture.actor.getCompactionThresholdPercent()).toBe(80);
     expect(
       fixture.runtime.createOptions?.getCompactionThresholdPercent?.(),
-    ).toBe(70);
+    ).toBe(80);
 
     fixture.actor.setCompactionThresholdPercent(55);
     expect(
@@ -4711,7 +4762,7 @@ describe("ConversationActor", () => {
           stopReason: "toolUse",
         },
       }));
-      fixture.runtime.session.contextPercent = 75;
+      fixture.runtime.session.contextPercent = 85;
       expect(fixture.runtime.createOptions?.turnBoundaryCheck?.({
         contextUsage: fixture.runtime.session.getContextUsage(),
       })).toBe(true);
@@ -4760,50 +4811,171 @@ describe("ConversationActor", () => {
     await fixture.actor.dispose();
   });
 
-  it("lets the Agent request below-threshold compaction at a safe tool-turn boundary", async () => {
-    const fixture = await openActor();
-    const emit = () => fixture.runtime.session.eventListener;
-    const requestCompaction = fixture.runtime.createOptions?.workbenchCustomTools?.find(
-      ({ name }) => name === "request_context_compaction",
-    );
-    expect(requestCompaction).toBeDefined();
-
-    fixture.runtime.session.promptImplementation = async () => {
-      emit()?.(nativeEvent({ type: "agent_start" }));
-      const result = await requestCompaction?.execute("compact-call", {});
-      expect(result).toMatchObject({ details: { requested: true } });
-      expect(fixture.runtime.session.compactCalls).toBe(0);
-
-      fixture.runtime.session.contextPercent = 40;
-      expect(fixture.runtime.createOptions?.turnBoundaryCheck?.({
-        contextUsage: fixture.runtime.session.getContextUsage(),
-      })).toBe(true);
-      emit()?.(nativeEvent({ type: "agent_end" }));
+  it("resets below threshold with retain-none persistence and resumes the same conversation/run", async () => {
+    const runtime = new FakeRuntime();
+    const clearObservation = vi.fn();
+    runtime.computerUse = {
+      completeAssistantDecision: vi.fn(), clearObservation,
+      release: vi.fn(async () => undefined),
     };
-    fixture.runtime.session.resumeImplementation = async (message, options) => {
+    const fixture = await openActor({ runtime });
+    const appendCompaction = vi.spyOn(fixture.manager, "appendCompaction");
+    const order: string[] = [];
+    const refresh = runtime.session.refreshContextImplementation;
+    runtime.session.refreshContextImplementation = () => {
+      order.push("refresh");
+      expect(clearObservation).toHaveBeenCalled();
+      refresh();
+    };
+    let physicalIds: string[] = [];
+    runtime.session.promptImplementation = async (text) => {
+      runtime.session.eventListener?.(nativeEvent({ type: "agent_start" }));
+      await acceptContextReset(fixture, text);
+      physicalIds = fixture.manager.getEntries().map(({ id }) => id);
+      expect(checkToolTurnBoundary(runtime)).toBe(true);
+      expect(runtime.session.refreshContextCalls).toBe(0);
+      runtime.session.eventListener?.(nativeEvent({ type: "agent_end" }));
+    };
+    runtime.session.resumeImplementation = async (message, options) => {
+      order.push("resume");
       expect(message).toMatchObject({
-        customType: "piweb.compaction_resume.v1",
-        display: false,
+        customType: "piweb.compaction_resume.v1", display: false,
+        details: { runId: RUN_A }, content: expect.stringContaining("Context reset committed"),
       });
       expect(options).toMatchObject({ triggerTurn: true });
-      fixture.runtime.session.contextPercent = 20;
-      emit()?.(nativeEvent({ type: "agent_start" }));
-      emit()?.(nativeEvent({ type: "agent_end" }));
+      expect(fixture.actor.currentRunOwnership()).toMatchObject({ runId: RUN_A });
+      expect(runtime.session.turnBoundaryPaused).toBe(false);
+      const entry = fixture.manager.getBranch().find((candidate) => candidate.type === "compaction");
+      expect(entry).toMatchObject({ type: "compaction", firstKeptEntryId: entry!.id,
+        details: { "piweb.context_reset.v1": { runId: RUN_A } } });
+      expect(runtime.session.agent.state.messages).toEqual(fixture.manager.buildSessionProjection().messages);
+      expect(runtime.session.agent.state.messages).toHaveLength(1);
+      expect(JSON.stringify(runtime.session.messages)).toContain("Only verify; do not repeat writes.");
+      expect(JSON.stringify(runtime.session.messages)).toContain("Continue verification");
+      expect(JSON.stringify(runtime.session.messages)).not.toContain("not yet committed");
+      expect(fixture.manager.getEntries().slice(0, physicalIds.length).map(({ id }) => id)).toEqual(physicalIds);
+      // Model-visible context was reset; old physical assistant/tool history survives.
+      expect(fixture.manager.getEntries().some((candidate) => candidate.type === "message"
+        && candidate.message.role === "toolResult" && candidate.message.toolName === "reset_context")).toBe(true);
+      persistBashNotification(fixture, message);
+      runtime.session.eventListener?.(nativeEvent({ type: "agent_start" }));
+      runtime.session.eventListener?.(nativeEvent({ type: "agent_end" }));
     };
 
     const settlement = await fixture.actor.startPrompt({
-      runId: RUN_A,
-      text: "compact before continuing a long task",
-      origin: "browser",
+      runId: RUN_A, text: "Only verify; do not repeat writes.", origin: "browser",
     });
+    expect(settlement).toMatchObject({ runId: RUN_A, outcome: "completed" });
+    expect(appendCompaction).toHaveBeenCalledExactlyOnceWith(
+      expect.any(String), null, 400, expect.objectContaining({ "piweb.context_reset.v1": expect.any(Object) }),
+    );
+    expect(order).toEqual(["refresh", "resume"]);
+    expect(runtime.session.compactCalls).toBe(0);
+    expect(runtime.session.refreshContextCalls).toBe(1);
+    expect(runtime.session.resumeCalls).toBe(1);
+    expect(runtime.session.turnBoundaryPauseReleases).toBe(1);
+    expect(runtime.session.clearQueueCalls).toBe(0);
+    expect(runtime.createOptions?.workbenchCustomTools?.some(({ name }) => name === "request_context_compaction")).toBe(false);
+    expect(fixture.events.filter((event) => event.type === "session_event"
+      && (event.event.type === "run_started" || event.event.type === "run_finished")))
+      .toEqual([expect.objectContaining({ runId: RUN_A, event: expect.objectContaining({ type: "run_started" }) }),
+        expect.objectContaining({ runId: RUN_A, event: expect.objectContaining({ type: "run_finished" }) })]);
+    await fixture.actor.dispose();
+  });
 
-    expect(settlement.outcome).toBe("completed");
-    expect(fixture.runtime.session.compactCalls).toBe(1);
-    expect(fixture.runtime.session.resumeCalls).toBe(1);
-    expect(fixture.events.filter((event) => (
-      event.type === "session_event"
-      && (event.event.type === "run_started" || event.event.type === "run_finished")
-    ))).toHaveLength(2);
+  it.each(["custom", "queued input"])("cancels a pending reset when %s arrives before the checkpoint", async (arrival) => {
+    const fixture = await openActor();
+    const { runtime, manager } = fixture;
+    runtime.session.promptImplementation = async (text) => {
+      await acceptContextReset(fixture, text);
+      if (arrival === "custom") {
+        manager.appendCustomMessageEntry("extension-note", "New correction: inspect only.", false);
+      } else {
+        runtime.session.queueSteeringMessage("New user guidance");
+      }
+      expect(checkToolTurnBoundary(runtime)).toBe(true);
+    };
+    runtime.session.resumeImplementation = async (message, options) => {
+      expect(message.content).toMatch(/Context reset cancelled/);
+      expect(options).toMatchObject({ triggerTurn: true });
+      expect(runtime.session.turnBoundaryPaused).toBe(false);
+      if (arrival === "queued input") {
+        // The queue was merely hidden during the pause, never cleared by reset.
+        expect(runtime.session.agent.hasQueuedMessages()).toBe(true);
+        expect(runtime.session.steeringAgentMessages).toHaveLength(1);
+      }
+    };
+    await expect(fixture.actor.startPrompt({ runId: RUN_A, text: "Original instructions", origin: "browser" }))
+      .resolves.toMatchObject({ outcome: "completed" });
+    expect(manager.getBranch().some((entry) => entry.type === "compaction")).toBe(false);
+    expect(JSON.stringify(manager.buildSessionProjection().messages)).toContain("Original instructions");
+    expect(runtime.session.compactCalls).toBe(0);
+    expect(runtime.session.refreshContextCalls).toBe(0);
+    expect(runtime.session.clearQueueCalls).toBe(0);
+    expect(runtime.session.resumeCalls).toBe(1);
+    await fixture.actor.dispose();
+  });
+
+  it.each(["append", "refresh"])("fails fatally without later appends if reset %s fails", async (stage) => {
+    const fixture = await openActor();
+    const { runtime, manager } = fixture;
+    let poisonedIds: string[] = [];
+    const failure = new Error(`reset ${stage} failed`);
+    runtime.session.promptImplementation = async (text) => {
+      await acceptContextReset(fixture, text);
+      // Keep later threshold work due as well: infrastructure failure must not
+      // fall through and compact/settle using the uncertain writer.
+      runtime.session.contextPercent = 85;
+      if (stage === "append") {
+        const append = manager.appendCompaction.bind(manager);
+        vi.spyOn(manager, "appendCompaction").mockImplementation((...args) => {
+          append(...args); // Pi may mutate memory before persistence fails.
+          poisonedIds = manager.getEntries().map(({ id }) => id);
+          throw failure;
+        });
+      } else {
+        runtime.session.refreshContextImplementation = () => {
+          poisonedIds = manager.getEntries().map(({ id }) => id);
+          throw failure;
+        };
+      }
+      expect(checkToolTurnBoundary(runtime)).toBe(true);
+    };
+    await expect(fixture.actor.startPrompt({ runId: RUN_A, text: "Keep working", origin: "browser" }))
+      .rejects.toThrow(failure);
+    expect(fixture.actor.getState().fatalError).toContain(failure.message);
+    expect(fixture.events).toContainEqual(expect.objectContaining({ type: "error", runId: RUN_A, fatal: true }));
+    expect(manager.getEntries().map(({ id }) => id)).toEqual(poisonedIds);
+    expect(aggregateReservedConversationEntries(manager.getBranch()).runSettlements).toEqual([]);
+    expect(runtime.session.compactCalls).toBe(0);
+    expect(runtime.session.refreshContextCalls).toBe(stage === "refresh" ? 1 : 0);
+    expect(runtime.session.resumeCalls).toBe(0);
+    expect(() => fixture.actor.startPrompt({ runId: RUN_B, text: "must not append", origin: "browser" })).toThrow();
+    expect(manager.getEntries().map(({ id }) => id)).toEqual(poisonedIds);
+    await fixture.actor.dispose();
+  });
+
+  it.each(["abort", "reload"])("does not commit a pending reset after %s", async (operation) => {
+    const fixture = await openActor();
+    const { runtime, manager } = fixture;
+    const accepted = deferred();
+    const finishTurn = deferred();
+    runtime.session.promptImplementation = async (text) => {
+      await acceptContextReset(fixture, text);
+      accepted.resolve();
+      await finishTurn.promise;
+      if (operation === "reload") expect(checkToolTurnBoundary(runtime)).toBe(true);
+    };
+    const running = fixture.actor.startPrompt({ runId: RUN_A, text: "Continue later", origin: "browser" });
+    await accepted.promise;
+    const stopping = operation === "abort" ? fixture.actor.abort(RUN_A) : fixture.actor.stopForReload(false);
+    finishTurn.resolve();
+    await stopping;
+    await expect(running).resolves.toMatchObject({ runId: RUN_A, outcome: "aborted" });
+    expect(manager.getBranch().some((entry) => entry.type === "compaction")).toBe(false);
+    expect(runtime.session.compactCalls).toBe(0);
+    expect(runtime.session.refreshContextCalls).toBe(0);
+    expect(runtime.session.customMessages.every(({ options }) => options?.triggerTurn !== true)).toBe(true);
     await fixture.actor.dispose();
   });
 
@@ -5487,7 +5659,7 @@ describe("ConversationActor", () => {
     const boundaryDecisions: boolean[] = [];
     let attempt = 0;
     fixture.runtime.session.promptImplementation = async () => {
-      fixture.runtime.session.contextPercent = 75;
+      fixture.runtime.session.contextPercent = 85;
       boundaryDecisions.push(checkToolTurnBoundary(fixture.runtime));
     };
     fixture.runtime.session.compactImplementation = async () => {
@@ -5497,9 +5669,9 @@ describe("ConversationActor", () => {
     };
     fixture.runtime.session.resumeImplementation = async () => {
       if (fixture.runtime.session.resumeCalls === 1) {
-        fixture.runtime.session.contextPercent = 79;
+        fixture.runtime.session.contextPercent = 89;
         boundaryDecisions.push(checkToolTurnBoundary(fixture.runtime));
-        fixture.runtime.session.contextPercent = 81;
+        fixture.runtime.session.contextPercent = 91;
         boundaryDecisions.push(checkToolTurnBoundary(fixture.runtime));
       } else {
         fixture.runtime.session.contextPercent = 20;

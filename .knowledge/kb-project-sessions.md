@@ -108,7 +108,7 @@ Project store handle 按 canonical cwd 引用计数；ProjectSessionCoordinator 
 | `piweb.conversation_card.v1` / `piweb.conversation_message.v1` | outgoing 展示 / incoming 模型正文；不是永久交付证明 |
 | `piweb.message_delivery_receipt.v1` / `piweb.run_settlement.v1` | 不可 rewind 的交付账本 / exact run outcome；settlement 可选 outputMetrics 仅恢复 focused 输出速率 |
 | `piweb.meta_operation.v1` | 破坏性 meta 工具的 started/completed 幂等意图 |
-| `piweb.compaction_threshold.v1` / `piweb.service_tier.v1` | 会话覆盖，不进入模型上下文；阈值 20%–90%，缺省 70% |
+| `piweb.compaction_threshold.v1` / `piweb.service_tier.v1` | 会话覆盖，不进入模型上下文；阈值 20%–90%，缺省 80%，已有显式覆盖不改写 |
 | `piweb.loop_list.v2` / `piweb.loop_list_continue.v2` / `piweb.edit_gate.v1` | 任务快照、同 run 续跑、首次 builtin 写入已准入证明；状态/续跑见[Actor](kb-agent-collaboration.md#looplist-状态与续跑)，写入准入见[工具策略](kb-tool-policy.md#首次写入-looplist-门控) |
 | `piweb.compaction_resume.v1` / `piweb.context_hint.v1` | 隐藏 custom message，不恢复宿主状态、不投影卡片；resume 只携带合法 runId，hint 是有界字符串且无 details |
 | `piweb.bash_task_notification.v1` | 标准 custom message 的完成事实，不是跨重启执行 registry；详见[运行时](kb-server-runtime.md#前台-run-与会话后台-bash) |

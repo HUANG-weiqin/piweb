@@ -33,7 +33,10 @@ const SDK_READ_ONLY_TOOLS = new Set([
   "todo_read",
   "todo_write",
   "todo_pause",
-  "request_context_compaction",
+  "reset_context",
+  "history_search",
+  "history_context",
+  "history_read",
 ]);
 export const READ_ONLY_TOOL_NAME_CEILING = [
   ...PI_READ_ONLY_TOOLS,
@@ -59,6 +62,6 @@ export const defaultToolPolicy: ToolPolicy = ({
   }
   return {
     action: "deny",
-    reason: "只读模式仅允许 Pi 原生 read、grep、find、ls、宿主受审查 bash 及本会话后台任务的 bash_output/bash_stop、conversation notebook、本机时间 current_time、只读 LSP lsp_symbols/lsp_definition/lsp_references、LoopList todo_read/todo_write/todo_pause、上下文压缩请求 request_context_compaction 和安全角色查看/提议工具 list_roles/read_role/propose_role_revision；其它会话编排、未受审查命令、项目写入及扩展工具均被禁止。",
+    reason: "只读模式仅允许 Pi 原生 read、grep、find、ls、宿主受审查 bash 及本会话后台任务的 bash_output/bash_stop、conversation notebook、本机时间 current_time、只读 LSP lsp_symbols/lsp_definition/lsp_references、LoopList todo_read/todo_write/todo_pause、上下文重置 reset_context 与历史查询 history_search/history_context/history_read 和安全角色查看/提议工具 list_roles/read_role/propose_role_revision；其它会话编排、未受审查命令、项目写入及扩展工具均被禁止。",
   };
 };

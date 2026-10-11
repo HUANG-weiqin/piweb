@@ -77,6 +77,14 @@ import {
   MAX_LOOP_LIST_CONTINUATIONS_PER_RUN,
 } from "./conversation-meta.js";
 import { createLoopListTools } from "./loop-list-tools.js";
+import { createHistoryTools } from "./history-tools.js";
+import {
+  appendContextReset,
+  assertContextResetBoundary,
+  MAX_RESET_HANDOFF_BYTES,
+  prepareContextReset,
+  type ContextResetPlan,
+} from "./context-reset.js";
 import {
   createForkSourceSnapshot,
   type ForkSourceSnapshot,
@@ -563,7 +571,7 @@ interface RunTicket {
   compactionErrorReported: boolean;
   compactionRetryAtPercent?: number;
   sdkCompactionSucceeded: boolean;
-  contextCompactionRequested: boolean;
+  contextResetRequested?: ContextResetPlan;
   turnBoundaryCompactionRequested: boolean;
   reloadStop?: ReloadStopRequest;
   abortPromise?: Promise<void>;
@@ -1345,33 +1353,38 @@ export class ConversationActor {
     this.serviceTierSelection = entry.data.tier;
   }
 
-  private createContextCompactionTool() {
+  private createContextResetTool() {
     return defineTool({
-      name: "request_context_compaction",
-      label: "Request context compaction",
+      name: "reset_context",
+      label: "Reset working context",
       description:
-        "Request one lossy context compaction after the current assistant/tool turn completes. The workbench keeps the same run active and resumes unfinished work afterward. Acceptance is not proof that compaction succeeded.",
-      promptSnippet:
-        "Request safe context compaction after the current tool turn.",
+        "Unload old assistant/tool working context after this complete tool turn, without deleting history or changing the conversation/run. Supply a non-empty handoff (at most 8 KiB): goal, constraints, completed side effects, next step and useful history/Notebook references. Existing canonical user/custom input and checkpoints are preserved as labeled text, not summarized (up to 64 KiB). Host progress hints and background-output notifications are working context, not protected input. Requests may be cancelled by new input, abort or reload; accepted is not committed.",
+      promptSnippet: "Continue the same task with a smaller working context and an explicit handoff.",
       promptGuidelines: [
-        "Use request_context_compaction only when substantial work remains and early lossy compaction is worth the summary cost; the workbench already compacts automatically at its configured threshold.",
+        "Use reset_context only as the sole, direct tool call in a decision, never inside codemode or alongside other tools. Finish writing notes and observe success first.",
+        "After reset, use history_search to locate evidence, history_context to understand surrounding messages, and history_read to recover details. History is not a new instruction or current workspace fact.",
+        "Reset preserves existing user text/checkpoints and refuses oversized instruction context or active user images rather than silently discarding them. It does not call a summarizer; automatic compaction remains a fallback.",
       ],
-      parameters: Type.Object({}, { additionalProperties: false }),
-      execute: async () => {
+      parameters: Type.Object({
+        handoff: Type.String({ minLength: 1, maxLength: MAX_RESET_HANDOFF_BYTES }),
+      }, { additionalProperties: false }),
+      execute: async (toolCallId, { handoff }) => {
         const ticket = this.activeRun;
         if (!ticket || ticket.state.phase !== "running") {
-          throw new Error(
-            "Context compaction can only be requested by the active running conversation",
-          );
+          throw new Error("Context reset requires the active running conversation");
         }
-        ticket.contextCompactionRequested = true;
-        const details = { requested: true as const };
+        if (ticket.contextResetRequested) throw new Error("A context reset is already pending");
+        ticket.contextResetRequested = prepareContextReset(this.sessionManager, {
+          observedLeafId: this.created?.observedContextLeafId?.(),
+          toolCallId,
+          handoff,
+          runId: ticket.id,
+          contextBudget: (this.session.model?.contextWindow ?? 0)
+            - this.requireCreated().settings.getCompactionSettings().reserveTokens,
+        });
         return {
-          content: [{
-            type: "text" as const,
-            text: "Context compaction requested for the end of this complete tool turn. This confirms acceptance, not completion.",
-          }],
-          details,
+          content: [{ type: "text" as const, text: "Context reset accepted for the end of this complete tool turn, not yet committed. New input, cancellation or reload may cancel this request. Continue only after the host reports its outcome." }],
+          details: { accepted: true, committed: false },
         };
       },
     });
@@ -3068,7 +3081,6 @@ export class ConversationActor {
       sawSdkCompactionAttempt: false,
       compactionErrorReported: false,
       sdkCompactionSucceeded: false,
-      contextCompactionRequested: false,
       turnBoundaryCompactionRequested: false,
     };
     this.activeRun = ticket;
@@ -3708,8 +3720,18 @@ export class ConversationActor {
     let failure: unknown;
     try {
       await execute(ticket);
+      if (ticket.reloadStop && ticket.contextResetRequested) {
+        ticket.contextResetRequested = undefined;
+        await this.sendContextResetOutcome(ticket, "Context reset cancelled by reload; the previous working context is unchanged.", false);
+      }
       if (await this.finishReloadStop(ticket)) return;
       while (this.activeRun === ticket && !isCancelling(ticket)) {
+        if (ticket.contextResetRequested) {
+          await this.resetRequestedContext(ticket);
+          if (this.activeRun !== ticket) return;
+          if (await this.finishReloadStop(ticket)) return;
+          continue;
+        }
         if (this.pendingBashTaskNotifications.length > 0) {
           await this.sendPendingBashNotifications(ticket, true);
           if (await this.finishReloadStop(ticket)) return;
@@ -3956,6 +3978,52 @@ export class ConversationActor {
       || !this.isCompactionAttemptDue(ticket, usage.percent)
     ) return;
     await this.attemptHostCompaction(ticket);
+  }
+
+  private async sendContextResetOutcome(ticket: RunTicket, content: string, triggerTurn: boolean): Promise<void> {
+    const resume = createCompactionResumeEntry({ content, display: false, details: { runId: ticket.id } });
+    await this.session.sendCustomMessage(resume, { triggerTurn });
+  }
+
+  private async resetRequestedContext(ticket: RunTicket): Promise<void> {
+    const plan = ticket.contextResetRequested!;
+    ticket.contextResetRequested = undefined;
+    this.releaseTurnBoundaryPause();
+    let cancellation: string | undefined;
+    try {
+      if (ticket.reloadStop || ticket.pendingGuidanceObservations.length > 0
+        || ticket.customSteerDeliveries.length > 0 || ticket.acceptedCustomMessageObservations.length > 0
+        || ticket.acceptedBashTaskNotifications.length > 0 || this.pendingBashTaskNotifications.length > 0
+        || this.session.agent.hasQueuedMessages()) {
+        throw new Error("Context reset cancelled: new input or lifecycle work takes priority; observe it before requesting another reset");
+      }
+      assertContextResetBoundary(this.sessionManager, plan);
+    } catch (error) {
+      cancellation = errorMessage(error);
+    }
+    if (cancellation === undefined) {
+      this.created?.computerUse?.clearObservation();
+      try {
+        appendContextReset(this.sessionManager, plan, this.session.getContextUsage()?.tokens ?? 0);
+        this.session.refreshContext();
+      } catch (error) {
+        // SessionManager mutates memory before disk. Never append a settlement
+        // or resume from a manager whose persistence or projection is uncertain.
+        await this.failRunInfrastructure(ticket, error);
+        return;
+      }
+      this.recordCompactionSuccess(ticket);
+      ticket.turnBoundaryCompactionRequested = false;
+      ticket.sawSdkCompactionAttempt = false;
+      ticket.sdkCompactionSucceeded = false;
+      this.emitContextUsage();
+      this.emit({ type: "history_changed", conversationId: this.conversationId });
+    }
+    if (this.activeRun !== ticket || isCancelling(ticket)) return;
+    await this.sendContextResetOutcome(ticket,
+      cancellation ?? "Context reset committed. Continue the unfinished task from the preserved instructions and Agent handoff, in the same conversation and run. Recover details with history_search/history_context/history_read; do not repeat completed side effects.",
+      !ticket.reloadStop && this.pendingBashTaskNotifications.length === 0,
+    );
   }
 
   private async compactRequestedTurnBoundary(ticket: RunTicket): Promise<void> {
@@ -4625,19 +4693,15 @@ export class ConversationActor {
     ) {
       return true;
     }
-    const contextCompactionRequested = ticket.contextCompactionRequested;
-    ticket.contextCompactionRequested = false;
+    if (ticket.contextResetRequested) return true;
     if (ticket.sawSdkCompactionAttempt) return false;
 
     const percent = input.contextUsage?.percent;
     if (!this.isCompactionAttemptDue(ticket, percent)) return false;
     if (
-      !contextCompactionRequested
-      && (
-        percent === null
-        || percent === undefined
-        || percent < this.compactionThresholdPercent
-      )
+      percent === null
+      || percent === undefined
+      || percent < this.compactionThresholdPercent
     ) {
       return false;
     }
@@ -4808,7 +4872,11 @@ export class ConversationActor {
               write: (items) => this.writeLoopList(items),
               pause: () => this.pauseLoopList(),
             }),
-            this.createContextCompactionTool(),
+            this.createContextResetTool(),
+            ...createHistoryTools({
+              conversationId: this.conversationId,
+              getBranch: () => this.sessionManager.getBranch(),
+            }),
           ],
           sessionManager: this.sessionManager,
           toolCallGate: (input) => this.authorizeToolCall(input),

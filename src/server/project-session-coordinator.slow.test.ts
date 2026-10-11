@@ -2883,7 +2883,10 @@ describe("ProjectSessionCoordinator", () => {
       "todo_read",
       "todo_write",
       "todo_pause",
-      "request_context_compaction",
+      "reset_context",
+      "history_search",
+      "history_context",
+      "history_read",
     ]);
     expect(second.profile.role).toMatchObject({
       revision: 2,
@@ -2925,7 +2928,10 @@ describe("ProjectSessionCoordinator", () => {
       "todo_read",
       "todo_write",
       "todo_pause",
-      "request_context_compaction",
+      "reset_context",
+      "history_search",
+      "history_context",
+      "history_read",
     ]);
     expect(first.profile.role).not.toEqual(second.profile.role);
   });

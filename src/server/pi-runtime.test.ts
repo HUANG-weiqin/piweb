@@ -30,6 +30,7 @@ import type { LoopList } from "../shared/protocol.js";
 import { BashBackgroundTaskRegistry, type BashTaskCompletion } from "./bash-execution.js";
 import { PiRuntime } from "./pi-runtime.js";
 import { projectConversationHistory } from "./conversation-history.js";
+import { appendContextReset, assertContextResetBoundary, prepareContextReset, type ContextResetPlan } from "./context-reset.js";
 import type { ComputerToolResult, WindowsDesktopAdapter } from "./computer-use.js";
 
 initTheme();
@@ -868,6 +869,84 @@ describe("PiRuntime session ownership", () => {
     expect(created.session.agent.transformContext).toBe(originalTransform);
     expect(created.session.agent.convertToLlm).toBe(originalConverter);
     vi.useRealTimers();
+  });
+
+  it("resets through the real Pi tool loop and continues with the same session, frozen tools and durable history", async () => {
+    const cwd = await temporaryDirectory("piweb-runtime-context-reset-");
+    const manager = SessionManager.create(cwd, cwd);
+    let plan: ContextResetPlan | undefined;
+    let observedLeaf: () => string | null | undefined = () => undefined;
+    const runtime = await testRuntime(() => [], undefined, async (modelRuntime) => {
+      modelRuntime.registerProvider("reset-provider", {
+        baseUrl: "https://reset.invalid/v1", apiKey: "test-key", api: "openai-completions",
+        models: [{ ...providerModel("reset-model"), contextWindow: 100_000 }],
+      });
+      await modelRuntime.refresh({ allowNetwork: false });
+    });
+    const created = await runtime.createSession(cwd, {
+      sessionManager: manager,
+      model: { provider: "reset-provider", id: "reset-model" },
+      getLoopList: () => ({ items: [{ id: "work", text: "Continue the task", status: "active" }], armed: true }),
+      turnBoundaryCheck: () => plan !== undefined,
+      workbenchCustomTools: [{
+        name: "reset_context", label: "Reset", description: "Test reset",
+        parameters: Type.Object({ handoff: Type.String() }),
+        execute: async (toolCallId, args) => {
+          plan = prepareContextReset(manager, {
+            toolCallId, handoff: (args as { handoff: string }).handoff,
+            runId: "same-run", observedLeafId: observedLeaf(),
+          });
+          return { content: [{ type: "text", text: "accepted, not committed" }], details: {} };
+        },
+      }],
+    });
+    observedLeaf = () => created.observedContextLeafId?.();
+    await created.activateExtensions();
+    const contexts: unknown[] = [];
+    const sessionIdentity = created.session;
+    const compact = vi.spyOn(created.session, "compact");
+    vi.spyOn(created.modelRuntime, "streamSimple").mockImplementation((model, context) => {
+      contexts.push(structuredClone(context));
+      const first = contexts.length === 1;
+      const stream = createAssistantMessageEventStream();
+      queueMicrotask(() => stream.end({
+        role: "assistant",
+        content: first
+          ? [{ type: "toolCall", id: "reset-call", name: "reset_context", arguments: { handoff: "Continue investigating; no files changed." } }]
+          : [{ type: "text", text: "Investigation continues." }],
+        api: model.api, provider: model.provider, model: model.id,
+        stopReason: first ? "toolUse" : "stop", timestamp: Date.now(),
+        usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+      } as never));
+      return stream;
+    });
+    try {
+      await created.session.prompt("Investigate only. Do not edit the project.");
+      expect(contexts).toHaveLength(1);
+      expect(plan).toBeDefined();
+      assertContextResetBoundary(manager, plan!);
+      appendContextReset(manager, plan!, 100);
+      created.session.refreshContext();
+      created.releaseTurnBoundaryPause?.();
+      plan = undefined;
+      await created.session.sendCustomMessage({ customType: "resume-test", content: "Reset committed; continue.", display: false }, { triggerTurn: true });
+      expect(created.session).toBe(sessionIdentity);
+      expect(contexts).toHaveLength(2);
+      expect(compact).not.toHaveBeenCalled();
+      const next = JSON.stringify(contexts[1]);
+      expect(next).toContain("Investigate only. Do not edit the project.");
+      expect(next).toContain("Continue investigating; no files changed.");
+      expect(next).not.toContain("accepted, not committed");
+      expect(next).not.toContain('"id":"reset-call"');
+      expect((contexts[1] as { tools: unknown }).tools).toEqual((contexts[0] as { tools: unknown }).tools);
+      expect((contexts[1] as { systemPrompt: unknown }).systemPrompt).toEqual((contexts[0] as { systemPrompt: unknown }).systemPrompt);
+      expect(manager.getEntries().some((entry) => entry.type === "message" && entry.message.role === "toolResult")).toBe(true);
+      const reopened = SessionManager.open(manager.getSessionFile()!);
+      expect(reopened.buildSessionProjection().messages).toEqual(manager.buildSessionProjection().messages);
+    } finally {
+      await created.dispose();
+    }
   });
 
   it("routes ordinary and post-tool requests through the live Pi Web converter", async () => {

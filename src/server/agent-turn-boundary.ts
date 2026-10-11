@@ -14,6 +14,8 @@ export type AgentTurnBoundaryHandler = (
 type FinishTurn = NonNullable<AgentSession["agent"]["finishTurn"]>;
 
 export interface AgentTurnBoundaryController {
+  /** Durable frontier before the last conversational provider request. */
+  observedLeafId(): string | null | undefined;
   releaseQueuePause(): void;
   dispose(): void;
 }
@@ -29,6 +31,15 @@ export function installAgentTurnBoundaryCheck(
   const agent = session.agent;
   const previousFinishTurn = agent.finishTurn;
   const previousHasQueuedMessages = agent.hasQueuedMessages;
+  const previousPrepareRequest = agent.prepareRequest;
+  const hadOwnPrepareRequest = Object.hasOwn(agent, "prepareRequest");
+  let observedLeaf: string | null | undefined;
+  const prepareRequest: NonNullable<typeof agent.prepareRequest> = async (request, signal) => {
+    observedLeaf = undefined;
+    const update = await previousPrepareRequest?.call(agent, request, signal);
+    if (!signal?.aborted) observedLeaf = session.sessionManager.getLeafId();
+    return update ?? undefined;
+  };
   if (typeof previousHasQueuedMessages !== "function") {
     throw new Error("Pi Agent does not expose its turn-boundary queue controls");
   }
@@ -68,11 +79,13 @@ export function installAgentTurnBoundaryCheck(
     return !queuePaused && previousHasQueuedMessages.call(agent);
   };
 
+  agent.prepareRequest = prepareRequest;
   agent.finishTurn = finishTurn;
   agent.hasQueuedMessages = hasQueuedMessages;
 
   let installed = true;
   return {
+    observedLeafId: () => observedLeaf,
     releaseQueuePause: () => {
       queuePaused = false;
     },
@@ -80,6 +93,11 @@ export function installAgentTurnBoundaryCheck(
       if (!installed) return;
       installed = false;
       queuePaused = false;
+      observedLeaf = undefined;
+      if (agent.prepareRequest === prepareRequest) {
+        if (hadOwnPrepareRequest) agent.prepareRequest = previousPrepareRequest;
+        else delete (agent as Partial<typeof agent>).prepareRequest;
+      }
       if (agent.finishTurn === finishTurn) {
         if (hadOwnFinishTurn) agent.finishTurn = previousFinishTurn;
         else delete (agent as Partial<typeof agent>).finishTurn;
