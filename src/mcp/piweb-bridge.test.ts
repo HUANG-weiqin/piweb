@@ -317,6 +317,22 @@ describe("PiWebBridge against a real Pi Web socket server", () => {
     await expect(bridge.sendMessage({ conversationId: "whatever", message: "   " }))
       .rejects.toMatchObject({ code: "invalid_input" });
   });
+
+  it("explains a missing conversation in Chinese instead of the raw server error", async () => {
+    const { bridge } = await piWebHarness();
+    const missing = "missing-conversation";
+    const sent = await bridge.sendMessage({ conversationId: missing, message: "不应送达" })
+      .catch((error: unknown) => error);
+    expect(sent).toBeInstanceOf(PiWebBridgeError);
+    expect(sent).toMatchObject({ code: "invalid_input" });
+    expect((sent as Error).message).toBe(
+      `项目里找不到会话 ${missing}。可先用 piweb_list_conversations 查看。`,
+    );
+    await expect(bridge.readConversation({ conversationId: missing, lastItems: 4 }))
+      .rejects.toMatchObject({ code: "invalid_input" });
+    await expect(bridge.abort({ conversationId: missing }))
+      .rejects.toMatchObject({ code: "invalid_input" });
+  });
 });
 
 async function fakePiWeb(

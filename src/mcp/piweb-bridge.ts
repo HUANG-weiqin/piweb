@@ -78,6 +78,13 @@ export type AbortResult =
   | { readonly kind: "idle" }
   | { readonly kind: "aborted"; readonly runId: string; readonly outcome: RunSettlement["outcome"] | "unknown" };
 
+function missingConversationError(conversationId: string): PiWebBridgeError {
+  return new PiWebBridgeError(
+    `项目里找不到会话 ${conversationId}。可先用 piweb_list_conversations 查看。`,
+    "invalid_input",
+  );
+}
+
 const DEFAULT_COMMAND_TIMEOUT_MS = 60_000;
 const ABORT_SETTLE_TIMEOUT_MS = 30_000;
 const LOOKUP_GRACE_MS = 5_000;
@@ -142,7 +149,20 @@ export class PiWebBridge {
   ): Promise<T> {
     const session = await PiWebSession.connect(this.options.baseUrl, signal);
     try {
-      await session.initialize(cwd, target, this.commandTimeoutMs, signal);
+      try {
+        await session.initialize(cwd, target, this.commandTimeoutMs, signal);
+      } catch (error) {
+        // 服务端对找不到的会话只回英文原文；只翻译这一种，其它打开失败保持原样。
+        if (
+          target.kind === "open"
+          && error instanceof PiWebBridgeError
+          && error.code === "command_failed"
+          && /Conversation not found/.test(error.message)
+        ) {
+          throw missingConversationError(target.conversationId);
+        }
+        throw error;
+      }
       return await work(session);
     } finally {
       await session.close();
@@ -169,12 +189,7 @@ export class PiWebBridge {
       if (!(error instanceof PiWebBridgeError && error.code === "timeout")) throw error;
       found = null;
     }
-    if (found === null) {
-      throw new PiWebBridgeError(
-        `项目里找不到会话 ${conversationId}。可先用 piweb_list_conversations 查看。`,
-        "invalid_input",
-      );
-    }
+    if (found === null) throw missingConversationError(conversationId);
     return found;
   }
 
