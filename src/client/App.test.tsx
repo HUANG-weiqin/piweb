@@ -645,6 +645,43 @@ async function pasteDraftImage(name = "draft.png"): Promise<void> {
 }
 
 describe("App", () => {
+  it.each(["ready", "not_git", "error"] as const)(
+    "reads workspace changes on demand without using focus or changing a draft (%s)", (outcome) => {
+      const sessionId = startFocusReplacementProject();
+      const tasks = screen.getByRole("region", { name: "Tasks" });
+      const draft = screen.getByRole("textbox", { name: "给 Pi 发送消息" });
+      fireEvent.change(draft, { target: { value: "keep this draft" } });
+      expect(socketMock.send.mock.calls.some(([command]) => command.type === "refresh_workspace_changes")).toBe(false);
+      fireEvent.click(within(tasks).getByRole("button", { name: "工作区改动" }));
+      const command = latestCommand("refresh_workspace_changes");
+      expect(command).toMatchObject({ sessionId, projectId: PROJECT_ID });
+      expect(command).not.toHaveProperty("conversationId");
+      expect(command).not.toHaveProperty("focusId");
+      act(() => socketMock.rawEmit?.({
+        ...command, type: "workspace_changes", projectId: crypto.randomUUID(), snapshot: { state: "not_git" },
+      }));
+      expect(within(tasks).getByText("正在读取工作区改动…")).toBeInTheDocument();
+      if (outcome === "ready") {
+        fireEvent.click(screen.getByRole("button", { name: "打开会话 B" }));
+      }
+      act(() => socketMock.rawEmit?.(outcome === "error" ? {
+        type: "error", operation: "refresh_workspace_changes", scope: "command",
+        sessionId: command.sessionId, commandId: command.commandId, message: "Git unavailable",
+      } : {
+        ...command, type: "workspace_changes", snapshot: outcome === "ready"
+          ? { state: "ready", files: [{ path: "src/file.ts", status: "modified" }], total: 1, truncated: false }
+          : { state: "not_git" },
+      }));
+      const currentTasks = screen.getByRole("region", { name: "Tasks" });
+      expect(within(currentTasks).getByRole("button", { name: "工作区改动" })).toHaveAttribute("aria-pressed", "true");
+      expect(within(currentTasks).getByText(outcome === "ready" ? "src/file.ts"
+        : outcome === "not_git" ? "当前目录没有 Git 工作树。"
+          : "读取工作区改动失败：Git unavailable")).toBeInTheDocument();
+      if (outcome !== "ready") expect(draft).toHaveValue("keep this draft");
+      expect(socketMock.send.mock.calls.filter(([sent]) => sent.type === "refresh_workspace_changes")).toHaveLength(1);
+    },
+  );
+
   it("sends an exact durable image request from a clicked placeholder", () => {
     const target = {
       close: vi.fn(),
@@ -687,6 +724,48 @@ describe("App", () => {
       imageOrdinal: 0,
     });
   });
+
+  it.each(["matching", "wrong-path", "wrong-focus", "error"] as const)(
+    "opens local image paths only for an exact response (%s)", (outcome) => {
+      const target = { close: vi.fn(), location: { replace: vi.fn() } } as unknown as Window;
+      vi.spyOn(window, "open").mockReturnValue(target);
+      const createObjectURL = vi.fn().mockReturnValue("blob:local-image");
+      vi.stubGlobal("URL", Object.assign(class extends URL {}, { createObjectURL }));
+      const sessionId = startFocusReplacementProject();
+      act(() => socketMock.rawEmit?.({
+        type: "conversation_snapshot", sessionId, conversationId: CONVERSATION_ID, focusId: FOCUS_A,
+        items: snapshotItems([{
+          id: "local-path-message", role: "assistant", text: "[查看成图](file:///E:/images/a.png)",
+          thinking: "", tools: [],
+        }]), window: completeConversationWindow,
+      }));
+      fireEvent.click(screen.getByRole("button", { name: "查看成图 ↗" }));
+      expect(window.open).toHaveBeenCalledWith("about:blank", "_blank");
+      const command = latestCommand("open_local_image");
+      expect(command).toMatchObject({
+        sessionId, conversationId: CONVERSATION_ID, focusId: FOCUS_A, path: "E:/images/a.png",
+      });
+      expect(createObjectURL).not.toHaveBeenCalled();
+      act(() => socketMock.rawEmit?.(outcome === "error" ? {
+        type: "error", scope: "command", operation: "open_local_image", message: "图片不存在",
+        sessionId, conversationId: CONVERSATION_ID, focusId: FOCUS_A, commandId: command.commandId,
+      } : {
+        ...command, type: "local_image", mimeType: "image/png", data: "iVBORw0KGgo=",
+        ...(outcome === "wrong-path" ? { path: "E:/images/other.png" } : {}),
+        ...(outcome === "wrong-focus" ? { focusId: FOCUS_A_SECOND } : {}),
+      }));
+      if (outcome === "matching") {
+        expect(createObjectURL).toHaveBeenCalledWith(expect.any(Blob));
+        expect(target.location.replace).toHaveBeenCalledWith("blob:local-image");
+        expect(target.close).not.toHaveBeenCalled();
+      } else {
+        expect(target.close).toHaveBeenCalled();
+        expect(createObjectURL).not.toHaveBeenCalled();
+        expect(target.location.replace).not.toHaveBeenCalled();
+        if (outcome === "error") expect(screen.getByText("打开图片失败：图片不存在")).toBeVisible();
+      }
+    },
+  );
 
   it("opens an initial phone chat route with an exact conversation open", () => {
     mockPhoneViewport();
@@ -2226,7 +2305,10 @@ describe("App", () => {
         window: completeConversationWindow,
       });
     });
-    expect(screen.queryByRole("region", { name: "Tasks" })).not.toBeInTheDocument();
+    const tasks = screen.getByRole("region", { name: "Tasks" });
+    expect(within(tasks).getByText("当前没有计划目标。")).toBeInTheDocument();
+    expect(within(tasks).getByRole("button", { name: "工作区改动" })).toBeInTheDocument();
+    expect(tasks.querySelectorAll("li")).toHaveLength(0);
     expect(screen.queryByRole("status", { name: "后台命令状态" }))
       .not.toBeInTheDocument();
   });

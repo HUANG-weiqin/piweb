@@ -1,6 +1,6 @@
 # UI 开发与验证流程
 
-`updated: 2026-10-06`
+`updated: 2026-10-11`
 
 ## SOP
 
@@ -37,7 +37,7 @@ npm run build
 npx --no-install tsx scripts/verify-interaction.ts
 ```
 
-该脚本用本机 Chrome/Edge（可设 `PIWEB_BROWSER`）和临时 agentDir/cwd 启动真实 HTTP/WS、PiRuntime、Coordinator、Actor 与 SDK；唯一替身是 session-local 模型响应，不调用收费模型、不碰用户项目。它区分 browser send、`run_queued`、busy `prompt_admitted` 与 raw JSONL `prompt_delivered`，验证标题 gate 未放行时主 run 已结算，以及等待中消息经新 exact reconnect snapshot 恢复、随后只落盘一次。图片准入同样使用真实浏览器 paste/File/FileReader 与 socket；为证明完整原字节读取边界，隔离 fixture 显式设置 `images.autoResize=false`，不改真实用户的 Pi 偏好：拒绝 8 MiB + 1 byte 原文件，接受两张 8 MiB 原图（合计 16 MiB），证明 SDK 原样落盘、重连 history 仅含 marker，且按需打开返回精确原字节；busy steering 的图片也须只落盘一次。浏览器进程和 fixture owner 均按有界清理退出。
+该脚本用本机 Chrome/Edge（可设 `PIWEB_BROWSER`）和临时 agentDir/cwd 启动真实 HTTP/WS、PiRuntime、Coordinator、Actor 与 SDK；唯一替身是 session-local 模型响应，不调用收费模型、不碰用户项目。它区分 browser send、`run_queued`、busy `prompt_admitted` 与 raw JSONL `prompt_delivered`，验证标题 gate 未放行时主 run 已结算，以及等待中消息经新 exact reconnect snapshot 恢复、随后只落盘一次。图片准入同样使用真实浏览器 paste/File/FileReader 与 socket；为证明完整原字节读取边界，隔离 fixture 显式设置 `images.autoResize=false`，不改真实用户的 Pi 偏好：拒绝 8 MiB + 1 byte 原文件，接受两张 8 MiB 原图（合计 16 MiB），证明 SDK 原样落盘、重连 history 仅含 marker，且按需打开返回精确原字节；busy steering 的图片也须只落盘一次。本地路径预览用 fixture 生成的空格/中文文件名与真实 Markdown 链接，原生指针点击后验证 `open_local_image/local_image` 完整 focus/path 回执、精确原字节、Blob 新标签页实际解码，以及 JSONL 未被预览改写；不读取用户真实硬盘图片。浏览器进程和 fixture owner 均按有界清理退出。
 
 它不是 `visual:verify -- --fixture` 的静态展示替代品；后者不能证明运行和持久化。单次 `piweb.transition` trace 只作分阶段观察，不能当作延迟分位数或一般性能收益。涉及 coordinator/actor/store 协作路径还须按 AGENTS 运行 `npm run test:slow`。
 

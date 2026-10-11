@@ -4,6 +4,161 @@
   display: none;
 }
 
+.mission-view-tabs {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  border-bottom: 1px solid var(--rebel-line);
+}
+
+.mission-view-tabs button {
+  min-width: 0;
+  min-height: 36px;
+  padding: 7px 5px;
+  overflow: hidden;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  color: var(--rebel-paper-muted);
+  background: var(--rebel-black);
+  font: 800 9px "Cascadia Code", Consolas, monospace;
+  letter-spacing: 0.04em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mission-view-tabs button[aria-pressed="true"] {
+  border-bottom-color: var(--intent);
+  color: var(--rebel-paper);
+  background: var(--rebel-raised);
+}
+
+.mission-view-tabs button:not(:disabled):hover {
+  color: var(--rebel-paper);
+  background: var(--rebel-raised);
+}
+
+.mission-view-tabs button:focus-visible,
+.workspace-changes-header button:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}
+
+.workspace-changes {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  color: var(--rebel-paper);
+  background: var(--rebel-raised);
+}
+
+.workspace-changes-header {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--rebel-line);
+}
+
+.workspace-changes-count {
+  min-width: 0;
+  margin: 0;
+  color: var(--rebel-paper-muted);
+  font: 800 9px "Cascadia Code", Consolas, monospace;
+  overflow-wrap: anywhere;
+}
+
+.workspace-changes-count strong {
+  color: var(--rebel-paper);
+  font-size: 13px;
+}
+
+.workspace-changes-header button {
+  flex: 0 0 auto;
+  min-height: 28px;
+  padding: 4px 7px;
+  border: 1px solid var(--rebel-line);
+  border-radius: 0;
+  color: var(--rebel-paper-muted);
+  background: var(--rebel-black);
+  font: 800 9px "Cascadia Code", Consolas, monospace;
+}
+
+.workspace-changes-header button:not(:disabled):hover {
+  border-color: var(--rebel-paper-muted);
+  color: var(--rebel-paper);
+  background: var(--rebel-black);
+}
+
+.workspace-changes-notice,
+.workspace-changes-empty,
+.loop-list-empty {
+  margin: 0;
+  padding: 9px 10px;
+  color: var(--rebel-paper-muted);
+  font-size: 10px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.workspace-changes-list {
+  min-width: 0;
+  min-height: 0;
+  margin: 0;
+  padding: 0 10px 8px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  list-style: none;
+  scrollbar-width: thin;
+  scrollbar-color: var(--rebel-line) var(--rebel-raised);
+}
+
+.workspace-changes-list li {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 4px;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--rebel-line);
+}
+
+.workspace-change-status {
+  width: max-content;
+  max-width: 100%;
+  padding: 2px 5px;
+  border: 1px solid var(--rebel-line);
+  color: var(--rebel-paper-muted);
+  font: 800 8px "Cascadia Code", Consolas, monospace;
+  letter-spacing: 0.04em;
+}
+
+.workspace-change-status.is-conflicted {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.workspace-change-path {
+  min-width: 0;
+  color: var(--rebel-paper);
+  font: 600 10px/1.45 "Cascadia Code", Consolas, monospace;
+  overflow-wrap: anywhere;
+}
+
+.app-shell > .composer-wrap > .loop-list > .workspace-changes .workspace-changes-list {
+  max-height: min(220px, 32vh);
+}
+
+@media (max-width: 600px) {
+  .app-shell > .composer-wrap > .loop-list.mobile-sheet-surface > .workspace-changes .workspace-changes-list {
+    max-height: none;
+    overflow: visible;
+  }
+}
+
 @media (min-width: 1400px) {
   .app-shell {
     --mission-command-width: clamp(232px, 16vw, 288px);
@@ -59,6 +214,21 @@
     background: var(--rebel-red);
     transform: rotate(-11deg);
     content: "";
+  }
+
+  .mission-command-header > .mission-view-tabs {
+    position: relative;
+    z-index: 1;
+    margin: 4px -18px 10px;
+  }
+
+  .mission-command > .workspace-changes {
+    flex: 1 1 auto;
+  }
+
+  .mission-command > .workspace-changes .workspace-changes-list {
+    flex: 1 1 auto;
+    max-height: none;
   }
 
   .mission-command-kicker,

@@ -543,7 +543,30 @@
   margin-bottom: 0;
 }
 
-.markdown a {
+.markdown .local-image-link {
+  display: inline;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  font: inherit;
+  text-align: inherit;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-decoration: underline;
+}
+
+.markdown .local-image-link:not(:disabled):hover,
+.markdown .local-image-link:not(:disabled):active {
+  background: transparent;
+  transform: none;
+}
+
+.markdown a,
+.markdown .local-image-link {
   color: color-mix(in srgb, var(--accent) 78%, #286da8);
   font-weight: 550;
   text-decoration-color: color-mix(in srgb, currentColor 42%, transparent);
@@ -551,7 +574,8 @@
   text-underline-offset: 0.18em;
 }
 
-.markdown a:hover {
+.markdown a:hover,
+.markdown .local-image-link:hover {
   text-decoration-color: currentColor;
 }
 

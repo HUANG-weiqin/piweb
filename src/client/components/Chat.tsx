@@ -30,6 +30,7 @@ import {
   type ServiceTier,
   type ThinkingLevel,
   type TokenUsage,
+  type WorkspaceChangesSnapshot,
 } from "../../shared/protocol";
 import { type ChatState } from "../chat/reducer";
 import {
@@ -47,8 +48,10 @@ import { Message } from "./Message";
 import {
   MissionCommandSurface,
   type MissionCommandStatus,
+  type MissionCommandView,
 } from "./MissionCommandSurface";
 import { SessionMessageCard } from "./SessionMessageCard";
+import { WorkspaceChangesPanel } from "./WorkspaceChangesPanel";
 
 const FOLLOW_COMFORT_LIMIT_PX = 96;
 const FOLLOW_COMFORT_TARGET_PX = 32;
@@ -128,6 +131,10 @@ interface ChatProps {
   busy: boolean;
   activeRun?: PublicState["activeRun"];
   loopList?: LoopList;
+  workspaceChanges?: WorkspaceChangesSnapshot;
+  workspaceChangesLoading?: boolean;
+  onRefreshWorkspaceChanges?(): void;
+  onWorkspaceChangesVisibilityChange?(visible: boolean): void;
   sessionTokenUsage?: TokenUsage;
   contextTokenCount: number | null | undefined;
   contextWindow: number | null | undefined;
@@ -192,6 +199,7 @@ interface ChatProps {
   onOpenConversation?(conversationId: string): void;
   onBlockingModalChange?(blocking: boolean): void;
   onOpenImage?(source: ConversationImageLocator): void;
+  onOpenLocalImage?(path: string): void;
   onRewind(messageId: string, text: string): void;
   rewindingMessageId?: string;
 }
@@ -297,6 +305,10 @@ function ChatView({
   busy,
   activeRun,
   loopList = { items: [], armed: false },
+  workspaceChanges,
+  workspaceChangesLoading,
+  onRefreshWorkspaceChanges,
+  onWorkspaceChangesVisibilityChange,
   sessionTokenUsage,
   contextTokenCount,
   contextWindow,
@@ -349,6 +361,7 @@ function ChatView({
   onOpenConversation,
   onBlockingModalChange,
   onOpenImage,
+  onOpenLocalImage,
   onRewind,
   rewindingMessageId,
 }: ChatProps) {
@@ -399,10 +412,26 @@ function ChatView({
   const positionedTranscriptKeyRef = useRef<string | undefined>(undefined);
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
   const [loopListExpanded, setLoopListExpanded] = useState(false);
+  const [missionSelection, setMissionSelection] = useState<{
+    cwd: string;
+    view: MissionCommandView;
+  }>({ cwd, view: "objectives" });
+  const showWorkspaceChanges = onWorkspaceChangesVisibilityChange !== undefined;
+  const missionView = showWorkspaceChanges && missionSelection.cwd === cwd
+    ? missionSelection.view
+    : "objectives";
+  const [wideMission, setWideMission] = useState(() =>
+    typeof window.matchMedia === "function"
+    && window.matchMedia("(min-width: 1400px)").matches);
   const [roleDetailsOpen, setRoleDetailsOpen] = useState(false);
   const [compactionThresholdOpen, setCompactionThresholdOpen] = useState(false);
   const [mobileSheet, setMobileSheet] = useState<"tasks" | "pending" | "controls">();
   const visibleMobileSheet = mobileActive && conversationReady ? mobileSheet : undefined;
+  const workspaceChangesVisible = showWorkspaceChanges && missionView === "changes" && (
+    mobile ? mobileActive && !wideMission && visibleMobileSheet === "tasks" : true
+  );
+  const selectMissionView = (view: MissionCommandView) =>
+    setMissionSelection({ cwd, view });
   const closeMobileSheet = useCallback(() => setMobileSheet(undefined), []);
   const mobileSheetFocusRef = useModalFocus<HTMLDivElement>(
     visibleMobileSheet !== undefined,
@@ -413,6 +442,22 @@ function ChatView({
   const [compactionThresholdDraft, setCompactionThresholdDraft] =
     useState(compactionThresholdPercent);
   const requestedCompactionThreshold = useRef(compactionThresholdPercent);
+  useEffect(() => {
+    if (typeof window.matchMedia !== "function") return;
+    const query = window.matchMedia("(min-width: 1400px)");
+    const onChange = (event: MediaQueryListEvent) => setWideMission(event.matches);
+    setWideMission(query.matches);
+    query.addEventListener("change", onChange);
+    return () => query.removeEventListener("change", onChange);
+  }, []);
+  useEffect(() => {
+    if (missionSelection.cwd !== cwd) setMissionSelection({ cwd, view: "objectives" });
+  }, [cwd, missionSelection.cwd]);
+  useEffect(() => {
+    if (!workspaceChangesVisible || !onWorkspaceChangesVisibilityChange) return;
+    onWorkspaceChangesVisibilityChange(true);
+    return () => onWorkspaceChangesVisibilityChange(false);
+  }, [onWorkspaceChangesVisibilityChange, workspaceChangesVisible]);
   useEffect(() => {
     if (compactionThresholdBusy) return;
     setCompactionThresholdDraft(compactionThresholdPercent);
@@ -517,10 +562,10 @@ function ChatView({
   }, [onBlockingModalChange, roleDetailsOpen]);
   useEffect(() => {
     if (
-      (mobileSheet === "tasks" && loopListEmpty)
+      (mobileSheet === "tasks" && loopListEmpty && !showWorkspaceChanges)
       || (mobileSheet === "pending" && pendingAdmissions.length === 0)
     ) closeMobileSheet();
-  }, [closeMobileSheet, loopListEmpty, mobileSheet, pendingAdmissions.length]);
+  }, [closeMobileSheet, loopListEmpty, mobileSheet, pendingAdmissions.length, showWorkspaceChanges]);
   const activeRunId = activeRun?.id;
   const expandedAssistantMessageIds = useMemo(() => {
     const assistantMessages = blocks.flatMap((block) => (
@@ -936,6 +981,7 @@ function ChatView({
           key={`${transcriptRenderScopeKey}:message:${block.message.id}`}
           message={block.message}
           onOpenImage={onOpenImage}
+          onOpenLocalImage={onOpenLocalImage}
           onRewind={block.message.role === "user" ? handleRewind : undefined}
           rewindDisabled={
             busy
@@ -977,6 +1023,12 @@ function ChatView({
       </div>}
     </section>
     <MissionCommandSurface
+      view={missionView}
+      showWorkspaceChanges={showWorkspaceChanges}
+      workspaceChanges={workspaceChanges}
+      workspaceChangesLoading={workspaceChangesLoading}
+      onRefreshWorkspaceChanges={onRefreshWorkspaceChanges}
+      onSelectView={selectMissionView}
       loopListItems={loopListItems}
       completedItemCount={completedLoopListItems}
       remainingItemCount={remainingLoopListItems}
@@ -1062,7 +1114,7 @@ function ChatView({
           </div>
         ))}
       </section>}
-      {loopListItems.length > 0 && <section
+      {(loopListItems.length > 0 || showWorkspaceChanges) && <section
         className={`loop-list${mobile ? " mobile-sheet-surface" : ""}`}
         aria-label={visibleMobileSheet === "tasks" ? "任务" : "Tasks"}
         hidden={Boolean(mobile && visibleMobileSheet !== "tasks")}
@@ -1076,37 +1128,51 @@ function ChatView({
             onClick={closeMobileSheet}
           >×</button>
         </header>}
-        <button
-          type="button"
-          className="loop-list-toggle"
-          aria-expanded={loopListExpanded}
-          onClick={() => setLoopListExpanded((expanded) => !expanded)}
-        >
-          <span className="loop-list-title">Tasks</span>
-          <span className={`loop-list-status ${loopListStatusKey}`}>
-            {loopListStatusLabel}
-          </span>
-          <span className="loop-list-count">
-            {completedLoopListItems}/{loopListItems.length}
-            {remainingLoopListItems > 0 && ` · ${remainingLoopListItems} 项未完成`}
-          </span>
-          <span aria-hidden="true">{loopListExpanded ? "⌃" : "⌄"}</span>
-        </button>
-        {loopListExpanded && <ul className="loop-list-items">
-          {loopListItems.map((item) => <li
-            key={item.id}
-            className={`loop-list-item ${item.status}`}
-          >
-            <span
-              className="loop-list-item-marker"
-              role="img"
-              aria-label={LOOP_LIST_ITEM_STATUS_LABELS[item.status]}
-            >
-              {LOOP_LIST_ITEM_STATUS_SYMBOLS[item.status]}
-            </span>
-            <span className="loop-list-item-text">{item.text}</span>
-          </li>)}
-        </ul>}
+        {showWorkspaceChanges && <div className="mission-view-tabs" role="group" aria-label="Mission view">
+          <button type="button" aria-pressed={missionView === "objectives"} onClick={() => selectMissionView("objectives")}>OBJECTIVES</button>
+          <button type="button" aria-pressed={missionView === "changes"} onClick={() => selectMissionView("changes")}>工作区改动</button>
+        </div>}
+        {missionView === "changes" && showWorkspaceChanges
+          ? <WorkspaceChangesPanel
+            snapshot={workspaceChanges}
+            loading={workspaceChangesLoading}
+            onRefresh={onRefreshWorkspaceChanges}
+          />
+          : loopListItems.length > 0
+            ? <>
+              <button
+                type="button"
+                className="loop-list-toggle"
+                aria-expanded={loopListExpanded}
+                onClick={() => setLoopListExpanded((expanded) => !expanded)}
+              >
+                <span className="loop-list-title">Tasks</span>
+                <span className={`loop-list-status ${loopListStatusKey}`}>
+                  {loopListStatusLabel}
+                </span>
+                <span className="loop-list-count">
+                  {completedLoopListItems}/{loopListItems.length}
+                  {remainingLoopListItems > 0 && ` · ${remainingLoopListItems} 项未完成`}
+                </span>
+                <span aria-hidden="true">{loopListExpanded ? "⌃" : "⌄"}</span>
+              </button>
+              {loopListExpanded && <ul className="loop-list-items">
+                {loopListItems.map((item) => <li
+                  key={item.id}
+                  className={`loop-list-item ${item.status}`}
+                >
+                  <span
+                    className="loop-list-item-marker"
+                    role="img"
+                    aria-label={LOOP_LIST_ITEM_STATUS_LABELS[item.status]}
+                  >
+                    {LOOP_LIST_ITEM_STATUS_SYMBOLS[item.status]}
+                  </span>
+                  <span className="loop-list-item-text">{item.text}</span>
+                </li>)}
+              </ul>}
+            </>
+            : <p className="loop-list-empty">当前没有计划目标。</p>}
       </section>}
       {submitting && !promptNotice && <div
         className="composer-notice pending"
@@ -1150,13 +1216,15 @@ function ChatView({
         </div>
       </div>
       {mobile && <div className="mobile-composer-launchers" aria-label="会话辅助面板">
-        {loopListItems.length > 0 && <button
+        {(loopListItems.length > 0 || showWorkspaceChanges) && <button
           type="button"
           aria-label="打开任务"
           disabled={!conversationReady}
           aria-expanded={visibleMobileSheet === "tasks"}
           onClick={() => setMobileSheet("tasks")}
-        >TASKS <span>{remainingLoopListItems}</span></button>}
+        >{showWorkspaceChanges ? "任务 / 改动" : "TASKS"}
+          {loopListItems.length > 0 && <span>{remainingLoopListItems}</span>}
+        </button>}
         {pendingAdmissions.length > 0 && <button
           type="button"
           aria-label="打开等待中"

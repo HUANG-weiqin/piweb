@@ -21,7 +21,7 @@ import { RoleCatalog } from "../server/role-catalog.js";
 import { attachSocketServer } from "../server/socket-server.js";
 import { CLAUDE_MESSAGE_PREFIX } from "./conversation-text.js";
 import { PiWebBridge } from "./piweb-bridge.js";
-import { PiWebBridgeError, resolvePiWebUrl } from "./piweb-session.js";
+import { PiWebBridgeError, PiWebSession, resolvePiWebUrl } from "./piweb-session.js";
 
 const cleanups: (() => Promise<void>)[] = [];
 
@@ -371,6 +371,33 @@ async function fakePiWeb(
 }
 
 describe("PiWebBridge safety boundaries", () => {
+  it("accepts the current protocol but ignores browser-only image bytes and workspace changes", async () => {
+    const { baseUrl } = await fakePiWeb((command, send) => {
+      if (command.type !== "refresh_view") return;
+      send({
+        type: "local_image", sessionId: command.sessionId,
+        conversationId: randomUUID(), focusId: randomUUID(), commandId: randomUUID(),
+        path: "E:/a.png", mimeType: "image/png", data: "iVBORw0KGgo=",
+      });
+      send({
+        type: "workspace_changes", sessionId: command.sessionId,
+        projectId: command.projectId, commandId: randomUUID(), snapshot: { state: "not_git" },
+      });
+      send({ type: "project_snapshot", sessionId: command.sessionId, projectId: command.projectId,
+        conversations: [], truncated: false, coverage: "complete" });
+    });
+    const session = await PiWebSession.connect(baseUrl);
+    try {
+      const check = vi.fn((event: ServerEvent | undefined) => event?.type === "project_snapshot" ? true : undefined);
+      const waiting = session.waitUntil(check, { timeoutMs: 2_000, what: "project snapshot" });
+      session.send({ type: "refresh_view", sessionId: session.sessionId, projectId: randomUUID() });
+      await expect(waiting).resolves.toBe(true);
+      expect(check.mock.calls.some(([event]) => event?.type === "local_image")).toBe(false);
+      expect(check.mock.calls.some(([event]) => event?.type === "workspace_changes")).toBe(false);
+    } finally {
+      await session.close();
+    }
+  });
   it("refuses a Pi Web server that speaks a different protocol version", async () => {
     const { baseUrl, received } = await fakePiWeb(() => undefined, PROTOCOL_VERSION + 1);
     const bridge = new PiWebBridge({ baseUrl, defaultCwd: tmpdir(), commandTimeoutMs: 2_000 });

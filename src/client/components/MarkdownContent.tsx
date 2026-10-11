@@ -17,6 +17,7 @@ import {
   type Tokens,
 } from "marked";
 import { useModalFocus } from "../lib/use-modal-focus";
+import { localImagePath } from "../../shared/local-image-path";
 
 const KATEX_OPTIONS = {
   maxExpand: 1_000,
@@ -190,6 +191,43 @@ const mathExtension: MarkedExtension = {
 
 const markdownParser = new Marked(mathExtension);
 
+function localImageLinkPath(href: string): string | undefined {
+  if (/^file:/i.test(href)) return localImagePath(href);
+  try {
+    return localImagePath(decodeURIComponent(href));
+  } catch {
+    return localImagePath(href);
+  }
+}
+
+function localImageButton(path: string, label: string): string {
+  return `<button type="button" class="local-image-link" data-piweb-local-image="${escapeHtml(path)}" title="查看本地图片：${escapeHtml(path)}">${label} ↗</button>`;
+}
+
+// Unquoted paths stop at whitespace/punctuation. Paths with spaces belong in
+// a Markdown link or inline code, where their exact boundary is unambiguous.
+const BARE_IMAGE_PATH = /(?:^|[\s(（])((?:file:\/\/\/|[a-z]:[\\/]|\/(?!\/)|\.\.?[\\/])[^\s<>"'`[\]{}]*?\.(?:png|jpe?g|webp|gif))(?=$|[\s，。！？；：、)>}\]"'])/i;
+const localImageMarkdownParser = new Marked(mathExtension, {
+  extensions: [{
+    name: "localImagePath",
+    level: "inline",
+    start(source) {
+      const match = BARE_IMAGE_PATH.exec(source);
+      return match ? match.index + match[0].indexOf(match[1]) : undefined;
+    },
+    tokenizer(source) {
+      const match = BARE_IMAGE_PATH.exec(source);
+      if (!match || match.index !== 0 || match[0] !== match[1]) return undefined;
+      const path = localImagePath(match[1]);
+      if (!path) return undefined;
+      return { type: "localImagePath", raw: match[1], text: path };
+    },
+    renderer(token) {
+      return localImageButton(token.text, escapeHtml(token.raw));
+    },
+  }],
+});
+
 const MERMAID_MAX_SOURCE_LENGTH = 50_000;
 export const MERMAID_MAX_BLOCKS_PER_CONTENT = 8;
 export const MERMAID_MAX_TOTAL_SOURCE_LENGTH = 100_000;
@@ -352,8 +390,29 @@ const decorateWebLink: ElementHook = (currentNode) => {
   currentNode.setAttribute("rel", "noopener noreferrer");
 };
 
-function renderMarkdown(markdown: string, mermaidMarker?: string): string {
+function renderMarkdown(
+  markdown: string,
+  mermaidMarker?: string,
+  allowLocalImages = false,
+): string {
   const renderer = new Renderer();
+  if (allowLocalImages) {
+    const renderLink = renderer.link;
+    const renderImage = renderer.image;
+    const renderCodeSpan = renderer.codespan;
+    renderer.link = function renderLocalLink(token) {
+      const path = localImageLinkPath(token.href);
+      return path ? localImageButton(path, escapeHtml(token.text)) : renderLink.call(this, token);
+    };
+    renderer.image = function renderLocalImage(token) {
+      const path = localImageLinkPath(token.href);
+      return path ? localImageButton(path, escapeHtml(token.text || "查看图片")) : renderImage.call(this, token);
+    };
+    renderer.codespan = function renderLocalCodeSpan(token) {
+      const path = localImagePath(token.text);
+      return path ? localImageButton(path, `<code>${escapeHtml(token.text)}</code>`) : renderCodeSpan.call(this, token);
+    };
+  }
   if (mermaidMarker) {
     const renderCode = renderer.code;
     renderer.code = function renderCodeToken(token) {
@@ -365,7 +424,8 @@ function renderMarkdown(markdown: string, mermaidMarker?: string): string {
   }
   DOMPurify.addHook("afterSanitizeAttributes", decorateWebLink);
   try {
-    return DOMPurify.sanitize(markdownParser.parse(markdown, {
+    const parser = allowLocalImages ? localImageMarkdownParser : markdownParser;
+    return DOMPurify.sanitize(parser.parse(markdown, {
       async: false,
       renderer,
     }) as string);
@@ -586,6 +646,7 @@ interface MarkdownContentProps {
   mermaidMaxBlocks?: number;
   mermaidMaxTotalSourceLength?: number;
   onRenderSettled?(): void;
+  onOpenLocalImage?(path: string): void;
 }
 
 function MarkdownContentView({
@@ -595,13 +656,14 @@ function MarkdownContentView({
   mermaidMaxBlocks = MERMAID_MAX_BLOCKS_PER_CONTENT,
   mermaidMaxTotalSourceLength = MERMAID_MAX_TOTAL_SOURCE_LENGTH,
   onRenderSettled,
+  onOpenLocalImage,
 }: MarkdownContentProps) {
   const rootRef = useRef<HTMLDivElement>(null);
   const [expandedSvg, setExpandedSvg] = useState<SVGSVGElement | null>(null);
   const rendered = useMemo(() => {
     const marker = renderMermaid ? createMarker() : undefined;
     return {
-      html: renderMarkdown(markdown, marker),
+      html: renderMarkdown(markdown, marker, onOpenLocalImage !== undefined),
       marker,
     };
   }, [
@@ -609,6 +671,7 @@ function MarkdownContentView({
     mermaidMaxBlocks,
     mermaidMaxTotalSourceLength,
     renderMermaid,
+    onOpenLocalImage,
   ]);
   // The rendered diagrams live inside this opaque subtree. Keep the prop stable
   // so opening the viewer does not make React restore the original code fences.
@@ -673,8 +736,17 @@ function MarkdownContentView({
     rendered,
   ]);
 
-  const openMermaidViewer = (event: ReactMouseEvent<HTMLDivElement>) => {
+  const handleContentClick = (event: ReactMouseEvent<HTMLDivElement>) => {
     if (!(event.target instanceof Element)) return;
+    const imageTrigger = event.target.closest<HTMLButtonElement>("button[data-piweb-local-image]");
+    if (imageTrigger && event.currentTarget.contains(imageTrigger)) {
+      const path = localImagePath(imageTrigger.dataset.piwebLocalImage ?? "");
+      if (path && onOpenLocalImage) {
+        event.preventDefault();
+        onOpenLocalImage(path);
+      }
+      return;
+    }
     const trigger = event.target.closest<HTMLButtonElement>(
       "button[data-piweb-mermaid-expand]",
     );
@@ -689,7 +761,7 @@ function MarkdownContentView({
     <div
       ref={rootRef}
       className={className}
-      onClick={openMermaidViewer}
+      onClick={handleContentClick}
       dangerouslySetInnerHTML={dangerousHtml}
     />
     {expandedSvg && <MermaidViewer
