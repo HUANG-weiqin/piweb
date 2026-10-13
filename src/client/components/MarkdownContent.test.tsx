@@ -42,6 +42,21 @@ describe("local image paths", () => {
     });
   });
 
+  it.each([
+    [String.raw`[查看图片](E:\shots\.artifacts\_result.png)`, String.raw`E:\shots\.artifacts\_result.png`],
+    [String.raw`![查看图片](<E:\shots\.artifacts\_result 01.png> "标题")`, String.raw`E:\shots\.artifacts\_result 01.png`],
+    [String.raw`[查看图片](.\shots\_result.png)`, String.raw`.\shots\_result.png`],
+    [String.raw`[查看图片](E:\shots\folder(1)\_result.png "标题")`, String.raw`E:\shots\folder(1)\_result.png`],
+    [String.raw`[查看图片][preview]` + "\n\n" + String.raw`[preview]: <E:\shots\.artifacts\_result.png> "标题"`, String.raw`E:\shots\.artifacts\_result.png`],
+    [String.raw`[查看图片](./shots/result\(1\).png "标题")`, "./shots/result(1).png"],
+    [String.raw`[查看图片](E:/shots/result\(1\).png "标题")`, "E:/shots/result(1).png"],
+  ])("preserves local path separators in %s", (markdown, path) => {
+    const onOpenLocalImage = vi.fn();
+    render(<MarkdownContent className="markdown" markdown={markdown} onOpenLocalImage={onOpenLocalImage} />);
+    fireEvent.click(screen.getByRole("button"));
+    expect(onOpenLocalImage).toHaveBeenCalledExactlyOnceWith(path);
+  });
+
   it("escapes path attributes and labels without enabling embedded HTML handlers", () => {
     const onOpenLocalImage = vi.fn();
     const path = '/tmp/a" onclick="alert(1).png';
@@ -62,6 +77,12 @@ describe("local image paths", () => {
         "[文件](file:///E:/secret.txt)",
         "[脚本](javascript:alert(1))",
         "[网络共享](file://server/share/a.png)",
+        String.raw`[UNC 路径](\\server\share\a.png)`,
+        String.raw`![UNC 图片](\\server\share\a.png)`,
+        String.raw`![设备路径](\\?\E:\shots\a.png)`,
+        String.raw`[非图片](E:\shots\.private\_notes.txt)`,
+        String.raw`[HTTP 链接](https://example.com/\_image.png)`,
+        String.raw`[非本机文件 URL](file://server/share/\_image.png)`,
         "`E:\\secret.txt`",
         "```text\nE:\\screenshots\\code.png\n```",
         "[网络图片](https://example.com/a.png)",
@@ -73,9 +94,14 @@ describe("local image paths", () => {
       onOpenLocalImage={onOpenLocalImage}
     />);
     expect(screen.queryByRole("button")).toBeNull();
+    expect(screen.queryByRole("link", { name: "UNC 路径" })).toBeNull();
+    expect(container.querySelector("img")).toBeNull();
     expect(container.querySelector('[href^="file:"]')).toBeNull();
     expect(screen.getByRole("link", { name: "网络图片" })).toHaveAttribute(
       "href", "https://example.com/a.png",
+    );
+    expect(screen.getByRole("link", { name: "HTTP 链接" })).toHaveAttribute(
+      "href", "https://example.com/_image.png",
     );
     expect(onOpenLocalImage).not.toHaveBeenCalled();
   });

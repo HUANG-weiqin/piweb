@@ -13,6 +13,7 @@ import katex, { type KatexOptions } from "katex";
 import {
   Marked,
   Renderer,
+  Tokenizer,
   type MarkedExtension,
   type Tokens,
 } from "marked";
@@ -200,6 +201,13 @@ function localImageLinkPath(href: string): string | undefined {
   }
 }
 
+function windowsLinkDestination(raw: string | undefined): string | undefined {
+  const href = raw?.trim().replace(/^<([\s\S]*)>$/, "$1");
+  // Native Windows destinations use literal separators, not Markdown escapes.
+  // Preserve UNC/device syntax too, so localImagePath can still reject it.
+  return href && /^(?:[a-z]:\\|\.\.?\\|\\\\)/i.test(href) ? href : undefined;
+}
+
 function localImageButton(path: string, label: string): string {
   return `<button type="button" class="local-image-link" data-piweb-local-image="${escapeHtml(path)}" title="查看本地图片：${escapeHtml(path)}">${label} ↗</button>`;
 }
@@ -208,6 +216,22 @@ function localImageButton(path: string, label: string): string {
 // a Markdown link or inline code, where their exact boundary is unambiguous.
 const BARE_IMAGE_PATH = /(?:^|[\s(（])((?:file:\/\/\/|[a-z]:[\\/]|\/(?!\/)|\.\.?[\\/])[^\s<>"'`[\]{}]*?\.(?:png|jpe?g|webp|gif))(?=$|[\s，。！？；：、)>}\]"'])/i;
 const localImageMarkdownParser = new Marked(mathExtension, {
+  tokenizer: {
+    link(source) {
+      const token = Tokenizer.prototype.link.call(this, source);
+      if (!token) return false;
+      // Let Marked own labels, balanced parentheses and titles; recover only
+      // the destination from its matched source before punctuation unescaping.
+      token.href = windowsLinkDestination(this.rules.inline.link.exec(token.raw)?.[2]) ?? token.href;
+      return token;
+    },
+    def(source) {
+      const token = Tokenizer.prototype.def.call(this, source);
+      if (!token) return false;
+      token.href = windowsLinkDestination(this.rules.block.def.exec(token.raw)?.[2]) ?? token.href;
+      return token;
+    },
+  },
   extensions: [{
     name: "localImagePath",
     level: "inline",
@@ -402,11 +426,15 @@ function renderMarkdown(
     const renderCodeSpan = renderer.codespan;
     renderer.link = function renderLocalLink(token) {
       const path = localImageLinkPath(token.href);
-      return path ? localImageButton(path, escapeHtml(token.text)) : renderLink.call(this, token);
+      if (path) return localImageButton(path, escapeHtml(token.text));
+      if (windowsLinkDestination(token.href)) return escapeHtml(token.text);
+      return renderLink.call(this, token);
     };
     renderer.image = function renderLocalImage(token) {
       const path = localImageLinkPath(token.href);
-      return path ? localImageButton(path, escapeHtml(token.text || "查看图片")) : renderImage.call(this, token);
+      if (path) return localImageButton(path, escapeHtml(token.text || "查看图片"));
+      if (windowsLinkDestination(token.href)) return escapeHtml(token.text);
+      return renderImage.call(this, token);
     };
     renderer.codespan = function renderLocalCodeSpan(token) {
       const path = localImagePath(token.text);
