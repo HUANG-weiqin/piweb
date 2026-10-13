@@ -1,7 +1,7 @@
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import express from "express";
 import {
   InMemoryCredentialStore,
@@ -27,9 +27,8 @@ export const BUSY_PROMPT = "E2E busy task";
 export const STEER_PROMPT = "E2E follow-up";
 export const TITLE = "E2E automatic title";
 
-export const LOCAL_IMAGE_NAME = "preview 中文.png";
+export const LOCAL_IMAGE_NAME = ".preview/_preview 中文.png";
 export const LOCAL_IMAGE_DATA = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
-const FIRST_RESPONSE = `FIRST RESPONSE\n\n[查看本地图片](./${encodeURIComponent(LOCAL_IMAGE_NAME)})`;
 const BUSY_RESPONSE = "BUSY RESPONSE";
 const FOLLOW_UP_RESPONSE = "FOLLOW-UP RESPONSE";
 const FIXTURE_PROVIDER = "interaction-fixture";
@@ -254,7 +253,10 @@ export async function startInteractionFixture(
   process.env[AGENT_DIR_ENV] = agentDir;
   try {
     await Promise.all([mkdir(cwd), mkdir(agentDir)]);
-    await writeFile(join(cwd, LOCAL_IMAGE_NAME), Buffer.from(LOCAL_IMAGE_DATA, "base64"));
+    const localImagePath = join(cwd, LOCAL_IMAGE_NAME);
+    await mkdir(dirname(localImagePath));
+    await writeFile(localImagePath, Buffer.from(LOCAL_IMAGE_DATA, "base64"));
+    const firstResponse = `FIRST RESPONSE\n\n[查看本地图片](<${localImagePath}>)`;
     const createModelRuntime = async (
       options: CreateModelRuntimeOptions,
     ): Promise<ModelRuntime> => {
@@ -302,7 +304,7 @@ export async function startInteractionFixture(
             ? BUSY_RESPONSE
             : lastText === STEER_PROMPT
               ? FOLLOW_UP_RESPONSE
-              : FIRST_RESPONSE;
+              : firstResponse;
           return responseStream(
             response,
             lastText === BUSY_PROMPT ? busyTurnGate.promise : undefined,

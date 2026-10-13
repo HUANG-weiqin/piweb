@@ -298,7 +298,8 @@ async function main(): Promise<void> {
     assert.equal(localResponse.sessionId, initialSnapshot.sessionId);
     assert.equal(localResponse.conversationId, conversationId);
     assert.equal(localResponse.focusId, initialSnapshot.focusId);
-    assert.equal(localResponse.path, `./${LOCAL_IMAGE_NAME}`);
+    assert.equal(localCommand.path, join(fixture.cwd, LOCAL_IMAGE_NAME), "native path separators must survive Markdown parsing");
+    assert.equal(localResponse.path, localCommand.path);
     assert.equal(localResponse.data, LOCAL_IMAGE_DATA);
     const popup = await waitFor("native image popup", async () => {
       const pages = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json() as any[];
@@ -317,7 +318,7 @@ async function main(): Promise<void> {
     }
     assert.equal((await diskConversation(fixture.cwd, conversationId)).raw, firstDisk.raw, "local preview must not mutate history");
     evidence.localImagePreview = { clickOnly: true, exactBytes: true, nativePopupDecoded: true, historyUnchanged: true };
-    console.log("E2E: clicked local Unicode/space path opened in a native image tab without history writes");
+    console.log("E2E: clicked native absolute path (dot/underscore/Unicode/space) opened without history writes");
 
     const busyCommand = await send(BUSY_PROMPT);
     await waitFor("held streaming model call", () => fixture.log.some((event) => event.kind === "model_requested" && event.text?.includes(BUSY_PROMPT)));
