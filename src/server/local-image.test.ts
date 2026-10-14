@@ -2,14 +2,22 @@ import { mkdtemp, mkdir, open, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import * as fs from "node:fs/promises";
 import { MAX_CONVERSATION_IMAGE_BYTES } from "../shared/protocol.js";
 import { readLocalImage } from "./local-image.js";
+
+vi.mock("node:fs/promises", async (importOriginal) => ({
+  ...await importOriginal<typeof import("node:fs/promises")>(),
+}));
 
 const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a3xQAAAAASUVORK5CYII=", "base64");
 let cwd: string;
 beforeEach(async () => { cwd = await mkdtemp(join(tmpdir(), "piweb-local-image-")); });
-afterEach(async () => { await rm(cwd, { recursive: true, force: true }); });
+afterEach(async () => {
+  vi.restoreAllMocks();
+  await rm(cwd, { recursive: true, force: true });
+});
 
 describe("readLocalImage", () => {
   it("reads exact bytes for relative, absolute and file-URL paths, including spaces and Unicode", async () => {
@@ -53,6 +61,28 @@ describe("readLocalImage", () => {
     await file.truncate(MAX_CONVERSATION_IMAGE_BYTES + 1);
     await file.close();
     await expect(readLocalImage(cwd, "large.png")).rejects.toThrow("16 MiB");
+  });
+
+  it("retains the full 16 MiB image budget after sharing the finite file reader", async () => {
+    const bytes = Buffer.alloc(MAX_CONVERSATION_IMAGE_BYTES);
+    PNG.copy(bytes);
+    await writeFile(join(cwd, "full.png"), bytes);
+    expect(await readLocalImage(cwd, "full.png")).toEqual({ mimeType: "image/png", data: bytes.toString("base64") });
+  });
+
+  it("rejects an image changed between its pre-read and post-read stats", async () => {
+    const file = join(cwd, "changing.png");
+    await writeFile(file, PNG);
+    const handle = await open(file, "r");
+    const stat = handle.stat.bind(handle);
+    let reads = 0;
+    vi.spyOn(handle, "stat").mockImplementation(async () => {
+      const result = await stat({ bigint: true });
+      if (reads++ === 0) await fs.utimes(file, new Date(0), new Date(0));
+      return result;
+    });
+    vi.spyOn(fs, "open").mockResolvedValue(handle);
+    await expect(readLocalImage(cwd, "changing.png")).rejects.toThrow("发生变化");
   });
 
   it.each(["a.svg", "a.txt", "file://server/share/a.png", "\\\\server\\share\\a.png", "C:\\a.txt:stream.png"])(

@@ -371,7 +371,7 @@ async function fakePiWeb(
 }
 
 describe("PiWebBridge safety boundaries", () => {
-  it("accepts the current protocol but ignores browser-only image bytes and workspace changes", async () => {
+  it("accepts the current protocol but ignores browser-only file/image bytes and workspace changes", async () => {
     const { baseUrl } = await fakePiWeb((command, send) => {
       if (command.type !== "refresh_view") return;
       send({
@@ -380,8 +380,14 @@ describe("PiWebBridge safety boundaries", () => {
         path: "E:/a.png", mimeType: "image/png", data: "iVBORw0KGgo=",
       });
       send({
+        type: "local_file", sessionId: command.sessionId,
+        conversationId: randomUUID(), focusId: randomUUID(), commandId: randomUUID(),
+        path: "E:/report.md", fileName: "report.md", mimeType: "text/plain", data: "",
+      });
+      send({
         type: "workspace_changes", sessionId: command.sessionId,
-        projectId: command.projectId, commandId: randomUUID(), snapshot: { state: "not_git" },
+        projectId: command.projectId, commandId: randomUUID(),
+        snapshot: { state: "ready", branch: "main", files: [], total: 0, truncated: false },
       });
       send({ type: "project_snapshot", sessionId: command.sessionId, projectId: command.projectId,
         conversations: [], truncated: false, coverage: "complete" });
@@ -393,11 +399,31 @@ describe("PiWebBridge safety boundaries", () => {
       session.send({ type: "refresh_view", sessionId: session.sessionId, projectId: randomUUID() });
       await expect(waiting).resolves.toBe(true);
       expect(check.mock.calls.some(([event]) => event?.type === "local_image")).toBe(false);
+      expect(check.mock.calls.some(([event]) => event?.type === "local_file")).toBe(false);
       expect(check.mock.calls.some(([event]) => event?.type === "workspace_changes")).toBe(false);
     } finally {
       await session.close();
     }
   });
+  it("validates local file responses before ignoring them", async () => {
+    const { baseUrl } = await fakePiWeb((command, send) => {
+      if (command.type !== "refresh_view") return;
+      send({
+        type: "local_file", sessionId: command.sessionId,
+        conversationId: randomUUID(), focusId: randomUUID(), commandId: randomUUID(),
+        path: "report.md", fileName: "report.md", mimeType: "text/html", data: "",
+      } as unknown as ServerEvent);
+    });
+    const session = await PiWebSession.connect(baseUrl);
+    try {
+      const waiting = session.waitUntil(() => undefined, { timeoutMs: 2_000, what: "project snapshot" });
+      session.send({ type: "refresh_view", sessionId: session.sessionId, projectId: randomUUID() });
+      await expect(waiting).rejects.toMatchObject({ code: "protocol_mismatch" });
+    } finally {
+      await session.close();
+    }
+  });
+
   it("refuses a Pi Web server that speaks a different protocol version", async () => {
     const { baseUrl, received } = await fakePiWeb(() => undefined, PROTOCOL_VERSION + 1);
     const bridge = new PiWebBridge({ baseUrl, defaultCwd: tmpdir(), commandTimeoutMs: 2_000 });

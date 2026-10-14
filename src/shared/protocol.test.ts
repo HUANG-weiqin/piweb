@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   MAX_CONVERSATION_IMAGE_BYTES,
   MAX_CONVERSATION_IMAGE_DATA_CHARACTERS,
+  MAX_LOCAL_FILE_BYTES,
+  MAX_LOCAL_FILE_NAME_CHARACTERS,
   MAX_MESSAGE_BYTES,
   MAX_MODEL_REFERENCE_BYTES,
   MAX_PROJECT_CONVERSATION_NAME_CHARACTERS,
@@ -63,6 +65,48 @@ describe("parseClientCommand", () => {
     }
   });
 
+  it("strictly correlates local file reads, responses and errors with the full focus and path", () => {
+    const identity = { sessionId, conversationId, focusId, commandId };
+    const command = { type: "open_local_file", ...identity, path: "E:/godot/god/验收报告.md" };
+    const response = { type: "local_file", ...identity, path: command.path, fileName: "验收报告.md", mimeType: "text/plain", data: "" };
+    const error = { type: "error", scope: "command", operation: "open_local_file", message: "missing", ...identity };
+    expect(parseClientCommand(command)).toEqual(command);
+    expect(parseServerEvent(response)).toEqual(response);
+    expect(parseServerEvent(error)).toEqual(error);
+    for (const key of ["sessionId", "conversationId", "focusId", "commandId"]) {
+      expect(() => parseClientCommand({ ...command, [key]: undefined })).toThrow();
+      expect(() => parseServerEvent({ ...response, [key]: undefined })).toThrow();
+      expect(() => parseServerEvent({ ...error, [key]: undefined })).toThrow();
+    }
+    for (const path of [undefined, "file://server/a.md", "C:a.md", "a.txt:stream", "https://example.com/a.md", "a.md\n"]) {
+      expect(() => parseClientCommand({ ...command, path })).toThrow();
+      expect(() => parseServerEvent({ ...response, path })).toThrow();
+    }
+    expect(() => parseClientCommand({ ...command, messageId })).toThrow();
+    expect(() => parseServerEvent({ ...response, imageOrdinal: 0 })).toThrow();
+  });
+
+  it("only accepts inert file MIME types, safe basenames and bounded canonical Base64 including empty files", () => {
+    const response = { type: "local_file", sessionId, conversationId, focusId, commandId, path: "archive.zip",
+      fileName: "archive.zip", mimeType: "application/octet-stream", data: "AP8=" };
+    expect(parseServerEvent(response)).toEqual(response);
+    for (const mimeType of ["text/plain", "application/octet-stream"]) {
+      expect(parseServerEvent({ ...response, mimeType, data: "" })).toMatchObject({ mimeType, data: "" });
+    }
+    for (const mimeType of ["text/html", "image/svg+xml", "image/png", "application/json", "text/plain;charset=utf-8"]) {
+      expect(() => parseServerEvent({ ...response, mimeType })).toThrow();
+    }
+    for (const fileName of [undefined, "", ".", "..", "../file.md", "C:\\file.md", "a\n.txt", "a\u007f.txt", "a".repeat(MAX_LOCAL_FILE_NAME_CHARACTERS + 1)]) {
+      expect(() => parseServerEvent({ ...response, fileName })).toThrow();
+    }
+    for (const data of ["A", "AA", "AA=", "A===", "====", "AA==\n", "not base64", "AB==", "AAB=", "_w=="]) {
+      expect(() => parseServerEvent({ ...response, data })).toThrow();
+    }
+    const bytes = Buffer.alloc(MAX_LOCAL_FILE_BYTES + 1);
+    expect(parseServerEvent({ ...response, data: bytes.subarray(0, MAX_LOCAL_FILE_BYTES).toString("base64") })).toMatchObject({ type: "local_file" });
+    expect(() => parseServerEvent({ ...response, data: bytes.toString("base64") })).toThrow();
+  });
+
   it("correlates read-only workspace changes with the project, not conversation focus", () => {
     const command = { type: "refresh_workspace_changes", sessionId, projectId, commandId };
     expect(parseClientCommand(command)).toEqual(command);
@@ -73,9 +117,14 @@ describe("parseClientCommand", () => {
     expect(() => parseClientCommand({ ...command, conversationId, focusId })).toThrow();
     const response = {
       type: "workspace_changes", sessionId, projectId, commandId,
-      snapshot: { state: "ready", files: [{ path: "src/中文 file.ts", status: "modified" }], total: 1, truncated: false },
+      snapshot: { state: "ready", branch: "feature/中文-分支", files: [{ path: "src/中文 file.ts", status: "modified" }], total: 1, truncated: false },
     };
     expect(parseServerEvent(response)).toEqual(response);
+    expect(parseServerEvent({ ...response, snapshot: { ...response.snapshot, branch: null } }))
+      .toMatchObject({ snapshot: { branch: null } });
+    for (const branch of [undefined, "", "invalid branch", "x".repeat(4097)]) {
+      expect(() => parseServerEvent({ ...response, snapshot: { ...response.snapshot, branch } })).toThrow();
+    }
     expect(parseServerEvent({ ...response, snapshot: { state: "not_git" } })).toMatchObject({ snapshot: { state: "not_git" } });
     expect(parseServerEvent({ ...response, snapshot: { state: "error", message: "Git 不可用" } })).toMatchObject({ snapshot: { state: "error" } });
     for (const key of ["sessionId", "projectId", "commandId"]) {
@@ -95,7 +144,7 @@ describe("parseClientCommand", () => {
   });
 
   it("uses the run-correlated protocol version", () => {
-    expect(PROTOCOL_VERSION).toBe(73);
+    expect(PROTOCOL_VERSION).toBe(75);
   });
 
   it("lets initialize declare a connection without extension UI", () => {

@@ -1,8 +1,11 @@
 import { z } from "zod";
 import { localImagePath, MAX_LOCAL_IMAGE_PATH_CHARACTERS } from "./local-image-path.js";
+import { localFilePath, MAX_LOCAL_FILE_PATH_CHARACTERS } from "./local-file-path.js";
 
 const localImagePathSchema = z.string().max(MAX_LOCAL_IMAGE_PATH_CHARACTERS)
   .refine((value) => localImagePath(value) !== undefined, "Expected a local raster image path");
+const localFilePathSchema = z.string().max(MAX_LOCAL_FILE_PATH_CHARACTERS)
+  .refine((value) => localFilePath(value) !== undefined, "Expected a local file path");
 
 /** Complete client JSON frames, including Base64 images and escaped text. */
 export const MAX_MESSAGE_BYTES = 24 * 1024 * 1024;
@@ -30,6 +33,9 @@ export const MAX_PROMPT_IMAGE_BYTES = 16 * 1024 * 1024;
 export const MAX_CONVERSATION_IMAGE_BYTES = 16 * 1024 * 1024;
 export const MAX_CONVERSATION_IMAGE_DATA_CHARACTERS =
   Math.ceil(MAX_CONVERSATION_IMAGE_BYTES / 3) * 4;
+/** One-shot local file responses have an independent decoded byte budget. */
+export const MAX_LOCAL_FILE_BYTES = 16 * 1024 * 1024;
+export const MAX_LOCAL_FILE_NAME_CHARACTERS = 255;
 /** Durable history renders image input as this marker; image bytes stay out of snapshots. */
 export const PROMPT_IMAGE_PLACEHOLDER = "[图片]";
 export const MAX_PENDING_PROMPTS_PER_CONVERSATION = 64;
@@ -129,7 +135,9 @@ export const MAX_TRANSITION_DIAGNOSTIC_PHASE_MS = 60 * 60 * 1_000;
 // separate from persisted conversation image locators.
 // v73: on-demand, read-only workspace changes are project-scoped snapshots,
 // never Agent tools, conversation history, or high-frequency PublicState.
-export const PROTOCOL_VERSION = 73;
+// v74: ready workspace changes include the current branch, or null for detached HEAD.
+// v75: exact-focus local file reads return bounded inert bytes, separate from image previews.
+export const PROTOCOL_VERSION = 75;
 export const OBSERVATION_FATAL_CLOSE_CODE = 4002;
 export const COLOR_SCHEMES = ["quiet-rebel", "classic-rebel"] as const;
 export type ColorScheme = typeof COLOR_SCHEMES[number];
@@ -459,6 +467,32 @@ const conversationImageSchema = imagePayloadSchema(
 export type PromptImage = z.infer<typeof promptImageSchema>;
 export type ConversationImage = z.infer<typeof conversationImageSchema>;
 
+const localFileSchema = z.object({
+  fileName: z.string().min(1).max(MAX_LOCAL_FILE_NAME_CHARACTERS)
+    .regex(/^[^\\/\x00-\x1f\x7f]+$/)
+    .refine((name) => name !== "." && name !== "..", "Expected a safe basename"),
+  mimeType: z.enum(["text/plain", "application/octet-stream"]),
+  data: z.string().superRefine((data, context) => {
+    if (data.length > Math.ceil(MAX_LOCAL_FILE_BYTES / 3) * 4) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "file data exceeds its bounded payload" });
+      return;
+    }
+    // Canonical padding must also have zero unused bits; empty files are valid.
+    if (
+      !isCanonicalBase64(data)
+      || (data.endsWith("==") && !"AQgw".includes(data[data.length - 3]!))
+      || (data.endsWith("=") && !data.endsWith("==") && !"AEIMQUYcgkosw048".includes(data[data.length - 2]!))
+    ) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "file data must be canonical base64" });
+      return;
+    }
+    if (decodedPromptImageBytes(data) > MAX_LOCAL_FILE_BYTES) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "decoded file data exceeds its bounded payload" });
+    }
+  }),
+}).strict();
+export type LocalFile = z.infer<typeof localFileSchema>;
+
 /** Parses one uploaded image without retaining unknown fields. */
 export function parsePromptImage(value: unknown): PromptImage | undefined {
   const parsed = promptImageSchema.safeParse(value);
@@ -603,6 +637,7 @@ export type WorkspaceFileChange = z.infer<typeof workspaceFileChangeSchema>;
 const workspaceChangesSnapshotSchema = z.discriminatedUnion("state", [
   z.object({
     state: z.literal("ready"),
+    branch: z.string().min(1).max(4096).regex(/^[^\x00-\x20\x7f]+$/).nullable(),
     files: z.array(workspaceFileChangeSchema).max(MAX_WORKSPACE_CHANGE_FILES),
     total: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
     truncated: z.boolean(),
@@ -869,6 +904,14 @@ const clientCommandUnionSchema = z.discriminatedUnion("type", [
     focusId: focusIdSchema,
     messageId: conversationMessageIdSchema,
   }),
+  z.object({
+    type: z.literal("open_local_file"),
+    commandId: commandIdSchema,
+    sessionId: sessionIdSchema,
+    conversationId: conversationIdSchema,
+    focusId: focusIdSchema,
+    path: localFilePathSchema,
+  }).strict(),
   z.object({
     type: z.literal("open_local_image"),
     commandId: commandIdSchema,
@@ -1519,6 +1562,14 @@ export type ServerEvent =
       runId: string;
       reason: "manual" | "abort";
     }
+  | ({
+      type: "local_file";
+      sessionId: string;
+      conversationId: string;
+      focusId: string;
+      commandId: string;
+      path: string;
+    } & LocalFile)
   | {
       type: "local_image";
       sessionId: string;
@@ -1828,6 +1879,7 @@ const commandTypeSchema = z.enum([
   "truncate_conversation",
   "open_image",
   "open_local_image",
+  "open_local_file",
   "create_role",
   "update_role",
   "delete_role",
@@ -2352,6 +2404,14 @@ const serverEventUnionSchema = z.discriminatedUnion("type", [
     runId: runIdSchema,
     reason: z.enum(["manual", "abort"]),
   }).strict(),
+  localFileSchema.extend({
+    type: z.literal("local_file"),
+    sessionId: sessionIdSchema,
+    conversationId: conversationIdSchema,
+    focusId: focusIdSchema,
+    commandId: commandIdSchema,
+    path: localFilePathSchema,
+  }).strict(),
   conversationImageSchema.extend({
     type: z.literal("local_image"),
     sessionId: sessionIdSchema,
@@ -2655,6 +2715,7 @@ export const serverEventSchema: z.ZodType<ServerEvent> = serverEventUnionSchema.
         event.operation === "set_service_tier"
         || event.operation === "open_image"
         || event.operation === "open_local_image"
+        || event.operation === "open_local_file"
       )
       && (
         event.sessionId === undefined
@@ -2682,6 +2743,7 @@ export const serverEventSchema: z.ZodType<ServerEvent> = serverEventUnionSchema.
         || event.operation === "truncate_conversation"
         || event.operation === "open_image"
         || event.operation === "open_local_image"
+        || event.operation === "open_local_file"
       )
       && !event.sessionId
     ) {

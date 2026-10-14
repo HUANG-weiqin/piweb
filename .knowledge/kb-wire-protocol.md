@@ -1,6 +1,6 @@
 # 线协议
 
-`updated: 2026-10-11`
+`updated: 2026-10-13`
 
 ## 这个模块是干什么的
 
@@ -28,14 +28,17 @@ ClientCommand
 | prompt/steer 图片 | PNG/JPEG/WebP/GIF、canonical Base64；最多 4 张，单张解码后 8 MiB、合计 16 MiB |
 | 客户端命令帧 | 完整 JSON 的 UTF-8 字节数最多 24 MiB，包含 Base64、文本转义和身份；发送前、共享 parser、WebSocket maxPayload 共用上限 |
 | 历史图片读取 | `open_image` 单张解码后 16 MiB；与上传预算独立，cold reopen 不套上传帧限制 |
-| 本地图片预览 | `open_local_image` 路径最多 4096 字符、普通文件原字节最多 16 MiB；仅 PNG/JPEG/WebP/GIF |
+| 本地图片预览 | `open_local_image` 路径最多 4096 字符、普通文件原字节非空且最多 16 MiB；仅 PNG/JPEG/WebP/GIF |
+| 本地文件读取 | `open_local_file` 独立响应预算 `MAX_LOCAL_FILE_BYTES=16 MiB`，允许空普通文件；canonical Base64，安全 basename 最多 255 字符，MIME 仅 `text/plain` 或 `application/octet-stream` |
 | 服务端事件 | 独立 64 MiB；发送前必须复验 schema、序列化及字节数，失败用固定 protocol error + 专用 close code 终止已丢帧的 observation |
 | 目录浏览 | 列表字节预算为 1,000,000 减 64 KiB，另受项数限制，不随命令帧扩大 |
 | Git 工作区改动 | 单次 Git status 最多 5 秒、合计 stdout/stderr 4 MiB；路径最多 4096 字符，响应最多 500 个唯一路径，完整 total 与截断标记分开 |
 
 浏览器上传读取原文件，不为上传预算强制缩放；Pi 的 `images.autoResize` 仍按用户偏好执行。图片随原始 user/tool-result message 持久化，普通 wire/history 只投影 marker 与精确 active-branch locator `{messageId: entry.id, imageOrdinal}`（user 用 offset，tool result 用 contentIndex）。`open_image → conversation_image` 是一次性、完整 focus + command + locator 关联的读取，服务端复验 MIME、Base64 和签名；客户端仅点击时建立临时 Blob URL。被预算裁掉 locator 的 marker 必须显示“图片已省略”，不能猜测图片来源。桌面截图另遵守[运行时截图边界](kb-server-runtime.md#桌面截图与坐标授权)。
 
-本地路径预览独立使用 `open_local_image → local_image`：两端均携带完整 `sessionId + conversationId + focusId + commandId + path`，错误也要求完整 focus + command identity；只读取点击时的当前磁盘，不产生 durable locator、不进 history/state/provider 上下文。路径拒绝网络共享、设备路径、drive-relative、ADS 与其它 URI scheme；相对路径以已提交项目 cwd 解析，用户显式点击的绝对图片路径允许在工作区外。服务端复核普通文件、大小、读取前后文件状态及 raster 签名，不开放静态目录或 SVG/HTML/任意文件内容。
+本地路径读取使用严格 `open_local_image → local_image` 或 `open_local_file → local_file`：两端均携带完整 `sessionId + conversationId + focusId + commandId + path`，错误也要求完整 focus + command identity；连接内 commandId 一次性，回发前复核 generation、view 与精确 focus，过时结果丢弃。只读取点击时的当前磁盘，不产生 durable locator、不进 history/state/provider 上下文。通用路径 owner `src/shared/local-file-path.ts` 接受 native 路径、local file URL 和相对路径，最多 4096 字符，拒绝网络共享、设备路径、drive-relative、ADS、其它 URI scheme 与控制字符；图片路径复用该校验并额外限制 raster 后缀，保留原 export。相对路径以已提交项目 cwd 解析，用户显式点击的绝对路径允许在工作区外。安全读由 `src/server/local-file.ts` 共享，realpath 再拒绝网络路径，以 `O_NONBLOCK` 打开后复核普通文件，按初始大小有限读取并比较前后 size/mtimeNs/ctimeNs；图片仍必须非空、不超过独立图片预算并通过 raster 签名校验。
+
+`local_file` 额外返回 `fileName + mimeType + data`；文件名是无分隔符/控制字符的安全 basename，Base64 必须规范（含零 padding bits）且解码后不超过独立 16 MiB 文件预算。`.md/.markdown/.txt/.log/.json/.csv/.yaml/.yml`（不区分大小写）仅返回 `text/plain`，其余（包括 HTML/SVG）仅返回 `application/octet-stream`；该路径不进行 HTML/SVG 主动渲染、不调用 OS 程序，不新增 HTTP 静态服务。
 
 协议版本历史以 `PROTOCOL_VERSION` 旁摘要为准，不在知识页复制版本流水账。当前不接受旧 `messages[]` transcript、缺少 ordered parts、直接 `select_model` 或项目级工具模式切换；持久格式的兼容范围与尚未兑现的承诺见[会话兼容性](kb-project-sessions.md#兼容性合同差异)。
 
@@ -46,7 +49,7 @@ ClientCommand
 - projectId/conversationId 是持久身份，sessionId 是浏览器项目观察 epoch，focusId 是一次 conversation attach，runId 是一次逻辑执行（可在宿主恢复中保持）；协议必须显式携带消费方需要的身份，不能混用。projectId 与所有 ephemeral correlation ID 是 UUID；conversationId 使用 Pi Web 的兼容策略（1–256 个 ASCII 字母数字及 `._-`，首尾为字母数字），以接纳常见的旧 durable Pi 非 UUID 会话，同时给 metadata、notebook 与 wire 一个共同的宿主上限；这不是 Pi SDK 自身的长度合同。
 - v70 更改浏览器 prompt 接收语义但不新增命令或事件字段：`run_queued` / `prompt_admitted` 均要求先持久 admission，Stop 不撤销已接收输入，同 ID 断线重发由服务端精确对账；旧浏览器恢复面板不能与新语义混用，因此协议版本推进。
 - `project_snapshot` 与 `role_catalog_snapshot` 用 `sessionId + projectId` 过滤；它们描述整个项目，不能因更新来自后台 conversation 就丢弃。
-- `refresh_workspace_changes → workspace_changes` 是按需项目观察，双方精确携带 `sessionId + projectId + commandId`，不接受任意 cwd，不绑定 conversation/focus；错误也必须携带 sessionId/commandId。PiConnection 直接读取当前已提交项目 cwd，不排到 Agent turn 或 actor 队列，单连接只允许一个在途；initialize/close/dispose 取消读取，回发前复核同一 view/generation。snapshot 为 `ready(files,total,truncated) | not_git | error(message)`；ready 的路径唯一、total 不小于展示数，truncated 严格表示 total 大于展示数。读取 owner `src/server/workspace-changes.ts` 使用固定非 shell porcelain v1 NUL 输出，禁 optional locks/fsmonitor 并清除继承的 GIT_* 转向；整个 worktree 按 Git ignore 观察，不区分暂存/工作区分组，不读 diff、不写 index、不持久缓存或进模型上下文。非 UTF-8、畸形输出、超时、超预算均整体失败而非伪完整或零改动；无 Git 工作树（含 bare repository）为 not_git。
+- `refresh_workspace_changes → workspace_changes` 是按需项目观察，双方精确携带 `sessionId + projectId + commandId`，不接受任意 cwd，不绑定 conversation/focus；错误也必须携带 sessionId/commandId。PiConnection 直接读取当前已提交项目 cwd，不排到 Agent turn 或 actor 队列，单连接只允许一个在途；initialize/close/dispose 取消读取，回发前复核同一 view/generation。snapshot 为 `ready(branch,files,total,truncated) | not_git | error(message)`；branch 必填 nullable，字符串最多 4096 字符且不含 ASCII 空白/控制字符，null 仅表示分离 HEAD，尚无提交的分支仍显示真实名称；ready 的路径唯一、total 不小于展示数，truncated 严格表示 total 大于展示数。读取 owner `src/server/workspace-changes.ts` 使用固定非 shell porcelain v1 `--branch` NUL 输出，从同一次 status 读取分支与文件，忽略 upstream/ahead/behind 展示字段，禁 optional locks/fsmonitor 并清除继承的 GIT_* 转向；整个 worktree 按 Git ignore 观察，不区分暂存/工作区分组，不读 diff、不写 index、不持久缓存或进模型上下文。非 UTF-8、畸形输出、超时、超预算均整体失败而非伪完整或零改动；无 Git 工作树（含 bare repository）为 not_git。
 - `project_activity_snapshot` 是连接级、跨当前 observation 的进程目录，只汇总 coordinator 已加载项目的 cwd/projectId、busy conversation 数和 coordinator-owned attention 数；它不携带 transcript、当前 focus 或浏览器私有 unread。最多 100 项，超出时置 `truncated=true`。
 - `conversation_run_settled` 是当前项目 observation 的实时结算边界：只在 actor 已持久写入精确 run settlement 并回到 idle 后发送，携带 `sessionId + projectId + conversationId + runId + outcome + createdBy`。它覆盖 focused 和后台 conversation，但不会由 initialize、refresh 或 snapshot 重放；浏览器不能从可能合并的 activity 快照反推这类瞬时完成事件。
 - v64 删除持久 Bash 收尾摘要；旧 `piweb.bash_execution_notice.v1` 仅严格读取兼容，不写入、不投影。v65 的 focused `conversation_snapshot.bashActivity` 与低频 `bash_activity` 改为会话级 `{ running, stopping, cleanupUnknown }` 或 null，移除 runId，计数和最多 8，idle 也可非空。live event 仍精确携带 `sessionId + conversationId + focusId`，不携带 stdout、任务表、历史结果或第二 busy；恢复读当前 Actor 而非历史工具结果。

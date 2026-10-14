@@ -669,7 +669,7 @@ describe("App", () => {
         sessionId: command.sessionId, commandId: command.commandId, message: "Git unavailable",
       } : {
         ...command, type: "workspace_changes", snapshot: outcome === "ready"
-          ? { state: "ready", files: [{ path: "src/file.ts", status: "modified" }], total: 1, truncated: false }
+          ? { state: "ready", branch: "main", files: [{ path: "src/file.ts", status: "modified" }], total: 1, truncated: false }
           : { state: "not_git" },
       }));
       const currentTasks = screen.getByRole("region", { name: "Tasks" });
@@ -766,6 +766,98 @@ describe("App", () => {
       }
     },
   );
+
+  it.each([
+    ["report.md", "text/plain"],
+    ["evidence.zip", "application/octet-stream"],
+    ["page.html", "application/octet-stream"],
+  ] as const)("opens local %s with safe browser handling", (fileName, mimeType) => {
+    const target = { close: vi.fn(), location: { replace: vi.fn() } } as unknown as Window;
+    vi.spyOn(window, "open").mockReturnValue(target);
+    const createObjectURL = vi.fn().mockReturnValue("blob:local-file");
+    vi.stubGlobal("URL", Object.assign(class extends URL {}, { createObjectURL, revokeObjectURL: vi.fn() }));
+    let downloaded: { href: string; fileName: string } | undefined;
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (this: HTMLAnchorElement) {
+      downloaded = { href: this.href, fileName: this.download };
+    });
+    const sessionId = startFocusReplacementProject();
+    const path = `E:/reports/${fileName}`;
+    act(() => socketMock.rawEmit?.({
+      type: "conversation_snapshot", sessionId, conversationId: CONVERSATION_ID, focusId: FOCUS_A,
+      items: snapshotItems([{
+        id: "local-file-message", role: "assistant", text: `[打开文件](${path})`, thinking: "", tools: [],
+      }]), window: completeConversationWindow,
+    }));
+    expect(socketMock.send.mock.calls.some(([command]) => command.type === "open_local_file")).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: "打开文件 ↗" }));
+    const command = latestCommand("open_local_file");
+    expect(command).toMatchObject({ sessionId, conversationId: CONVERSATION_ID, focusId: FOCUS_A, path });
+    expect(createObjectURL).not.toHaveBeenCalled();
+    act(() => socketMock.rawEmit?.({
+      ...command, type: "local_file", mimeType, fileName, data: "aGVsbG8=",
+    }));
+    expect(createObjectURL).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      type: mimeType === "text/plain" ? "text/plain;charset=utf-8" : mimeType,
+      size: 5,
+    }));
+    if (mimeType === "text/plain") {
+      expect(target.location.replace).toHaveBeenCalledExactlyOnceWith("blob:local-file");
+      expect(target.close).not.toHaveBeenCalled();
+      expect(downloaded).toBeUndefined();
+    } else {
+      expect(downloaded).toEqual({ href: "blob:local-file", fileName });
+      expect(target.location.replace).not.toHaveBeenCalled();
+      expect(target.close).toHaveBeenCalled();
+    }
+  });
+
+  it.each(["wrong-path", "wrong-focus", "wrong-session", "wrong-operation", "error", "disconnect"] as const)(
+    "does not open a local file after %s", (outcome) => {
+      const target = { close: vi.fn(), location: { replace: vi.fn() } } as unknown as Window;
+      vi.spyOn(window, "open").mockReturnValue(target);
+      const createObjectURL = vi.fn();
+      vi.stubGlobal("URL", Object.assign(class extends URL {}, { createObjectURL }));
+      const sessionId = startFocusReplacementProject();
+      act(() => socketMock.rawEmit?.({
+        type: "conversation_snapshot", sessionId, conversationId: CONVERSATION_ID, focusId: FOCUS_A,
+        items: snapshotItems([{
+          id: "local-file-message", role: "assistant", text: "[报告](E:/report.md)", thinking: "", tools: [],
+        }]), window: completeConversationWindow,
+      }));
+      fireEvent.click(screen.getByRole("button", { name: "报告 ↗" }));
+      const command = latestCommand("open_local_file");
+      if (outcome === "disconnect") act(() => socketMock.status?.(false));
+      act(() => socketMock.rawEmit?.(outcome === "error" ? {
+        type: "error", scope: "command", operation: "open_local_file", message: "文件不存在",
+        sessionId, conversationId: CONVERSATION_ID, focusId: FOCUS_A, commandId: command.commandId,
+      } : outcome === "wrong-operation" ? {
+        ...command, type: "local_image", mimeType: "image/png", data: "iVBORw0KGgo=",
+      } : {
+        ...command, type: "local_file", mimeType: "text/plain", fileName: "report.md", data: "aGVsbG8=",
+        ...(outcome === "wrong-path" ? { path: "E:/other.md" } : {}),
+        ...(outcome === "wrong-focus" ? { focusId: FOCUS_A_SECOND } : {}),
+        ...(outcome === "wrong-session" ? { sessionId: crypto.randomUUID() } : {}),
+      }));
+      expect(target.close).toHaveBeenCalled();
+      expect(createObjectURL).not.toHaveBeenCalled();
+      expect(target.location.replace).not.toHaveBeenCalled();
+      if (outcome === "error") expect(screen.getByText("打开文件失败：文件不存在")).toBeVisible();
+    },
+  );
+
+  it("does not request a file when the browser blocks its window", () => {
+    vi.spyOn(window, "open").mockReturnValue(null);
+    const sessionId = startFocusReplacementProject();
+    act(() => socketMock.rawEmit?.({
+      type: "conversation_snapshot", sessionId, conversationId: CONVERSATION_ID, focusId: FOCUS_A,
+      items: snapshotItems([{
+        id: "local-file-message", role: "assistant", text: "[报告](E:/report.md)", thinking: "", tools: [],
+      }]), window: completeConversationWindow,
+    }));
+    fireEvent.click(screen.getByRole("button", { name: "报告 ↗" }));
+    expect(screen.getByText("浏览器阻止了文件窗口")).toBeVisible();
+    expect(socketMock.send.mock.calls.some(([command]) => command.type === "open_local_file")).toBe(false);
+  });
 
   it("opens an initial phone chat route with an exact conversation open", () => {
     mockPhoneViewport();

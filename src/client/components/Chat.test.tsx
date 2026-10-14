@@ -805,7 +805,7 @@ describe("Chat", () => {
     ];
     const props = {
       loopList: { armed: false, items: [{ id: "objective", text: "Keep objective", status: "active" as const }] },
-      workspaceChanges: { state: "ready" as const, total: files.length, truncated: false,
+      workspaceChanges: { state: "ready" as const, branch: "feature/current-branch", total: files.length, truncated: false,
         files: files.map(({ path, status }) => ({ path, status })) },
       onRefreshWorkspaceChanges,
       onWorkspaceChangesVisibilityChange,
@@ -822,6 +822,8 @@ describe("Chat", () => {
     expect(onWorkspaceChangesVisibilityChange).toHaveBeenLastCalledWith(true);
     expect(within(mission).queryByText("Keep objective")).not.toBeInTheDocument();
     const changes = within(mission).getByRole("region", { name: "工作区改动" });
+    expect(within(changes).getByText("feature/current-branch"))
+      .toHaveAttribute("title", "feature/current-branch");
     expect(changes.querySelector(".workspace-changes-count"))
       .toHaveTextContent("8 个改动文件");
     for (const { path, label } of files) {
@@ -836,6 +838,7 @@ describe("Chat", () => {
       ...props, workspaceChangesLoading: true,
     }));
     expect(within(changes).getByText("src/a.ts")).toBeInTheDocument();
+    expect(within(changes).getByText("feature/current-branch")).toBeInTheDocument();
     expect(within(changes).getByText(/刷新中/)).toBeInTheDocument();
     expect(within(changes).getByRole("button", { name: "刷新工作区改动" }))
       .toBeDisabled();
@@ -873,17 +876,18 @@ describe("Chat", () => {
     expect(within(mission).getByText(/permission denied/)).toBeInTheDocument();
     expect(within(mission).queryByText("工作区没有文件改动。")).not.toBeInTheDocument();
     rendered.rerender(view(emptyChat, "", undefined, {
-      ...props, workspaceChanges: { state: "ready", files: [], total: 0, truncated: false },
+      ...props, workspaceChanges: { state: "ready", branch: null, files: [], total: 0, truncated: false },
     }));
     expect(mission.querySelector(".workspace-changes-count"))
       .toHaveTextContent("0 个改动文件");
     expect(within(mission).getByText("工作区没有文件改动。")).toBeInTheDocument();
+    expect(within(mission).getByText("分离 HEAD")).toBeInTheDocument();
 
     const files = Array.from({ length: 500 }, (_, index) => ({
       path: `src/file-${index}.ts`, status: "modified" as const,
     }));
     rendered.rerender(view(emptyChat, "", undefined, {
-      ...props, workspaceChanges: { state: "ready", files, total: 501, truncated: true },
+      ...props, workspaceChanges: { state: "ready", branch: "main", files, total: 501, truncated: true },
     }));
     expect(mission.querySelector(".workspace-changes-count"))
       .toHaveTextContent("501 个改动文件");
@@ -895,7 +899,7 @@ describe("Chat", () => {
   it("keeps the workspace tab across focus changes in one cwd and resets it for a new cwd", () => {
     stubMissionViewport(true);
     const onWorkspaceChangesVisibilityChange = vi.fn();
-    const changes = { state: "ready" as const, files: [
+    const changes = { state: "ready" as const, branch: "main", files: [
       { path: "shared/work.ts", status: "untracked" as const },
     ], total: 1, truncated: false };
     const focus = (conversationId: string): ChatState => ({
@@ -922,7 +926,7 @@ describe("Chat", () => {
     const resize = stubMissionViewport(false);
     const onWorkspaceChangesVisibilityChange = vi.fn();
     const props = {
-      workspaceChanges: { state: "ready" as const, files: [
+      workspaceChanges: { state: "ready" as const, branch: "main", files: [
         { path: "path with spaces/深层/file.ts", status: "modified" as const },
       ], total: 1, truncated: false },
       onWorkspaceChangesVisibilityChange,

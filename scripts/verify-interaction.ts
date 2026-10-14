@@ -6,11 +6,13 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import WebSocket from "ws";
 import {
-  BUSY_PROMPT, FIRST_PROMPT, LOCAL_IMAGE_DATA, LOCAL_IMAGE_NAME, STEER_PROMPT, TITLE, startInteractionFixture,
+  BUSY_PROMPT, FIRST_PROMPT, LOCAL_IMAGE_DATA, LOCAL_IMAGE_NAME,
+  LOCAL_REPORT_NAME, LOCAL_REPORT_TEXT, LOCAL_ARCHIVE_NAME, LOCAL_ARCHIVE_DATA,
+  STEER_PROMPT, TITLE, startInteractionFixture,
 } from "./interaction-fixture.js";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -281,16 +283,20 @@ async function main(): Promise<void> {
     evidence.titleDidNotGateFirstRun = true;
     console.log("E2E: first model call, settlement and JSONL precede title release");
 
-    assert(!received((event) => event.type === "local_image"), "local files must not load before a click");
-    const imagePoint = await waitFor("local image link rendered", () => ui.evaluate(`(() => {
-      const link = document.querySelector('button[data-piweb-local-image]');
-      if (!link) return undefined;
-      link.scrollIntoView({ block: 'center' });
-      const rect = link.getBoundingClientRect();
-      return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
-    })()`));
-    await ui.call("Input.dispatchMouseEvent", { type: "mousePressed", button: "left", clickCount: 1, ...imagePoint });
-    await ui.call("Input.dispatchMouseEvent", { type: "mouseReleased", button: "left", clickCount: 1, ...imagePoint });
+    assert(!received((event) => event.type === "local_image" || event.type === "local_file"), "local files must not load before a click");
+    const clickLocalFile = async (path: string) => {
+      const point = await waitFor("local file link rendered", () => ui.evaluate(`(() => {
+        const link = [...document.querySelectorAll('button[data-piweb-local-file]')]
+          .find((button) => button.dataset.piwebLocalFile === ${JSON.stringify(path)});
+        if (!link) return undefined;
+        link.scrollIntoView({ block: 'center' });
+        const rect = link.getBoundingClientRect();
+        return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+      })()`));
+      await ui.call("Input.dispatchMouseEvent", { type: "mousePressed", button: "left", clickCount: 1, ...point });
+      await ui.call("Input.dispatchMouseEvent", { type: "mouseReleased", button: "left", clickCount: 1, ...point });
+    };
+    await clickLocalFile(join(fixture.cwd, LOCAL_IMAGE_NAME));
     const localResponse = await waitFor("local file preview response", () => received((event) => event.type === "local_image"));
     const localCommand = ui.frames.find((frame) => frame.direction === "sent" && frame.payload.type === "open_local_image")?.payload;
     assert(localCommand);
@@ -319,6 +325,51 @@ async function main(): Promise<void> {
     assert.equal((await diskConversation(fixture.cwd, conversationId)).raw, firstDisk.raw, "local preview must not mutate history");
     evidence.localImagePreview = { clickOnly: true, exactBytes: true, nativePopupDecoded: true, historyUnchanged: true };
     console.log("E2E: clicked native absolute path (dot/underscore/Unicode/space) opened without history writes");
+
+    const reportPath = join(fixture.cwd, LOCAL_REPORT_NAME);
+    await clickLocalFile(reportPath);
+    const reportResponse = await waitFor("local report response", () => received((event) => event.type === "local_file" && event.path === reportPath));
+    const reportCommand = ui.frames.find((frame) => frame.direction === "sent" && frame.payload.type === "open_local_file" && frame.payload.path === reportPath)?.payload;
+    assert(reportCommand);
+    for (const key of ["sessionId", "conversationId", "focusId", "commandId", "path"]) {
+      assert.equal(reportResponse[key], reportCommand[key]);
+    }
+    assert.equal(reportResponse.mimeType, "text/plain");
+    assert.equal(Buffer.from(reportResponse.data, "base64").toString("utf8"), LOCAL_REPORT_TEXT);
+    const reportPopup = await waitFor("native report popup", async () => {
+      const pages = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json() as any[];
+      return pages.find((page) => page.type === "page" && page.url.startsWith("blob:") && page.id !== popup.id);
+    });
+    const reportViewer = new CdpClient(reportPopup.webSocketDebuggerUrl);
+    try {
+      await reportViewer.open();
+      await waitFor("browser finishes loading the plain-text report", () => reportViewer.evaluate(
+        'document.readyState === "complete" && document.contentType === "text/plain"',
+      ));
+      assert.equal(await reportViewer.evaluate("document.body.textContent"), LOCAL_REPORT_TEXT);
+      assert.equal(await reportViewer.evaluate("document.contentType"), "text/plain");
+      assert.equal(await reportViewer.evaluate("document.characterSet"), "UTF-8");
+      assert.equal(await reportViewer.evaluate("Boolean(window.fileExecuted || document.querySelector('script'))"), false);
+      const screenshot = await reportViewer.call("Page.captureScreenshot", { format: "png" });
+      await writeFile(join(artifactDir, "local-report.png"), Buffer.from(screenshot.data, "base64"));
+    } finally {
+      reportViewer.close();
+    }
+
+    const downloadPath = join(artifactDir, "downloads");
+    await mkdir(downloadPath);
+    await ui.call("Browser.setDownloadBehavior", { behavior: "allow", downloadPath });
+    const archivePath = join(fixture.cwd, LOCAL_ARCHIVE_NAME);
+    await clickLocalFile(archivePath);
+    const archiveResponse = await waitFor("local archive response", () => received((event) => event.type === "local_file" && event.path === archivePath));
+    assert.equal(archiveResponse.mimeType, "application/octet-stream");
+    assert.equal(archiveResponse.fileName, basename(LOCAL_ARCHIVE_NAME));
+    const archiveFile = join(downloadPath, archiveResponse.fileName);
+    await waitFor("archive saved by the browser", () => existsSync(archiveFile));
+    assert.deepEqual(await readFile(archiveFile), Buffer.from(LOCAL_ARCHIVE_DATA, "base64"));
+    assert.equal((await diskConversation(fixture.cwd, conversationId)).raw, firstDisk.raw, "file clicks must not mutate history");
+    evidence.localFileOpen = { clickOnly: true, exactText: true, scriptInert: true, exactDownloadBytes: true, historyUnchanged: true };
+    console.log("E2E: report opened as inert text and ZIP downloaded with exact bytes, without history writes");
 
     const busyCommand = await send(BUSY_PROMPT);
     await waitFor("held streaming model call", () => fixture.log.some((event) => event.kind === "model_requested" && event.text?.includes(BUSY_PROMPT)));
