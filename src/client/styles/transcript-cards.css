@@ -686,7 +686,7 @@
 }
 
 .transcript .markdown a,
-.transcript .markdown .local-image-link {
+.transcript .markdown .local-file-link {
   color: color-mix(in srgb, var(--rebel-red) 68%, var(--rebel-paper));
 }
 

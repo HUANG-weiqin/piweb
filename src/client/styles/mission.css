@@ -64,12 +64,32 @@
   border-bottom: 1px solid var(--rebel-line);
 }
 
+.workspace-changes-summary {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.workspace-changes-branch,
 .workspace-changes-count {
   min-width: 0;
   margin: 0;
   color: var(--rebel-paper-muted);
   font: 800 9px "Cascadia Code", Consolas, monospace;
   overflow-wrap: anywhere;
+}
+
+.workspace-changes-branch {
+  display: flex;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.workspace-changes-branch span {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--rebel-paper);
+  text-overflow: ellipsis;
 }
 
 .workspace-changes-count strong {

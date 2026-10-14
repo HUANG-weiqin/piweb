@@ -48,6 +48,7 @@ import { ProjectStoreRegistry } from "./project-store-registry.js";
 import { ProjectSessionCoordinator } from "./project-session-coordinator.js";
 import { RoleCatalog } from "./role-catalog.js";
 import * as localImage from "./local-image.js";
+import * as localFile from "./local-file.js";
 import * as workspaceChanges from "./workspace-changes.js";
 
 const SESSION_A = "0dd23f7c-80c8-4713-b7a7-33c00177a101";
@@ -7984,7 +7985,7 @@ describe("PiConnection coordinated project view", () => {
 
   it("reads project-scoped workspace changes without mutating Agent history", async () => {
     const harness = await coordinatedConnectionHarness();
-    const snapshot = { state: "ready" as const, files: [], total: 0, truncated: false };
+    const snapshot = { state: "ready" as const, branch: "main", files: [], total: 0, truncated: false };
     const read = vi.spyOn(workspaceChanges, "readWorkspaceChanges").mockResolvedValue(snapshot);
     try {
       const focused = await initializeNewConversation(harness);
@@ -8060,6 +8061,72 @@ describe("PiConnection coordinated project view", () => {
       resolveRead({ state: "not_git" });
       await reading;
       expect(harness.events).not.toContainEqual(expect.objectContaining({ type: "workspace_changes", commandId }));
+    } finally {
+      read.mockRestore();
+      await harness.cleanup();
+    }
+  });
+
+  it("reads clicked Markdown and ZIP files with exact focus/path correlation and no history mutation", async () => {
+    const harness = await coordinatedConnectionHarness();
+    try {
+      const focused = await initializeNewConversation(harness);
+      const manager = harness.runtime.created[0]!.persistentManager!;
+      const before = manager.getEntries();
+      for (const [path, mimeType, bytes] of [
+        ["验收报告.md", "text/plain", Buffer.from("# 通过\n")],
+        ["archive.zip", "application/octet-stream", Buffer.from([0x50, 0x4b, 3, 4])],
+      ] as const) {
+        await writeFile(join(harness.cwd, path), bytes);
+        const command = {
+          type: "open_local_file" as const, commandId: randomUUID(), sessionId: SESSION_A,
+          conversationId: focused.conversationId!, focusId: focused.focusId!, path,
+        };
+        await harness.connection.handle(command);
+        const response = harness.events.findLast((event) => event.type === "local_file");
+        expect(response).toEqual({ ...command, type: "local_file", fileName: path, mimeType, data: bytes.toString("base64") });
+        expect(parseServerEvent(response)).toEqual(response);
+        await expect(harness.connection.handle(command)).rejects.toThrow("already used");
+        for (const identity of [{ sessionId: SESSION_B }, { conversationId: randomUUID() }, { focusId: randomUUID() }]) {
+          await expect(harness.connection.handle({ ...command, commandId: randomUUID(), ...identity })).rejects.toThrow();
+        }
+        await expect(harness.connection.handle({ ...command, commandId: randomUUID(), path: "missing.md" })).rejects.toThrow(/ENOENT/);
+      }
+      expect(manager.getEntries()).toEqual(before);
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it.each(["focus", "observation", "close"])("drops an in-flight local file response after %s replacement", async (replacement) => {
+    const harness = await coordinatedConnectionHarness();
+    let resolveFile!: (file: { fileName: string; mimeType: "text/plain"; data: string }) => void;
+    const result = new Promise<{ fileName: string; mimeType: "text/plain"; data: string }>((resolve) => { resolveFile = resolve; });
+    const read = vi.spyOn(localFile, "readLocalFile").mockReturnValue(result);
+    try {
+      const focused = await initializeNewConversation(harness);
+      const commandId = randomUUID();
+      const opening = harness.connection.handle({
+        type: "open_local_file", commandId, sessionId: SESSION_A,
+        conversationId: focused.conversationId!, focusId: focused.focusId!, path: "report.md",
+      });
+      if (replacement === "focus") {
+        await harness.connection.handle({
+          type: "focus_conversation", commandId: randomUUID(), sessionId: SESSION_A,
+          conversationId: focused.conversationId!,
+        });
+        expect(latestState(harness.events).focusId).not.toBe(focused.focusId);
+      } else if (replacement === "observation") {
+        await harness.connection.handle({
+          type: "initialize", commandId: randomUUID(), sessionId: SESSION_B,
+          cwd: harness.cwd, conversation: { kind: "recent" },
+        });
+      } else {
+        await harness.connection.handle({ type: "close_session", sessionId: SESSION_A });
+      }
+      resolveFile({ fileName: "report.md", mimeType: "text/plain", data: "" });
+      await opening;
+      expect(harness.events).not.toContainEqual(expect.objectContaining({ type: "local_file", commandId }));
     } finally {
       read.mockRestore();
       await harness.cleanup();

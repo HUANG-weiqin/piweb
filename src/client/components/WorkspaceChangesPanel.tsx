@@ -24,11 +24,16 @@ export function WorkspaceChangesPanel({
 }: WorkspaceChangesPanelProps) {
   return <section className="workspace-changes" aria-label="工作区改动">
     <header className="workspace-changes-header">
-      <p className="workspace-changes-count">
-        {snapshot?.state === "ready"
-          ? <><strong>{snapshot.total}</strong> 个改动文件{loading && "（上次读取）"}</>
-          : "文件状态"}
-      </p>
+      <div className="workspace-changes-summary">
+        {snapshot?.state === "ready" && <p className="workspace-changes-branch">
+          当前分支 <span title={snapshot.branch ?? "分离 HEAD"}>{snapshot.branch ?? "分离 HEAD"}</span>
+        </p>}
+        <p className="workspace-changes-count">
+          {snapshot?.state === "ready"
+            ? <><strong>{snapshot.total}</strong> 个改动文件{loading && "（上次读取）"}</>
+            : "文件状态"}
+        </p>
+      </div>
       {onRefresh && <button
         type="button"
         aria-label="刷新工作区改动"

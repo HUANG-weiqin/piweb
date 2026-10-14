@@ -6,9 +6,39 @@ import { MarkdownContent } from "./MarkdownContent";
 
 afterEach(cleanup);
 
-describe("local image paths", () => {
+describe("local file paths", () => {
+  it("makes the reported Markdown and ZIP links actionable only on click", () => {
+    const onOpenLocalFile = vi.fn();
+    const report = "E:/godot/godbrave-small-numbers/sim/DuelSim/configs/small-numbers-v2.md";
+    const evidence = "E:/godot/godbrave-small-numbers/sim/DuelSim/configs/small-numbers-v2-evidence.zip";
+    const { container } = render(<MarkdownContent className="markdown"
+      markdown={`[验收报告](${report})｜[原始证据](${evidence})`}
+      onOpenLocalFile={onOpenLocalFile} />);
+    expect(onOpenLocalFile).not.toHaveBeenCalled();
+    expect(container.querySelector("a, img, iframe")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "验收报告 ↗" }));
+    expect(onOpenLocalFile).toHaveBeenLastCalledWith(report);
+    fireEvent.click(screen.getByRole("button", { name: "原始证据 ↗" }));
+    expect(onOpenLocalFile).toHaveBeenLastCalledWith(evidence);
+  });
+
+  it.each([
+    [String.raw`[报告](E:\reports\.artifacts\_report.md)`, String.raw`E:\reports\.artifacts\_report.md`],
+    [String.raw`[报告](<.\reports\_验收 报告.md> "标题")`, String.raw`.\reports\_验收 报告.md`],
+    ["[报告](file:///E:/reports/my%20report.md)", "E:/reports/my report.md"],
+    ["[证据](./output/my%20evidence.zip)", "./output/my evidence.zip"],
+    ["[证据](output/evidence.zip)", "output/evidence.zip"],
+    ["[报告](/tmp/report.md)", "/tmp/report.md"],
+    ["[网页源文件](file:///E:/a.html)", "E:/a.html"],
+  ])("preserves local file destinations in %s", (markdown, path) => {
+    const onOpenLocalFile = vi.fn();
+    render(<MarkdownContent className="markdown" markdown={markdown} onOpenLocalFile={onOpenLocalFile} />);
+    fireEvent.click(screen.getByRole("button"));
+    expect(onOpenLocalFile).toHaveBeenCalledExactlyOnceWith(path);
+  });
+
   it("opens local links, image syntax, inline code and bare paths only on click", () => {
-    const onOpenLocalImage = vi.fn();
+    const onOpenLocalFile = vi.fn();
     const { container } = render(<MarkdownContent
       className="markdown"
       markdown={[
@@ -23,9 +53,9 @@ describe("local image paths", () => {
         "图片 `/tmp/a&b.png`",
         "[绝对路径链接](/tmp/result.jpg)",
       ].join("\n\n")}
-      onOpenLocalImage={onOpenLocalImage}
+      onOpenLocalFile={onOpenLocalFile}
     />);
-    expect(onOpenLocalImage).not.toHaveBeenCalled();
+    expect(onOpenLocalFile).not.toHaveBeenCalled();
     expect(container.querySelector("img")).toBeNull();
     expect(container.querySelector('[href^="file:"]')).toBeNull();
     const paths = [
@@ -38,7 +68,7 @@ describe("local image paths", () => {
     expect(buttons).toHaveLength(paths.length);
     buttons.forEach((button, index) => {
       fireEvent.click(button);
-      expect(onOpenLocalImage).toHaveBeenLastCalledWith(paths[index]);
+      expect(onOpenLocalFile).toHaveBeenLastCalledWith(paths[index]);
     });
   });
 
@@ -51,36 +81,39 @@ describe("local image paths", () => {
     [String.raw`[查看图片](./shots/result\(1\).png "标题")`, "./shots/result(1).png"],
     [String.raw`[查看图片](E:/shots/result\(1\).png "标题")`, "E:/shots/result(1).png"],
   ])("preserves local path separators in %s", (markdown, path) => {
-    const onOpenLocalImage = vi.fn();
-    render(<MarkdownContent className="markdown" markdown={markdown} onOpenLocalImage={onOpenLocalImage} />);
+    const onOpenLocalFile = vi.fn();
+    render(<MarkdownContent className="markdown" markdown={markdown} onOpenLocalFile={onOpenLocalFile} />);
     fireEvent.click(screen.getByRole("button"));
-    expect(onOpenLocalImage).toHaveBeenCalledExactlyOnceWith(path);
+    expect(onOpenLocalFile).toHaveBeenCalledExactlyOnceWith(path);
   });
 
   it("escapes path attributes and labels without enabling embedded HTML handlers", () => {
-    const onOpenLocalImage = vi.fn();
+    const onOpenLocalFile = vi.fn();
     const path = '/tmp/a" onclick="alert(1).png';
     const { container } = render(<MarkdownContent className="markdown"
-      markdown={"`" + path + "`"} onOpenLocalImage={onOpenLocalImage} />);
+      markdown={"`" + path + "`"} onOpenLocalFile={onOpenLocalFile} />);
     const button = screen.getByRole("button");
     expect(button).not.toHaveAttribute("onclick");
     expect(container.querySelector("script")).toBeNull();
     fireEvent.click(button.querySelector("code")!);
-    expect(onOpenLocalImage).toHaveBeenCalledWith(path);
+    expect(onOpenLocalFile).toHaveBeenCalledWith(path);
   });
 
-  it("leaves non-images, unsafe schemes, remote file URLs and fenced code inert", () => {
-    const onOpenLocalImage = vi.fn();
+  it("leaves unsafe paths, non-image code paths and fenced code inert without hijacking web links or anchors", () => {
+    const onOpenLocalFile = vi.fn();
     const { container } = render(<MarkdownContent
       className="markdown"
       markdown={[
-        "[文件](file:///E:/secret.txt)",
+        "[锚点](#section)",
         "[脚本](javascript:alert(1))",
         "[网络共享](file://server/share/a.png)",
         String.raw`[UNC 路径](\\server\share\a.png)`,
         String.raw`![UNC 图片](\\server\share\a.png)`,
         String.raw`![设备路径](\\?\E:\shots\a.png)`,
-        String.raw`[非图片](E:\shots\.private\_notes.txt)`,
+        String.raw`[设备文件](\\?\E:\notes.txt)`,
+        String.raw`[共享文件](\\server\share\notes.txt)`,
+        "[共享 URL](file://server/share/notes.txt)",
+        "[ADS](E:/notes.txt:stream)",
         String.raw`[HTTP 链接](https://example.com/\_image.png)`,
         String.raw`[非本机文件 URL](file://server/share/\_image.png)`,
         "`E:\\secret.txt`",
@@ -89,9 +122,8 @@ describe("local image paths", () => {
         "https://example.com/b.png",
         String.raw`\\server\share\a.png`,
         "`/tmp/a.svg`",
-        "[本机网页](file:///E:/a.html)",
       ].join("\n\n")}
-      onOpenLocalImage={onOpenLocalImage}
+      onOpenLocalFile={onOpenLocalFile}
     />);
     expect(screen.queryByRole("button")).toBeNull();
     expect(screen.queryByRole("link", { name: "UNC 路径" })).toBeNull();
@@ -103,6 +135,7 @@ describe("local image paths", () => {
     expect(screen.getByRole("link", { name: "HTTP 链接" })).toHaveAttribute(
       "href", "https://example.com/_image.png",
     );
-    expect(onOpenLocalImage).not.toHaveBeenCalled();
+    expect(screen.getByRole("link", { name: "锚点" })).toHaveAttribute("href", "#section");
+    expect(onOpenLocalFile).not.toHaveBeenCalled();
   });
 });

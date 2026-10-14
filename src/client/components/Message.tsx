@@ -141,18 +141,18 @@ const StreamingMarkdownBlock = memo(function StreamingMarkdownBlock({
   mermaidMaxBlocks,
   mermaidMaxTotalSourceLength,
   onRenderSettled,
-  onOpenLocalImage,
+  onOpenLocalFile,
 }: {
   markdown: string;
   renderMermaid: boolean;
   mermaidMaxBlocks: number;
   mermaidMaxTotalSourceLength: number;
   onRenderSettled?(): void;
-  onOpenLocalImage?(path: string): void;
+  onOpenLocalFile?(path: string): void;
 }) {
   return <MarkdownContent
     className="markdown streaming-stable"
-    onOpenLocalImage={onOpenLocalImage}
+    onOpenLocalFile={onOpenLocalFile}
     markdown={markdown}
     renderMermaid={renderMermaid}
     mermaidMaxBlocks={mermaidMaxBlocks}
@@ -168,7 +168,7 @@ function StreamingMarkdown({
   mermaidMaxBlocks,
   mermaidMaxTotalSourceLength,
   onRenderSettled,
-  onOpenLocalImage,
+  onOpenLocalFile,
 }: {
   text: string;
   placeholder?: string;
@@ -176,7 +176,7 @@ function StreamingMarkdown({
   mermaidMaxBlocks: number;
   mermaidMaxTotalSourceLength: number;
   onRenderSettled?(): void;
-  onOpenLocalImage?(path: string): void;
+  onOpenLocalFile?(path: string): void;
 }) {
   const { stableBlocks, tail } = useStreamingMarkdownParts(text);
   const analysisCacheRef = useRef(new Map<
@@ -210,7 +210,7 @@ function StreamingMarkdown({
       }
       return <StreamingMarkdownBlock
         key={`streaming-block:${index}`}
-        onOpenLocalImage={onOpenLocalImage}
+        onOpenLocalFile={onOpenLocalFile}
         markdown={block}
         renderMermaid={renderMermaid && !!analysis?.hasMermaidFence}
         mermaidMaxBlocks={mermaidMaxBlocksForBlock}
@@ -549,18 +549,18 @@ const MarkdownBlock = memo(function MarkdownBlock({
   mermaidMaxBlocks,
   mermaidMaxTotalSourceLength,
   onRenderSettled,
-  onOpenLocalImage,
+  onOpenLocalFile,
 }: {
   text: string;
   renderMermaid: boolean;
   mermaidMaxBlocks: number;
   mermaidMaxTotalSourceLength: number;
   onRenderSettled?(): void;
-  onOpenLocalImage?(path: string): void;
+  onOpenLocalFile?(path: string): void;
 }) {
   return <MarkdownContent
     className="markdown"
-    onOpenLocalImage={onOpenLocalImage}
+    onOpenLocalFile={onOpenLocalFile}
     markdown={text}
     renderMermaid={renderMermaid}
     mermaidMaxBlocks={mermaidMaxBlocks}
@@ -594,7 +594,7 @@ function renderUserMessageText(
 interface MessageProps {
   message: ChatMessage;
   onOpenImage?: HistoricalImageOpenHandler;
-  onOpenLocalImage?(path: string): void;
+  onOpenLocalFile?(path: string): void;
   onRewind?(messageId: string, text: string): void;
   rewindDisabled?: boolean;
   rewinding?: boolean;
@@ -611,7 +611,7 @@ interface MessageProps {
 function MessageView({
   message,
   onOpenImage,
-  onOpenLocalImage,
+  onOpenLocalFile,
   onRewind,
   rewindDisabled = false,
   rewinding = false,
@@ -748,7 +748,7 @@ function MessageView({
       ? <StreamingMarkdown
           text={text}
           placeholder={hasActivity ? undefined : "…"}
-          onOpenLocalImage={onOpenLocalImage}
+          onOpenLocalFile={onOpenLocalFile}
           renderMermaid={renderMermaid}
           mermaidMaxBlocks={mermaidMaxBlocks}
           mermaidMaxTotalSourceLength={mermaidMaxTotalSourceLength}
@@ -756,7 +756,7 @@ function MessageView({
         />
       : <MarkdownBlock
           text={text || (hasActivity ? "" : "…")}
-          onOpenLocalImage={onOpenLocalImage}
+          onOpenLocalFile={onOpenLocalFile}
           renderMermaid={renderMermaid}
           mermaidMaxBlocks={mermaidMaxBlocks}
           mermaidMaxTotalSourceLength={mermaidMaxTotalSourceLength}

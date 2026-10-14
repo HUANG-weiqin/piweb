@@ -32,6 +32,7 @@ import {
   type WorkspaceSessionRepairReport,
   type WorkspaceSessionRepairRequest,
 } from "../shared/protocol";
+import { localImagePath } from "../shared/local-image-path";
 import {
   chatReducer,
   initialChatState,
@@ -251,8 +252,9 @@ interface PendingPromptWithdrawal extends ActiveFocus {
   commandId: string;
 }
 
-interface PendingImageOpen extends ActiveFocus {
+interface PendingFileOpen extends ActiveFocus {
   commandId: string;
+  operation: "open_image" | "open_local_image" | "open_local_file";
   source: ConversationImageLocator | { path: string };
   target: Window;
 }
@@ -684,7 +686,7 @@ export function App() {
       : "",
   );
   const focusRef = useRef<ActiveFocus | undefined>(undefined);
-  const pendingImageOpensRef = useRef(new Map<string, PendingImageOpen>());
+  const pendingFileOpensRef = useRef(new Map<string, PendingFileOpen>());
   const [pendingFocus, setPendingFocus] = useState<PendingFocus>();
   const pendingFocusRef = useRef<PendingFocus | undefined>(undefined);
   const pendingFocusedStateRef = useRef<PublicState | undefined>(undefined);
@@ -1498,11 +1500,11 @@ export function App() {
     }
     settleUnconfirmedDraftReceipt(event.promptId, delivered);
   };
-  const closePendingImageOpens = () => {
-    for (const pending of pendingImageOpensRef.current.values()) {
+  const closePendingFileOpens = () => {
+    for (const pending of pendingFileOpensRef.current.values()) {
       pending.target.close();
     }
-    pendingImageOpensRef.current.clear();
+    pendingFileOpensRef.current.clear();
   };
   const attachFocus = (
     sessionId: string,
@@ -1512,7 +1514,7 @@ export function App() {
     preservePresentation = false,
     preserveDraft = false,
   ) => {
-    closePendingImageOpens();
+    closePendingFileOpens();
     boundActiveRunIdRef.current = undefined;
     updatePendingPromptWithdrawal(undefined);
     settledPromptIdsRef.current.clear();
@@ -1686,7 +1688,7 @@ export function App() {
     for (const event of events) socketEventHandlerRef.current(event);
   };
   const clearSessionProjection = () => {
-    closePendingImageOpens();
+    closePendingFileOpens();
     clearFocusReplacementAuthority();
     clearTemporaryWorkspacePresentation();
     clearTemporaryConversationPresentation();
@@ -2949,17 +2951,19 @@ export function App() {
         if (pending?.promptId === event.promptId && pending.runId === event.runId) {
           updatePendingPromptWithdrawal(undefined);
         }
-      } else if (event.type === "conversation_image" || event.type === "local_image") {
-        const pending = pendingImageOpensRef.current.get(event.commandId);
+      } else if (event.type === "conversation_image" || event.type === "local_image" || event.type === "local_file") {
+        const pending = pendingFileOpensRef.current.get(event.commandId);
         if (!pending) return;
-        pendingImageOpensRef.current.delete(event.commandId);
-        const matchesSource = event.type === "local_image"
+        pendingFileOpensRef.current.delete(event.commandId);
+        const matchesSource = event.type !== "conversation_image"
           ? "path" in pending.source && pending.source.path === event.path
           : "messageId" in pending.source
             && pending.source.messageId === event.messageId
             && pending.source.imageOrdinal === event.imageOrdinal;
+        const operation = event.type === "conversation_image" ? "open_image" : `open_${event.type}`;
         if (
-          pending.sessionId !== event.sessionId
+          pending.operation !== operation
+          || pending.sessionId !== event.sessionId
           || pending.conversationId !== event.conversationId
           || pending.focusId !== event.focusId
           || !matchesSource
@@ -2972,12 +2976,24 @@ export function App() {
           const binary = window.atob(event.data);
           const bytes = Uint8Array.from(binary, (byte) => byte.charCodeAt(0));
           const url = URL.createObjectURL(new Blob([bytes], {
-            type: event.mimeType,
+            type: event.mimeType === "text/plain" ? "text/plain;charset=utf-8" : event.mimeType,
           }));
-          pending.target.location.replace(url);
+          if (event.type === "local_file" && event.mimeType === "application/octet-stream") {
+            const download = document.createElement("a");
+            download.href = url;
+            download.download = event.fileName;
+            document.body.append(download);
+            download.click();
+            download.remove();
+            pending.target.close();
+            // Leave time for the browser to claim the asynchronous download.
+            window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+          } else {
+            pending.target.location.replace(url);
+          }
         } catch {
           pending.target.close();
-          setError("无法打开图片");
+          setError(event.type === "local_file" ? "无法打开文件" : "无法打开图片");
         }
       } else if (event.type === "bash_activity") {
         if (pendingFocusRef.current) return;
@@ -3370,24 +3386,24 @@ export function App() {
           }
           return;
         }
-        const pendingImageOpen = (
-          event.operation === "open_image" || event.operation === "open_local_image"
-        ) && event.commandId ? pendingImageOpensRef.current.get(event.commandId) : undefined;
+        const pendingFileOpen = (
+          event.operation === "open_image" || event.operation === "open_local_image" || event.operation === "open_local_file"
+        ) && event.commandId ? pendingFileOpensRef.current.get(event.commandId) : undefined;
         if (
-          pendingImageOpen
-          && event.operation === ("path" in pendingImageOpen.source ? "open_local_image" : "open_image")
-          && pendingImageOpen.sessionId === event.sessionId
-          && pendingImageOpen.conversationId === event.conversationId
-          && pendingImageOpen.focusId === event.focusId
+          pendingFileOpen
+          && event.operation === pendingFileOpen.operation
+          && pendingFileOpen.sessionId === event.sessionId
+          && pendingFileOpen.conversationId === event.conversationId
+          && pendingFileOpen.focusId === event.focusId
         ) {
-          pendingImageOpensRef.current.delete(pendingImageOpen.commandId);
-          pendingImageOpen.target.close();
+          pendingFileOpensRef.current.delete(pendingFileOpen.commandId);
+          pendingFileOpen.target.close();
           if (matchesFocus(
-            pendingImageOpen.sessionId,
-            pendingImageOpen.conversationId,
-            pendingImageOpen.focusId,
+            pendingFileOpen.sessionId,
+            pendingFileOpen.conversationId,
+            pendingFileOpen.focusId,
           )) {
-            setError(`打开图片失败：${event.message}`);
+            setError(`打开${event.operation === "open_local_file" ? "文件" : "图片"}失败：${event.message}`);
           }
           return;
         }
@@ -3859,7 +3875,7 @@ export function App() {
               : "连接已断开，进入状态未确认；请重新检查后手动继续。不会自动重新进入。",
           );
         }
-        closePendingImageOpens();
+        closePendingFileOpens();
         transitionTiming.cancel("disconnect");
         protocolReadyRef.current = false;
         setProtocolReady(false);
@@ -3948,7 +3964,7 @@ export function App() {
     socketRef.current = socket;
     socket.connect();
     return () => {
-      closePendingImageOpens();
+      closePendingFileOpens();
       transitionTiming.cancel("destroyed");
       if (socketEpochRef.current === epoch) socketEpochRef.current++;
       socket.close();
@@ -4191,46 +4207,44 @@ export function App() {
     }
     return commandId;
   };
-  const openImageSource = useCallback((source: ConversationImageLocator | { path: string }) => {
+  const openFileSource = useCallback((source: ConversationImageLocator | { path: string }) => {
+    const isImage = !("path" in source) || localImagePath(source.path) !== undefined;
+    const label = isImage ? "图片" : "文件";
     const focus = focusRef.current;
     if (!focus || !conversationReadyRef.current || !protocolReady) {
-      setError("当前对话尚未准备好打开图片");
+      setError(`当前对话尚未准备好打开${label}`);
       return;
     }
     const target = window.open("about:blank", "_blank");
     if (!target) {
-      setError("浏览器阻止了图片窗口");
+      setError(`浏览器阻止了${label}窗口`);
       return;
     }
     const commandId = crypto.randomUUID();
-    const pending: PendingImageOpen = {
-      ...focus,
-      commandId,
-      source,
-      target,
-    };
-    pendingImageOpensRef.current.set(commandId, pending);
     const identity = {
       commandId,
       sessionId: focus.sessionId,
       conversationId: focus.conversationId,
       focusId: focus.focusId,
     };
-    const sent = socketRef.current?.send("path" in source
-      ? { type: "open_local_image", ...identity, path: source.path }
-      : { type: "open_image", ...identity, ...source }) ?? false;
-    if (!sent) {
-      pendingImageOpensRef.current.delete(commandId);
+    const command = ("path" in source
+      ? { type: isImage ? "open_local_image" : "open_local_file", ...identity, path: source.path }
+      : { type: "open_image", ...identity, ...source }) satisfies ClientCommand;
+    pendingFileOpensRef.current.set(commandId, {
+      ...focus, commandId, operation: command.type, source, target,
+    });
+    if (!socketRef.current?.send(command)) {
+      pendingFileOpensRef.current.delete(commandId);
       target.close();
       setError("本地服务未连接");
     }
   }, [protocolReady]);
   const openImage = useCallback((source: ConversationImageLocator) => {
-    openImageSource(source);
-  }, [openImageSource]);
-  const openLocalImage = useCallback((path: string) => {
-    openImageSource({ path });
-  }, [openImageSource]);
+    openFileSource(source);
+  }, [openFileSource]);
+  const openLocalFile = useCallback((path: string) => {
+    openFileSource({ path });
+  }, [openFileSource]);
   useEffect(() => {
     if (
       !chat.projectionGap
@@ -6411,7 +6425,7 @@ export function App() {
               onChangeCwd={handleWorkspaceAdd}
               onOpenConversation={handleConversationSelect}
               onOpenImage={openImage}
-              onOpenLocalImage={openLocalImage}
+              onOpenLocalFile={openLocalFile}
               onRewind={handleChatRewind}
               rewindingMessageId={pendingConversationTruncation?.messageId}
             />}

@@ -29,6 +29,10 @@ export const TITLE = "E2E automatic title";
 
 export const LOCAL_IMAGE_NAME = ".preview/_preview 中文.png";
 export const LOCAL_IMAGE_DATA = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+export const LOCAL_REPORT_NAME = ".preview/_验收 报告.md";
+export const LOCAL_REPORT_TEXT = '# 验收报告\n\n原始文本，不执行 HTML：<script>window.fileExecuted = true</script>\n';
+export const LOCAL_ARCHIVE_NAME = ".preview/_原始证据.zip";
+export const LOCAL_ARCHIVE_DATA = "UEsFBgAAAAAAAAAAAAAAAAAAAAAAAA==";
 const BUSY_RESPONSE = "BUSY RESPONSE";
 const FOLLOW_UP_RESPONSE = "FOLLOW-UP RESPONSE";
 const FIXTURE_PROVIDER = "interaction-fixture";
@@ -256,7 +260,11 @@ export async function startInteractionFixture(
     const localImagePath = join(cwd, LOCAL_IMAGE_NAME);
     await mkdir(dirname(localImagePath));
     await writeFile(localImagePath, Buffer.from(LOCAL_IMAGE_DATA, "base64"));
-    const firstResponse = `FIRST RESPONSE\n\n[查看本地图片](<${localImagePath}>)`;
+    const localReportPath = join(cwd, LOCAL_REPORT_NAME);
+    const localArchivePath = join(cwd, LOCAL_ARCHIVE_NAME);
+    await writeFile(localReportPath, LOCAL_REPORT_TEXT);
+    await writeFile(localArchivePath, Buffer.from(LOCAL_ARCHIVE_DATA, "base64"));
+    const firstResponse = `FIRST RESPONSE\n\n[查看本地图片](<${localImagePath}>)\n\n[验收报告](<${localReportPath}>)｜[原始证据](<${localArchivePath}>)`;
     const createModelRuntime = async (
       options: CreateModelRuntimeOptions,
     ): Promise<ModelRuntime> => {

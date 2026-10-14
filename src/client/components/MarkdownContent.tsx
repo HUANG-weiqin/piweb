@@ -19,6 +19,7 @@ import {
 } from "marked";
 import { useModalFocus } from "../lib/use-modal-focus";
 import { localImagePath } from "../../shared/local-image-path";
+import { localFilePath } from "../../shared/local-file-path";
 
 const KATEX_OPTIONS = {
   maxExpand: 1_000,
@@ -192,30 +193,33 @@ const mathExtension: MarkedExtension = {
 
 const markdownParser = new Marked(mathExtension);
 
-function localImageLinkPath(href: string): string | undefined {
-  if (/^file:/i.test(href)) return localImagePath(href);
+function localLinkPath(href: string): string | undefined {
+  // In-page anchors and query links are navigation, not disk file names.
+  if (/^[#?]/.test(href)) return undefined;
+  if (/^file:/i.test(href)) return localFilePath(href);
   try {
-    return localImagePath(decodeURIComponent(href));
+    return localFilePath(decodeURIComponent(href));
   } catch {
-    return localImagePath(href);
+    return localFilePath(href);
   }
 }
 
 function windowsLinkDestination(raw: string | undefined): string | undefined {
   const href = raw?.trim().replace(/^<([\s\S]*)>$/, "$1");
   // Native Windows destinations use literal separators, not Markdown escapes.
-  // Preserve UNC/device syntax too, so localImagePath can still reject it.
+  // Preserve UNC/device syntax too, so localFilePath can still reject it.
   return href && /^(?:[a-z]:\\|\.\.?\\|\\\\)/i.test(href) ? href : undefined;
 }
 
-function localImageButton(path: string, label: string): string {
-  return `<button type="button" class="local-image-link" data-piweb-local-image="${escapeHtml(path)}" title="查看本地图片：${escapeHtml(path)}">${label} ↗</button>`;
+function localFileButton(path: string, label: string): string {
+  const action = localImagePath(path) ? "查看本地图片" : "打开本地文件";
+  return `<button type="button" class="local-file-link" data-piweb-local-file="${escapeHtml(path)}" title="${action}：${escapeHtml(path)}">${label} ↗</button>`;
 }
 
 // Unquoted paths stop at whitespace/punctuation. Paths with spaces belong in
 // a Markdown link or inline code, where their exact boundary is unambiguous.
 const BARE_IMAGE_PATH = /(?:^|[\s(（])((?:file:\/\/\/|[a-z]:[\\/]|\/(?!\/)|\.\.?[\\/])[^\s<>"'`[\]{}]*?\.(?:png|jpe?g|webp|gif))(?=$|[\s，。！？；：、)>}\]"'])/i;
-const localImageMarkdownParser = new Marked(mathExtension, {
+const localFileMarkdownParser = new Marked(mathExtension, {
   tokenizer: {
     link(source) {
       const token = Tokenizer.prototype.link.call(this, source);
@@ -247,7 +251,7 @@ const localImageMarkdownParser = new Marked(mathExtension, {
       return { type: "localImagePath", raw: match[1], text: path };
     },
     renderer(token) {
-      return localImageButton(token.text, escapeHtml(token.raw));
+      return localFileButton(token.text, escapeHtml(token.raw));
     },
   }],
 });
@@ -417,28 +421,28 @@ const decorateWebLink: ElementHook = (currentNode) => {
 function renderMarkdown(
   markdown: string,
   mermaidMarker?: string,
-  allowLocalImages = false,
+  allowLocalFiles = false,
 ): string {
   const renderer = new Renderer();
-  if (allowLocalImages) {
+  if (allowLocalFiles) {
     const renderLink = renderer.link;
     const renderImage = renderer.image;
     const renderCodeSpan = renderer.codespan;
     renderer.link = function renderLocalLink(token) {
-      const path = localImageLinkPath(token.href);
-      if (path) return localImageButton(path, escapeHtml(token.text));
+      const path = localLinkPath(token.href);
+      if (path) return localFileButton(path, escapeHtml(token.text));
       if (windowsLinkDestination(token.href)) return escapeHtml(token.text);
       return renderLink.call(this, token);
     };
     renderer.image = function renderLocalImage(token) {
-      const path = localImageLinkPath(token.href);
-      if (path) return localImageButton(path, escapeHtml(token.text || "查看图片"));
+      const path = localImagePath(localLinkPath(token.href) ?? "");
+      if (path) return localFileButton(path, escapeHtml(token.text || "查看图片"));
       if (windowsLinkDestination(token.href)) return escapeHtml(token.text);
       return renderImage.call(this, token);
     };
     renderer.codespan = function renderLocalCodeSpan(token) {
       const path = localImagePath(token.text);
-      return path ? localImageButton(path, `<code>${escapeHtml(token.text)}</code>`) : renderCodeSpan.call(this, token);
+      return path ? localFileButton(path, `<code>${escapeHtml(token.text)}</code>`) : renderCodeSpan.call(this, token);
     };
   }
   if (mermaidMarker) {
@@ -452,7 +456,7 @@ function renderMarkdown(
   }
   DOMPurify.addHook("afterSanitizeAttributes", decorateWebLink);
   try {
-    const parser = allowLocalImages ? localImageMarkdownParser : markdownParser;
+    const parser = allowLocalFiles ? localFileMarkdownParser : markdownParser;
     return DOMPurify.sanitize(parser.parse(markdown, {
       async: false,
       renderer,
@@ -674,7 +678,7 @@ interface MarkdownContentProps {
   mermaidMaxBlocks?: number;
   mermaidMaxTotalSourceLength?: number;
   onRenderSettled?(): void;
-  onOpenLocalImage?(path: string): void;
+  onOpenLocalFile?(path: string): void;
 }
 
 function MarkdownContentView({
@@ -684,14 +688,14 @@ function MarkdownContentView({
   mermaidMaxBlocks = MERMAID_MAX_BLOCKS_PER_CONTENT,
   mermaidMaxTotalSourceLength = MERMAID_MAX_TOTAL_SOURCE_LENGTH,
   onRenderSettled,
-  onOpenLocalImage,
+  onOpenLocalFile,
 }: MarkdownContentProps) {
   const rootRef = useRef<HTMLDivElement>(null);
   const [expandedSvg, setExpandedSvg] = useState<SVGSVGElement | null>(null);
   const rendered = useMemo(() => {
     const marker = renderMermaid ? createMarker() : undefined;
     return {
-      html: renderMarkdown(markdown, marker, onOpenLocalImage !== undefined),
+      html: renderMarkdown(markdown, marker, onOpenLocalFile !== undefined),
       marker,
     };
   }, [
@@ -699,7 +703,7 @@ function MarkdownContentView({
     mermaidMaxBlocks,
     mermaidMaxTotalSourceLength,
     renderMermaid,
-    onOpenLocalImage,
+    onOpenLocalFile,
   ]);
   // The rendered diagrams live inside this opaque subtree. Keep the prop stable
   // so opening the viewer does not make React restore the original code fences.
@@ -766,12 +770,12 @@ function MarkdownContentView({
 
   const handleContentClick = (event: ReactMouseEvent<HTMLDivElement>) => {
     if (!(event.target instanceof Element)) return;
-    const imageTrigger = event.target.closest<HTMLButtonElement>("button[data-piweb-local-image]");
-    if (imageTrigger && event.currentTarget.contains(imageTrigger)) {
-      const path = localImagePath(imageTrigger.dataset.piwebLocalImage ?? "");
-      if (path && onOpenLocalImage) {
+    const fileTrigger = event.target.closest<HTMLButtonElement>("button[data-piweb-local-file]");
+    if (fileTrigger && event.currentTarget.contains(fileTrigger)) {
+      const path = localFilePath(fileTrigger.dataset.piwebLocalFile ?? "");
+      if (path && onOpenLocalFile) {
         event.preventDefault();
-        onOpenLocalImage(path);
+        onOpenLocalFile(path);
       }
       return;
     }

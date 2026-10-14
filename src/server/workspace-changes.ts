@@ -14,6 +14,7 @@ const STATUS_ARGS = [
   "-c", "core.fsmonitor=false",
   "status",
   "--porcelain=v1",
+  "--branch",
   "-z",
   "--untracked-files=all",
   "--ignore-submodules=none",
@@ -82,6 +83,14 @@ export function parseWorkspaceChanges(output: Buffer): ReadySnapshot {
     offset = end + 1;
     return field;
   };
+  const header = nextField();
+  if (!header.startsWith("## ")) invalidOutput();
+  const branch = header === "## HEAD (no branch)"
+    ? null
+    : header.slice(3).replace(/^No commits yet on /, "").split("...")[0];
+  if (branch !== null && (!branch || branch.length > 4096 || /[\x00-\x20\x7f]/.test(branch))) {
+    invalidOutput();
+  }
   while (offset < text.length) {
     const record = nextField();
     if (record.length < 4 || record[2] !== " ") invalidOutput();
@@ -107,6 +116,7 @@ export function parseWorkspaceChanges(output: Buffer): ReadySnapshot {
   });
   return {
     state: "ready",
+    branch,
     files: files.slice(0, MAX_WORKSPACE_CHANGE_FILES),
     total: files.length,
     truncated: files.length > MAX_WORKSPACE_CHANGE_FILES,

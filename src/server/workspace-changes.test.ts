@@ -78,12 +78,12 @@ function repository(files: Record<string, string> = {}): string {
   return cwd;
 }
 
-function ready(files: WorkspaceFileChange[], total = files.length) {
-  return { state: "ready", files, total, truncated: total > files.length };
+function ready(files: WorkspaceFileChange[], total = files.length, branch: string | null = "main") {
+  return { state: "ready", branch, files, total, truncated: total > files.length };
 }
 
 function parse(text: string) {
-  return parseWorkspaceChanges(Buffer.from(text));
+  return parseWorkspaceChanges(Buffer.from("## main\0" + text));
 }
 
 function failure(properties: Partial<ExecFileException>): ExecFileException {
@@ -112,6 +112,24 @@ function mockResult(error: ExecFileException | null, stdout = "", stderr = ""): 
 }
 
 describe("parseWorkspaceChanges", () => {
+  it.each([
+    ["## main", "main"],
+    ["## feature/中文-分支", "feature/中文-分支"],
+    ["## No commits yet on main", "main"],
+    ["## main...origin/main [ahead 2, behind 1]", "main"],
+    ["## main...origin/main [gone]", "main"],
+    ["## HEAD (no branch)", null],
+  ])("reads the current branch from %s", (header, branch) => {
+    expect(parseWorkspaceChanges(Buffer.from(header + "\0?? file.txt\0")))
+      .toEqual(ready([{ path: "file.txt", status: "untracked" }], 1, branch));
+  });
+
+  it.each(["", "?? file.txt\0", "## \0", "## invalid branch\0", `## ${"x".repeat(4097)}\0`])(
+    "rejects missing or invalid branch information %j", (output) => {
+      expect(() => parseWorkspaceChanges(Buffer.from(output))).toThrow("Invalid Git status output");
+    },
+  );
+
   it("accepts a complete empty observation", () => {
     expect(parse("")).toEqual(ready([]));
   });
@@ -221,13 +239,18 @@ describe("parseWorkspaceChanges", () => {
 });
 
 describe("readWorkspaceChanges with real temporary Git repositories", () => {
-  it("reads empty repositories, with or without HEAD", async () => {
+  it("reads the branch in empty repositories and follows branch switches and detached HEAD", async () => {
     const cwd = repository();
     expect(await readWorkspaceChanges(cwd)).toEqual(ready([]));
     write(cwd, "tracked.txt");
     git(cwd, "add", "--all");
     git(cwd, "commit", "-m", "fixture");
     expect(await readWorkspaceChanges(cwd)).toEqual(ready([]));
+    const branch = "feature/中文-分支";
+    git(cwd, "switch", "-c", branch);
+    expect(await readWorkspaceChanges(cwd)).toEqual(ready([], 0, branch));
+    git(cwd, "checkout", "--detach");
+    expect(await readWorkspaceChanges(cwd)).toEqual(ready([], 0, null));
   }, 20_000);
 
   it("counts a staged plus unstaged path once", async () => {
@@ -316,7 +339,7 @@ describe("readWorkspaceChanges with real temporary Git repositories", () => {
     write(cwd, "original-only.txt");
     write(linked, "nested/tracked.txt", "linked change\n");
     expect(await readWorkspaceChanges(join(linked, "nested")))
-      .toEqual(ready([{ path: "nested/tracked.txt", status: "modified" }]));
+      .toEqual(ready([{ path: "nested/tracked.txt", status: "modified" }], 1, null));
   }, 20_000);
 
   it("does not refresh index bytes/mtime or invoke a configured fsmonitor hook", async () => {
@@ -371,13 +394,13 @@ describe("readWorkspaceChanges with real temporary Git repositories", () => {
 
 describe("readWorkspaceChanges external failure boundaries", () => {
   it("makes exactly one fixed non-shell query with a 5s/4MiB budget", async () => {
-    mockResult(null, "?? file\0");
+    mockResult(null, "## main\0?? file\0");
     expect(await readWorkspaceChanges("chosen-cwd"))
       .toEqual(ready([{ path: "file", status: "untracked" }]));
     expect(execMock).toHaveBeenCalledTimes(1);
     expect(execMock).toHaveBeenCalledWith("git", [
       "--no-optional-locks", "-c", "core.fsmonitor=false", "status", "--porcelain=v1",
-      "-z", "--untracked-files=all", "--ignore-submodules=none",
+      "--branch", "-z", "--untracked-files=all", "--ignore-submodules=none",
     ], expect.objectContaining({
       cwd: "chosen-cwd", encoding: "buffer", shell: false, windowsHide: true,
       timeout: 5_000, maxBuffer: OUTPUT_LIMIT, killSignal: "SIGKILL",

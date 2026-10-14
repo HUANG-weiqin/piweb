@@ -12,6 +12,7 @@ const INITIAL = {
 };
 const READY = {
   state: "ready" as const,
+  branch: "main",
   files: [{ path: "src/a.ts", status: "modified" as const }],
   total: 1,
   truncated: false,
