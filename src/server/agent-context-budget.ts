@@ -63,7 +63,7 @@ function createTelemetry(
   const warning = typeof usage.percent === "number"
     && Number.isFinite(usage.percent)
     && usage.percent >= thresholdPercent - 5
-    ? " warning=\"Compaction soon; consider updating Agent Notebook.\""
+    ? " warning=\"Compaction soon; save needed notes to Agent Notebook, then use reset_context with an explicit handoff as the sole direct tool call.\""
     : "";
   return `<piweb_ctx used="${formatTokens(usage.tokens)}/${formatTokens(window)}" auto_compact="${thresholdPercent}%" remaining="${formatTokens(remaining)}"${warning} />`;
 }

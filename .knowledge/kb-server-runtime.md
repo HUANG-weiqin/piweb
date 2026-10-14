@@ -1,6 +1,6 @@
 # 服务端运行时
 
-`updated: 2026-10-06`
+`updated: 2026-10-14`
 
 ## 这个模块是干什么的
 
@@ -103,7 +103,7 @@
 
 仅普通 Agent 模型调用使用此提示；Pi 独立 compaction/branch-summary summarizer 不消费执行任务提醒。runtime 在 extension context hook 后读取 Actor 最新 LoopList，仅有 active 项时才合并当次 usage/阈值提示与 `piweb_work`；锚点重放规则由[LoopList owner](kb-agent-collaboration.md#looplist-状态与续跑)维护。
 
-提示是一条隐藏、持久的 `piweb.context_hint.v1` custom message，streaming 经 steering 在下一模型调用前注入，idle 直接追加；同会话不足一分钟不重注入。最多 4096 UTF-8 bytes，只保留完整 active item 的 id/text，确有裁剪才写精确 omitted；字段顺序固定，分钟值 `activeElapsedMinutes/loopListElapsedMinutes` 自解释、向下取整且负值钳零。无 active 时连 ctx hint 也不注入；usage 不可用仍可输出 active 摘要，计时失败只省略分钟字段，距阈值 5 个百分点才建议 Notebook。注入 best-effort 不阻断模型。持久追加保证 provider 前缀 append-only，不能改回下轮消失的瞬态尾部。
+提示是一条隐藏、持久的 `piweb.context_hint.v1` custom message，streaming 经 steering 在下一模型调用前注入，idle 直接追加；同会话不足一分钟不重注入。最多 4096 UTF-8 bytes，只保留完整 active item 的 id/text，确有裁剪才写精确 omitted；字段顺序固定，分钟值 `activeElapsedMinutes/loopListElapsedMinutes` 自解释、向下取整且负值钳零。无 active 时连 ctx hint 也不注入；usage 不可用仍可输出 active 摘要，计时失败只省略分钟字段，距自动压缩阈值 5 个百分点时才提醒：先将必要笔记保存到 Agent Notebook，再携带明确 handoff 将 `reset_context` 作为唯一直接工具调用。注入 best-effort 不阻断模型。持久追加保证 provider 前缀 append-only，不能改回下轮消失的瞬态尾部。
 ### 请求与会话变更
 
 - OpenAI Codex Responses 的 `auto` transport 在 AgentSession 创建前通过 session-local settings override 解析为 `sse`，让普通 turn、SDK retry 与 compaction summary 共用 zstd SSE；用户显式选择的 `sse | websocket | websocket-cached` 原样保留，override 不写回用户或项目 settings。完整 provider JSON、cached WebSocket delta、实际 WebSocket frame 与压缩 SSE body 是不同观察边界；工作台不得再用 raw context/provider body 字节阈值伪造 `context_length_exceeded` 或触发 durable compaction，generic WebSocket/request-buffer error 也必须保持 transport error。

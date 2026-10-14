@@ -462,7 +462,7 @@ describe("installAgentContextBudget", () => {
       "<piweb_ctx used=\"65k/100k\" auto_compact=\"70%\" remaining=\"5k\" />",
     );
     expect(telemetryText(at)).toBe(
-      "<piweb_ctx used=\"65k/100k\" auto_compact=\"70%\" remaining=\"5k\" warning=\"Compaction soon; consider updating Agent Notebook.\" />",
+      "<piweb_ctx used=\"65k/100k\" auto_compact=\"70%\" remaining=\"5k\" warning=\"Compaction soon; save needed notes to Agent Notebook, then use reset_context with an explicit handoff as the sole direct tool call.\" />",
     );
   });
 
@@ -486,7 +486,7 @@ describe("installAgentContextBudget", () => {
     const afterCompaction = await session.agent.convertToLlm([]);
 
     expect(telemetryAt(0)).toContain(
-      "warning=\"Compaction soon; consider updating Agent Notebook.\"",
+      "warning=\"Compaction soon; save needed notes to Agent Notebook, then use reset_context with an explicit handoff as the sole direct tool call.\"",
     );
     expect(telemetryAt(1)).toBe(
       "<piweb_ctx used=\"10k/100k\" auto_compact=\"70%\" remaining=\"60k\" />",
