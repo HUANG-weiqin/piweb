@@ -48,6 +48,7 @@ import {
   createMetaOperationEntry,
   createMessageDeliveryReceiptEntry,
   createRunSettlementEntry,
+  inspectBrowserPromptLedger,
   type ConversationMeta,
 } from "./conversation-meta.js";
 import { ConversationNotebook } from "./conversation-notebook.js";
@@ -1702,6 +1703,43 @@ describe("ProjectStore", () => {
     expect(reopened.buildSessionContext().messages).toEqual([
       expect.objectContaining({ role: "user", content: "branch root" }),
       expect.objectContaining({ role: "user", content: "active parent" }),
+    ]);
+  });
+
+  it("removes a selected browser prompt's admission when truncating its delivery", async () => {
+    const cwd = await createTemporaryDirectory("piweb-truncate-browser-prompt-");
+    const store = await ProjectStore.open(cwd);
+    const conversation = await store.createConversation(undefined, discoveryMeta());
+    conversation.appendMessage({ role: "user", content: "retained", timestamp: 1 });
+
+    const promptId = randomUUID();
+    const runId = randomUUID();
+    const admission = createBrowserPromptAdmissionEntry({
+      promptId,
+      runId,
+      text: "rewind me",
+    });
+    conversation.appendCustomEntry(admission.customType, admission.data);
+    const delivery = createBrowserPromptDeliveryEntry({ promptId, runId });
+    conversation.appendCustomEntry(delivery.customType, delivery.data);
+    const selectedId = conversation.appendMessage({
+      role: "user",
+      content: "rewind me",
+      timestamp: 2,
+    });
+
+    await store.truncateConversation(conversation.getSessionId(), selectedId);
+
+    const reopened = await store.openConversation(conversation.getSessionId(), {
+      updateRecent: false,
+    });
+    expect(inspectBrowserPromptLedger(reopened.getEntries())).toMatchObject({
+      admissions: [],
+      pending: [],
+      deliveries: [],
+    });
+    expect(reopened.buildSessionContext().messages).toEqual([
+      expect.objectContaining({ role: "user", content: "retained" }),
     ]);
   });
 

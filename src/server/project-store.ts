@@ -41,6 +41,8 @@ import {
   MAX_WORKSPACE_SESSION_REPAIR_FILES,
 } from "../shared/protocol.js";
 import {
+  BROWSER_PROMPT_ADMISSION_CUSTOM_TYPE,
+  BROWSER_PROMPT_DELIVERY_CUSTOM_TYPE,
   CONVERSATION_META_CUSTOM_TYPE,
   createConversationMetaEntry,
   parseConversationLineage,
@@ -2723,6 +2725,30 @@ export class ProjectStore {
       const retainedEntryIds = new Set(
         activeBranch.slice(0, anchorIndex).map(({ id }) => id),
       );
+      // A delivered browser prompt has admission -> delivery marker -> raw user
+      // entry. Rewinding from that user removes the raw entry but its two
+      // preceding markers would otherwise survive in the retained prefix; the
+      // admission would then be mistaken for undelivered work and replayed.
+      const deliveryMarker = parsedEntries.find(({ id }) => id === anchor.parentId);
+      if (
+        deliveryMarker?.type === "custom"
+        && deliveryMarker.customType === BROWSER_PROMPT_DELIVERY_CUSTOM_TYPE
+        && isRecord(deliveryMarker.data)
+        && typeof deliveryMarker.data.promptId === "string"
+      ) {
+        const promptId = deliveryMarker.data.promptId;
+        const admissionMarker = parsedEntries.find((entry) => (
+          entry.type === "custom"
+          && entry.customType === BROWSER_PROMPT_ADMISSION_CUSTOM_TYPE
+          && isRecord(entry.data)
+          && entry.data.promptId === promptId
+        ));
+        if (admissionMarker === undefined) {
+          throw new Error(`Browser prompt admission not found for rewind anchor: ${entryId}`);
+        }
+        retainedEntryIds.delete(deliveryMarker.id);
+        retainedEntryIds.delete(admissionMarker.id);
+      }
       const receiptTargetRunIds = new Set<string>();
       for (const entry of parsedEntries) {
         const reserved = parseReservedConversationEntry(entry);

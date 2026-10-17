@@ -988,6 +988,8 @@ function ChatView({
             || submitting
             || !controlsEnabled
             || !conversationReady
+            || chat.awaitingHistorySnapshot
+            || chat.projectionGap
             || Boolean(rewindingMessageId)
           }
           rewinding={rewindingMessageId === block.message.id}

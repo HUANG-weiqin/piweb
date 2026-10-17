@@ -5104,6 +5104,8 @@ export function App() {
       || Boolean(outstandingRunIdRef.current)
       || Boolean(pendingPromptRef.current)
       || pendingAdmissionsRef.current.length > 0
+      || chatRef.current.awaitingHistorySnapshot
+      || chatRef.current.projectionGap
       || Boolean(pendingConversationTruncationRef.current)
       || pendingConversationDeletionScopeRef.current.has(focus.conversationId)
     ) {

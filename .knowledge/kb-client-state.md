@@ -1,6 +1,6 @@
 # 客户端状态
 
-`updated: 2026-10-13`
+`updated: 2026-10-17`
 
 ## 这个模块是干什么的
 
@@ -180,6 +180,7 @@ ServerEvent
 - 目录列表中的 `path` 只是浏览投影，不是项目 cwd；不要在用户确认和 initialize 校验前创建项目状态、加载资源或持久化会话。
 - 后台 project snapshot 不能通过 conversationId 过滤；focused transcript event 也不能只按 conversationId 接收。两者处在不同观察边界。
 - `projectionSeq` 缺口表示当前工作过程投影不可证明完整；reducer 必须停止套用后续 delta 并触发 `refresh_view`，只能由匹配且不早于当前 watermark 的 snapshot 清除缺口。同 focus 的旧 snapshot 或在已进入 sequenced 模式后缺少序号的 snapshot 必须丢弃，不能回退 transcript/watermark；`conversation_item` 只能匹配当前 watermark，不能替代丢失的 run delta 推进序号。
+- `run_finished` 先于最终权威 history snapshot 到达；此间 `prompt_accepted` 投影的 user item 仍可能只有临时 UI ID，而 `truncate_conversation` 要求 JSONL 中的持久 entry ID。Reducer 在 terminal event 后标记等待快照，Chat 禁用回退按钮，App 命令入口也拒绝 projection gap / snapshot 未到的回退；只有匹配快照 canonicalize transcript 后才重新开放。
 - `message.text/thinking/tools` 是复制、token 与旧快照兼容投影，不再携带顺序语义。历史内部 message 的缺 parts 展示 fallback 不等于接受旧 wire snapshot；当前协议要求所有实时与恢复路径生成 ordered parts，不能再次从三个聚合字段猜时间顺序。
 
 ## 关联模块

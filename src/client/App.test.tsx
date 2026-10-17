@@ -7123,6 +7123,142 @@ describe("App", () => {
     expect(restoredInput).toHaveValue("需要保留吗？");
   });
 
+  it("keeps rewind disabled until a settled user message has durable history identity", () => {
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    render(<App />);
+    const sessionId = startFromSetup();
+    const messageText = "same prompt after rewind";
+    act(() => {
+      socketMock.emit?.({
+        type: "state",
+        state: {
+          sessionId,
+          cwd: "E:\\work",
+          busy: false,
+          conversationId: CONVERSATION_ID,
+          focusId: FOCUS_A,
+          thinkingLevel: "off",
+          toolMode: "full_access",
+          availableThinkingLevels: ["off"],
+          selectedModel: { provider: "provider", id: "model" },
+          providers: [],
+        },
+      });
+      socketMock.emit?.({
+        type: "conversation_snapshot",
+        sessionId,
+        conversationId: CONVERSATION_ID,
+        focusId: FOCUS_A,
+        projectionSeq: 0,
+        pendingPrompts: [],
+        items: [],
+        window: completeConversationWindow,
+      });
+    });
+
+    fireEvent.change(screen.getByRole("textbox", { name: "给 Pi 发送消息" }), {
+      target: { value: messageText },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    const prompt = latestCommand("prompt");
+    act(() => {
+      socketMock.emit?.({
+        type: "state",
+        state: {
+          sessionId,
+          cwd: "E:\\work",
+          busy: true,
+          activeRun: { id: prompt.runId, phase: "running" },
+          conversationId: CONVERSATION_ID,
+          focusId: FOCUS_A,
+          thinkingLevel: "off",
+          toolMode: "full_access",
+          availableThinkingLevels: ["off"],
+          selectedModel: { provider: "provider", id: "model" },
+          providers: [],
+        },
+      });
+      socketMock.emit?.({
+        type: "session_event",
+        sessionId,
+        conversationId: CONVERSATION_ID,
+        focusId: FOCUS_A,
+        runId: prompt.runId,
+        projectionSeq: 1,
+        event: { type: "run_queued" },
+      });
+      socketMock.emit?.({
+        type: "session_event",
+        sessionId,
+        conversationId: CONVERSATION_ID,
+        focusId: FOCUS_A,
+        runId: prompt.runId,
+        projectionSeq: 2,
+        event: { type: "run_started" },
+      });
+    });
+    const rewind = screen.getByRole("button", {
+      name: "回到此处，删除这条及之后的消息",
+    });
+    expect(rewind).toBeDisabled();
+
+    // The host marks the run idle before it publishes the final authoritative
+    // snapshot. The live user projectionId is not the JSONL entry ID expected
+    // by truncate_conversation.
+    act(() => {
+      socketMock.emit?.({
+        type: "session_event",
+        sessionId,
+        conversationId: CONVERSATION_ID,
+        focusId: FOCUS_A,
+        runId: prompt.runId,
+        projectionSeq: 3,
+        event: { type: "run_finished", outcome: "completed" },
+      });
+      socketMock.emit?.({
+        type: "state",
+        state: {
+          sessionId,
+          cwd: "E:\\work",
+          busy: false,
+          conversationId: CONVERSATION_ID,
+          focusId: FOCUS_A,
+          thinkingLevel: "off",
+          toolMode: "full_access",
+          availableThinkingLevels: ["off"],
+          selectedModel: { provider: "provider", id: "model" },
+          providers: [],
+        },
+      });
+    });
+    expect(rewind).toBeDisabled();
+
+    act(() => socketMock.emit?.({
+      type: "conversation_snapshot",
+      sessionId,
+      conversationId: CONVERSATION_ID,
+      focusId: FOCUS_A,
+      projectionSeq: 3,
+      pendingPrompts: [],
+      items: snapshotItems([{
+        id: "durable-user-entry",
+        runId: prompt.runId,
+        role: "user",
+        text: messageText,
+        thinking: "",
+        tools: [],
+      }]),
+      window: completeConversationWindow,
+    }));
+    const durableRewind = screen.getByRole("button", {
+      name: "回到此处，删除这条及之后的消息",
+    });
+    expect(durableRewind).toBeEnabled();
+    fireEvent.click(durableRewind);
+    expect(latestCommand("truncate_conversation").messageId)
+      .toBe("durable-user-entry");
+  });
+
   it("answers extension UI requested during initialization before the first state", () => {
     render(<App />);
     const sessionId = startFromSetup();

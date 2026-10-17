@@ -73,6 +73,8 @@ export interface ChatState {
    */
   lastProjectionSeq?: number;
   projectionGap?: boolean;
+  /** A terminal run event arrived before its authoritative durable history snapshot. */
+  awaitingHistorySnapshot?: boolean;
   /** Coverage declared by the last accepted authoritative history snapshot. */
   historyWindow?: ConversationWindowCoverage;
   /** Average output rate from the latest settled run and focused snapshot. */
@@ -412,6 +414,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       items: [],
       lastProjectionSeq: undefined,
       projectionGap: false,
+      awaitingHistorySnapshot: false,
       historyWindow: undefined,
       completedOutputRate: undefined,
       bashActivity: null,
@@ -450,6 +453,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       },
       lastProjectionSeq: action.projectionSeq,
       projectionGap: false,
+      awaitingHistorySnapshot: false,
       historyWindow: action.historyWindow === undefined
         ? undefined
         : {
@@ -525,6 +529,9 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
   }
 
   const event = action.event;
+  if (event.type === "run_finished") {
+    state = { ...state, awaitingHistorySnapshot: true };
+  }
   if (state.projectionGap) return state;
   if (state.lastProjectionSeq !== undefined && action.projectionSeq === undefined) {
     return { ...state, projectionGap: true, historyWindow: undefined };

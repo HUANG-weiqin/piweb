@@ -462,9 +462,52 @@ async function main(): Promise<void> {
     evidence.titleDidNotStartAgentTurn = true;
     assert.equal(ui.frames.filter((frame) => frame.direction === "sent" && frame.payload.type === "prompt").length, 4, "reconnect must not resend prompts");
     assert(!received((event) => event.type === "prompt_delivered" && event.promptId === duplicateCommand.promptId), "withdrawn duplicate must never deliver");
+
+    const rewindUser = finalDisk.entries.find((entry) => entry.message?.role === "user" && entryText(entry) === BUSY_PROMPT);
+    assert(rewindUser, "busy prompt has a durable history entry");
+    const rewindStart = ui.frames.length;
+    const rewindClick = await ui.call("Runtime.evaluate", {
+      expression: `(() => {
+        window.confirm = () => true;
+        const message = [...document.querySelectorAll("article.message.user")]
+          .find((article) => article.textContent?.includes(${JSON.stringify(BUSY_PROMPT)}));
+        const button = message?.querySelector('button[aria-label="回到此处，删除这条及之后的消息"]');
+        if (!button || button.disabled) return false;
+        button.click();
+        return true;
+      })()`,
+      userGesture: true,
+      returnByValue: true,
+    });
+    assert.equal(rewindClick.result?.value, true, "settled history exposes rewind only after hydration");
+    const rewindCommand = await waitFor("durable-entry rewind command", () => ui.frames.slice(rewindStart).find((frame) => (
+      frame.direction === "sent" && frame.payload.type === "truncate_conversation"
+    ))?.payload);
+    assert.equal(rewindCommand.messageId, rewindUser.id, "rewind uses the persisted JSONL entry ID");
+    const rewindSnapshot = await waitFor("authoritative snapshot without rewound prompt", () => ui.frames.slice(rewindStart).find((frame) => (
+      frame.direction === "received" && frame.payload.type === "conversation_snapshot"
+      && frame.payload.sessionId === recovered.sessionId
+      && frame.payload.focusId === recovered.focusId
+      && !frame.payload.items.some((item: any) => item.kind === "message" && item.role === "user" && item.text === BUSY_PROMPT)
+    ))?.payload);
+    await waitFor("rewind command completion", () => ui.frames.slice(rewindStart).find((frame) => (
+      frame.direction === "received" && frame.payload.type === "command_complete"
+      && frame.payload.operation === "truncate_conversation"
+      && frame.payload.commandId === rewindCommand.commandId
+    ))?.payload);
+    assert(!rewindSnapshot.items.some((item: any) => item.kind === "message" && item.role === "user" && item.text === BUSY_PROMPT));
+    assert.equal(await ui.evaluate('document.querySelector(\'textarea[aria-label="给 Pi 发送消息"]\')?.value'), BUSY_PROMPT);
+    const resentCommand = await send(BUSY_PROMPT);
+    const resentDelivery = await waitFor("rewound prompt durable delivery", () => received((event) => event.type === "prompt_delivered" && event.promptId === resentCommand.promptId));
+    await waitFor("rewound prompt run settlement", () => received((event) => event.type === "conversation_run_settled" && event.runId === resentDelivery.runId && event.outcome === "completed"));
+    const rewoundDisk = await diskConversation(fixture.cwd, conversationId);
+    assert.equal(rewoundDisk.entries.filter((entry) => entry.message?.role === "user" && entryText(entry) === BUSY_PROMPT).length, 1, "rewind then resend persists one copy");
+    evidence.rewindAndResend = { messageId: rewindCommand.messageId, resendPromptId: resentCommand.promptId, singleDurableCopy: true };
+    console.log("E2E: rewind waited for durable history identity; resending leaves one user entry");
+
     assert.deepEqual(ui.browserErrors, []);
     evidence.transitionMeasures = await ui.evaluate('performance.getEntriesByName("piweb.transition", "measure").map((entry) => ({ duration: entry.duration, detail: entry.detail }))');
-    await writeFile(join(artifactDir, "conversation.jsonl"), finalDisk.raw);
+    await writeFile(join(artifactDir, "conversation.jsonl"), rewoundDisk.raw);
     const screenshot = await ui.call("Page.captureScreenshot", { format: "png", captureBeyondViewport: false });
     await writeFile(join(artifactDir, "browser.png"), Buffer.from(screenshot.data, "base64"));
     passed = true;
