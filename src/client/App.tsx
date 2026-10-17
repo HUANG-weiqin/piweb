@@ -941,7 +941,13 @@ export function App() {
     SettingOperationResult["operation"],
     Pick<SettingOperationResult, "sessionId" | "commandId">
   >>>({});
-  const [auth, setAuth] = useState<{ requestId?: string; request?: AuthRequest; progress?: string }>({});
+  const [auth, setAuth] = useState<{
+    requestId?: string;
+    request?: AuthRequest;
+    /** Latest informational auth frame (authorization URL / device code). */
+    notice?: AuthRequest;
+    progress?: string;
+  }>({});
   const [extensionUI, setExtensionUI] = useState<PendingExtensionUI[]>([]);
   const [notification, setNotification] = useState<{
     id: number;
@@ -3108,6 +3114,13 @@ export function App() {
         });
       } else if (event.type === "auth_request") {
         if (event.authFlowId !== authFlowIdRef.current) return;
+        // Authorization URL and device code are notifications that must stay
+        // visible; only prompt/manual/select frames can be answered, and the
+        // answerable frame is the one the response must be correlated with.
+        if (event.request.kind === "auth" || event.request.kind === "device") {
+          setAuth((current) => ({ ...current, notice: event.request }));
+          return;
+        }
         setAuth((current) => ({ ...current, requestId: event.requestId, request: event.request }));
       } else if (event.type === "auth_progress") {
         if (event.authFlowId !== authFlowIdRef.current) return;
@@ -5648,7 +5661,7 @@ export function App() {
       return socketRef.current?.send(command) ?? false;
     },
   });
-  const authModalVisible = Boolean(auth.request || auth.progress);
+  const authModalVisible = Boolean(auth.request || auth.notice || auth.progress);
   const extensionPending = online
     && !authModalVisible
     && !settingsDialogOpen

@@ -2,9 +2,10 @@ import { useEffect, useState, type FormEvent } from "react";
 import type { AuthRequest } from "../../shared/protocol";
 import { useModalFocus } from "../lib/use-modal-focus";
 
-export function AuthDialog({ requestId, request, progress, visible = true, onRespond, onCancel }: {
+export function AuthDialog({ requestId, request, notice, progress, visible = true, onRespond, onCancel }: {
   requestId?: string;
   request?: AuthRequest;
+  notice?: AuthRequest;
   progress?: string;
   visible?: boolean;
   onRespond(requestId: string, response: { value?: string; selectedId?: string }): void;
@@ -12,7 +13,7 @@ export function AuthDialog({ requestId, request, progress, visible = true, onRes
 }) {
   const [value, setValue] = useState("");
   useEffect(() => setValue(""), [requestId]);
-  const active = visible && Boolean(request || progress);
+  const active = visible && Boolean(request || notice || progress);
   const focusRef = useModalFocus<HTMLElement>(
     active,
     requestId ?? `progress:${progress ?? ""}`,
@@ -38,13 +39,15 @@ export function AuthDialog({ requestId, request, progress, visible = true, onRes
         </div>
       </header>
       {progress && <p className="progress">{progress}</p>}
-      {request?.kind === "auth" && <>
-        <p>{request.instructions ?? "在浏览器中完成授权，然后返回这里。"}</p>
-        <a className="primary-link" href={request.url} target="_blank" rel="noreferrer">打开授权页面</a>
+      {/* Auth URL / device code are informational: they stay visible while a
+          separate answerable request (paste code, etc.) is pending. */}
+      {notice?.kind === "auth" && <>
+        <p>{notice.instructions ?? "在浏览器中完成授权，然后返回这里。"}</p>
+        <a className="primary-link" href={notice.url} target="_blank" rel="noreferrer">打开授权页面</a>
       </>}
-      {request?.kind === "device" && <>
-        <p>输入设备验证码：</p><code className="device-code">{request.userCode}</code>
-        <a className="primary-link" href={request.verificationUri} target="_blank" rel="noreferrer">打开验证页面</a>
+      {notice?.kind === "device" && <>
+        <p>输入设备验证码：</p><code className="device-code">{notice.userCode}</code>
+        <a className="primary-link" href={notice.verificationUri} target="_blank" rel="noreferrer">打开验证页面</a>
       </>}
       {(request?.kind === "prompt" || request?.kind === "manual") && <form className="modal-form" onSubmit={submit}>
         <label>{request.message}</label>

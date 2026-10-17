@@ -69,6 +69,38 @@ describe("AuthDialog", () => {
     expect(screen.getByRole("textbox")).toHaveValue("123456");
   });
 
+  it("keeps the authorization link visible while a manual code prompt is pending", () => {
+    const onRespond = vi.fn();
+    render(<AuthDialog
+      requestId="manual-request"
+      notice={{ kind: "auth", url: "https://example.test/oauth", instructions: "在浏览器中完成授权" }}
+      request={{ kind: "manual", message: "粘贴授权码" }}
+      onRespond={onRespond}
+      onCancel={() => undefined}
+    />);
+
+    const link = screen.getByRole("link", { name: "打开授权页面" });
+    expect(link).toHaveAttribute("href", "https://example.test/oauth");
+    expect(screen.getByText("在浏览器中完成授权")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "code#state" } });
+    fireEvent.click(screen.getByRole("button", { name: "继续" }));
+    expect(onRespond).toHaveBeenCalledWith("manual-request", { value: "code#state" });
+    expect(screen.getByRole("link", { name: "打开授权页面" })).toBeInTheDocument();
+  });
+
+  it("shows a device code notice without an answerable request", () => {
+    render(<AuthDialog
+      notice={{ kind: "device", userCode: "ABCD-1234", verificationUri: "https://example.test/device" }}
+      onRespond={() => undefined}
+      onCancel={() => undefined}
+    />);
+
+    expect(screen.getByText("ABCD-1234")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "打开验证页面" }))
+      .toHaveAttribute("href", "https://example.test/device");
+  });
+
   it("renders secret prompts as password inputs", () => {
     const onRespond = vi.fn();
     render(<AuthDialog

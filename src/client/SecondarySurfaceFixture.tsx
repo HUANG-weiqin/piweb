@@ -308,8 +308,7 @@ function AuthSurface() {
 
   return <WorkbenchOverlay>
     {open && <AuthDialog
-      requestId="66666666-6666-4666-8666-666666666666"
-      request={{
+      notice={{
         kind: "device",
         userCode: "PIWEB-4821",
         verificationUri: "https://example.invalid/device",

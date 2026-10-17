@@ -9946,6 +9946,84 @@ describe("App", () => {
     });
   });
 
+  it("keeps the authorization link while the pasted-code prompt is pending", () => {
+    render(<App />);
+    const sessionId = startFromSetup();
+    act(() => socketMock.emit?.({
+      type: "state",
+      state: {
+        sessionId,
+        cwd: "E:\\work",
+        busy: false,
+        thinkingLevel: "off",
+        toolMode: "full_access",
+        availableThinkingLevels: ["off"],
+        selectedModel: { provider: "provider", id: "model" },
+        providers: [{
+          id: "anthropic",
+          name: "Anthropic (Claude Pro/Max)",
+          configured: false,
+          oauth: true,
+          models: [],
+        }],
+      },
+    }));
+    fireEvent.click(screen.getByRole("button", { name: "设置" }));
+    fireEvent.click(screen.getByRole("button", { name: "打开模型连接设置" }));
+    fireEvent.click(screen.getByRole("button", { name: "登录订阅账户" }));
+    const flow = latestCommand("login_oauth");
+
+    act(() => socketMock.emit?.({
+      type: "auth_request",
+      authFlowId: flow.authFlowId,
+      requestId: "select-request",
+      request: {
+        kind: "select",
+        message: "Select Anthropic login method:",
+        options: [
+          { id: "browser", label: "Browser login (default)" },
+          { id: "copy_code", label: "Copy code login (headless)" },
+        ],
+      },
+    }));
+    fireEvent.click(screen.getByRole("button", { name: "Browser login (default)" }));
+    expect(latestCommand("auth_response")).toMatchObject({
+      authFlowId: flow.authFlowId,
+      requestId: "select-request",
+      selectedId: "browser",
+    });
+
+    // The SDK follows the authorization URL notification with a code prompt;
+    // both must stay visible and the answer must use the prompt's requestId.
+    act(() => {
+      socketMock.emit?.({
+        type: "auth_request",
+        authFlowId: flow.authFlowId,
+        requestId: "auth-notice",
+        request: { kind: "auth", url: "https://claude.ai/oauth/authorize?x=1" },
+      });
+      socketMock.emit?.({
+        type: "auth_request",
+        authFlowId: flow.authFlowId,
+        requestId: "manual-request",
+        request: { kind: "manual", message: "Paste the code Anthropic shows after you sign in:" },
+      });
+    });
+
+    expect(screen.getByRole("link", { name: "打开授权页面" }))
+      .toHaveAttribute("href", "https://claude.ai/oauth/authorize?x=1");
+    const codeInput = screen.getByRole("dialog", { name: "登录订阅账户" }).querySelector("input");
+    if (!codeInput) throw new Error("code input not rendered");
+    fireEvent.change(codeInput, { target: { value: "code#state" } });
+    fireEvent.click(screen.getByRole("button", { name: "继续" }));
+    expect(latestCommand("auth_response")).toMatchObject({
+      authFlowId: flow.authFlowId,
+      requestId: "manual-request",
+      value: "code#state",
+    });
+    expect(screen.getByRole("link", { name: "打开授权页面" })).toBeInTheDocument();
+  });
+
   it("does not mistake an unrelated state refresh for API Key success", () => {
     render(<App />);
     const sessionId = startFromSetup();
