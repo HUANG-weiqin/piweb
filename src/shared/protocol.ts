@@ -137,7 +137,9 @@ export const MAX_TRANSITION_DIAGNOSTIC_PHASE_MS = 60 * 60 * 1_000;
 // never Agent tools, conversation history, or high-frequency PublicState.
 // v74: ready workspace changes include the current branch, or null for detached HEAD.
 // v75: exact-focus local file reads return bounded inert bytes, separate from image previews.
-export const PROTOCOL_VERSION = 75;
+// v76: providers project an API-key capability independently from subscription
+// OAuth login, so a provider that supports both offers both entry points.
+export const PROTOCOL_VERSION = 76;
 export const OBSERVATION_FATAL_CLOSE_CODE = 4002;
 export const COLOR_SCHEMES = ["quiet-rebel", "classic-rebel"] as const;
 export type ColorScheme = typeof COLOR_SCHEMES[number];
@@ -1038,6 +1040,9 @@ export interface PublicProvider {
   configured: boolean;
   authSource?: string;
   authLabel?: string;
+  /** Provider accepts a stored API key (independent of `oauth`). */
+  apiKey: boolean;
+  /** Provider offers a subscription OAuth login. */
   oauth: boolean;
   models: PublicModel[];
 }
@@ -1713,6 +1718,7 @@ const publicProviderSchema: z.ZodType<PublicProvider> = z.object({
   configured: z.boolean(),
   authSource: z.string().optional(),
   authLabel: z.string().optional(),
+  apiKey: z.boolean(),
   oauth: z.boolean(),
   models: z.array(publicModelSchema),
 });

@@ -144,7 +144,7 @@ describe("parseClientCommand", () => {
   });
 
   it("uses the run-correlated protocol version", () => {
-    expect(PROTOCOL_VERSION).toBe(75);
+    expect(PROTOCOL_VERSION).toBe(76);
   });
 
   it("lets initialize declare a connection without extension UI", () => {

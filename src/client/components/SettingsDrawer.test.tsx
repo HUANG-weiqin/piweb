@@ -35,6 +35,7 @@ const state: PublicState = {
     id: "test",
     name: "Test",
     configured: true,
+    apiKey: true,
     oauth: false,
     models: [
       { provider: "test", id: "ready", name: "Ready", reasoning: false, thinkingLevels: ["off"], input: ["text"], contextWindow: 100, available: true },
@@ -357,6 +358,7 @@ describe("SettingsDrawer", () => {
       id: "other",
       name: "Other",
       configured: true,
+      apiKey: true,
       oauth: false,
       models: [{
         provider: "other",
@@ -466,6 +468,45 @@ describe("SettingsDrawer", () => {
     })} />);
     expect(screen.queryByRole("dialog", { name: "Test API Key" })).not.toBeInTheDocument();
     expect(screen.getByRole("status")).toHaveTextContent("API Key 已保存");
+  });
+
+  it("offers API Key and subscription login when the provider supports both", () => {
+    renderDrawer({
+      state: {
+        ...state,
+        providers: [{
+          id: "anthropic",
+          name: "Anthropic (Claude Pro/Max)",
+          configured: false,
+          apiKey: true,
+          oauth: true,
+          models: [],
+        }],
+      },
+    });
+
+    expect(screen.getByRole("button", { name: "使用 API Key" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "登录订阅账户" })).toBeEnabled();
+  });
+
+  it("hides the API Key entry for a subscription-only provider", () => {
+    renderDrawer({
+      state: {
+        ...state,
+        providers: [{
+          id: "codex",
+          name: "OpenAI (ChatGPT Plus/Pro)",
+          configured: false,
+          apiKey: false,
+          oauth: true,
+          models: [],
+        }],
+      },
+    });
+
+    expect(screen.queryByRole("button", { name: "使用 API Key" }))
+      .not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "登录订阅账户" })).toBeEnabled();
   });
 
   it("closes from the API Key backdrop and disposes every local secret state", () => {

@@ -1963,6 +1963,8 @@ case "set_thinking":
           available.map((model) => `${model.provider}/${model.id}`),
         ),
         oauthProviders,
+        apiKeyAvailable: (provider) =>
+          registry.getProvider(provider)?.auth.apiKey !== undefined,
         displayName: (provider) =>
           registry.getProviderDisplayName(provider),
         authStatus: (provider) =>

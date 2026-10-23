@@ -50,6 +50,7 @@ const providers: PublicProvider[] = [
     id: "alpha",
     name: "Alpha",
     configured: true,
+    apiKey: true,
     oauth: false,
     models: [
       {
@@ -89,6 +90,7 @@ const providers: PublicProvider[] = [
     id: "beta",
     name: "Beta",
     configured: false,
+    apiKey: true,
     oauth: false,
     models: [{
       provider: "beta",

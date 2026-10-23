@@ -127,19 +127,19 @@ export function ModelConnectionsSettingsPage({
             </span>
           </div>
           <div className="provider-actions">
+            {selectedProvider.apiKey && <button
+              type="button"
+              disabled={!online || busy}
+              onClick={() => onOpenKey(selectedProvider.id)}
+            >
+              {selectedProvider.configured ? "更新 API Key" : "使用 API Key"}
+            </button>}
             {selectedProvider.oauth && <button
               type="button"
               disabled={!online || busy}
               onClick={() => onOAuth(selectedProvider.id)}
             >
               {selectedProvider.configured ? "重新登录" : "登录订阅账户"}
-            </button>}
-            {!selectedProvider.oauth && <button
-              type="button"
-              disabled={!online || busy}
-              onClick={() => onOpenKey(selectedProvider.id)}
-            >
-              {selectedProvider.configured ? "更新 API Key" : "使用 API Key"}
             </button>}
             {selectedProvider.configured
               && confirmLogoutProviderId !== selectedProvider.id

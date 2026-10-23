@@ -590,6 +590,7 @@ class FakeRuntime implements PiRuntimeLike {
   constructor() {
     this.modelRegistry = {
       getAvailable: () => this.availableModels,
+      getProvider: () => undefined,
     } as unknown as ModelRegistry;
   }
 

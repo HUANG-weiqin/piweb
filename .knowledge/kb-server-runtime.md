@@ -24,6 +24,7 @@
 
 - API key 与 logout 只通过 `CredentialStore.modify/delete` 持久化；OAuth 在配置队列外使用 baseline provider 的 `auth.oauth.login(AuthInteraction)`，成功后再经 credential intent CAS 写入。扩展 OAuth 与进程全局 provider 注册仍 fail closed。
 - 扩展 provider 只能通过 session-local runtime 注册可快照的静态配置；`streamSimple`、OAuth、`refreshModels` 和 native provider 注册会 fail closed，不允许绕过宿主的进程级边界。合法注册的静态 provider 即使暂时没有模型也必须保留在连接投影中，才能配置凭据并通过后续目录刷新恢复。
+- 连接投影的鉴权能力必须分开报告：`apiKey` 取自 `Provider.auth.apiKey`，`oauth` 取自 `Provider.auth.oauth`。内置 anthropic、openai、xai 等 provider 同时具备两者；不能因为存在 OAuth 就隐藏 API Key，也不能给只有 OAuth 的 provider 一个会写入死凭据的 key 入口。
 - Pi 内置 provider 的远程目录缓存有意由各 runtime 共享同一用户级 `models-store.json`；项目扩展不能注册会写目录缓存的动态/native provider，因此共享缓存只承载 Pi 官方目录，项目差异仍只存在于 session-local 静态 overlay。
 - 配置变更通过 runtime 的串行 refresh 入口清理 credential command cache；基线可按显式 `allowNetwork` 刷新，session/project owner 则固定禁止网络刷新并保留每个 runtime 的错误聚合。后台模型目录在服务启动后立即执行一次非阻塞 `force:true` 联网刷新，15 秒可取消，离线时跳过；运行中仅手动强刷，服务关闭会 abort 并等待该刷新。
 - 可为项目创建独立的 model catalog：走与 session 相同的 trust、resource loader、静态 provider 深快照和不安全 provider 拒绝路径，但不创建或启动 `AgentSession`。它让空项目也能列出项目扩展模型并配置第一条会话。

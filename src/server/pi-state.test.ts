@@ -17,6 +17,7 @@ describe("buildPublicProviders", () => {
       }],
       availableKeys: new Set(["openai/gpt"]),
       oauthProviders: new Map([["openai-codex", "OpenAI Codex"]]),
+      apiKeyAvailable: (provider) => provider === "openai" || provider === "anthropic",
       displayName: () => "OpenAI",
       authStatus: () => ({ configured: true, source: "stored", label: "API key" }),
     });
@@ -26,6 +27,8 @@ describe("buildPublicProviders", () => {
     expect(providers.find((provider) => provider.id === "openai")?.models[0].serviceTiers)
       .toEqual(["priority"]);
     expect(providers.find((provider) => provider.id === "openai-codex")?.oauth).toBe(true);
+    expect(providers.find((provider) => provider.id === "openai")?.apiKey).toBe(true);
+    expect(providers.find((provider) => provider.id === "openai-codex")?.apiKey).toBe(false);
     expect(JSON.stringify(providers)).not.toContain("secret");
   });
 
@@ -35,6 +38,7 @@ describe("buildPublicProviders", () => {
       models: [],
       availableKeys: new Set(),
       oauthProviders: new Map(),
+      apiKeyAvailable: () => false,
       displayName: (provider) => provider,
       authStatus: () => ({ configured: false }),
     });
@@ -65,11 +69,26 @@ describe("buildPublicProviders", () => {
       }],
       availableKeys: new Set(["opencode/deepseek-v4-pro"]),
       oauthProviders: new Map(),
+      apiKeyAvailable: () => true,
       displayName: () => "OpenCode",
       authStatus: () => ({ configured: true }),
     });
 
     expect(providers[0]?.models[0]?.thinkingLevels)
       .toEqual(["off", "high", "max"]);
+  });
+
+  it("projects API-key capability independently from subscription OAuth", () => {
+    const providers = buildPublicProviders({
+      registeredProviderIds: ["anthropic"],
+      models: [],
+      availableKeys: new Set(),
+      oauthProviders: new Map([["anthropic", "Anthropic (Claude Pro/Max)"]]),
+      apiKeyAvailable: (provider) => provider === "anthropic",
+      displayName: () => "Anthropic",
+      authStatus: () => ({ configured: false }),
+    });
+
+    expect(providers[0]).toMatchObject({ apiKey: true, oauth: true });
   });
 });

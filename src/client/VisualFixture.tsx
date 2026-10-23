@@ -54,6 +54,7 @@ const drawerState: PublicState = {
     id: role.model.provider,
     name: "OpenAI",
     configured: true,
+    apiKey: true,
     oauth: false,
     models: [{
       provider: role.model.provider,

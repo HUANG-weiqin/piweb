@@ -52,6 +52,7 @@ const providers: PublicProvider[] = [{
   configured: true,
   authSource: "environment",
   authLabel: "sk-proj-••••fixture",
+  apiKey: true,
   oauth: false,
   models: [{
     provider: "openai",
@@ -89,6 +90,7 @@ const providers: PublicProvider[] = [{
   configured: true,
   authSource: "oauth",
   authLabel: "订阅账户",
+  apiKey: true,
   oauth: true,
   models: [{
     provider: "anthropic",

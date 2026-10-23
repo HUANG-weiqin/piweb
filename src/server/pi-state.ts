@@ -19,6 +19,8 @@ interface ProviderProjectionInput {
   registeredProviderIds: readonly string[];
   availableKeys: Set<string>;
   oauthProviders: Map<string, string>;
+  /** Whether the provider accepts an API key at all, independent of OAuth. */
+  apiKeyAvailable(provider: string): boolean;
   displayName(provider: string): string;
   authStatus(provider: string): { configured: boolean; source?: string; label?: string };
 }
@@ -47,6 +49,7 @@ export function buildPublicProviders(input: ProviderProjectionInput): PublicProv
         configured: status.configured,
         authSource: status.source,
         authLabel: status.label,
+        apiKey: input.apiKeyAvailable(id),
         oauth: input.oauthProviders.has(id),
         models: models
           .map((model) => {

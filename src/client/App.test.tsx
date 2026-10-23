@@ -53,6 +53,7 @@ const SERVICE_TIER_PROVIDER: PublicState["providers"][number] = {
   id: "provider",
   name: "Provider",
   configured: true,
+  apiKey: true,
   oauth: false,
   models: [{
     provider: "provider",
@@ -7411,6 +7412,7 @@ describe("App", () => {
           id: "provider",
           name: "Provider",
           configured: true,
+          apiKey: true,
           oauth: false,
           models: [{
             provider: "provider",
@@ -7494,6 +7496,7 @@ describe("App", () => {
           id: "provider",
           name: "Provider",
           configured: true,
+          apiKey: true,
           oauth: false,
           models: [],
         }],
@@ -7635,6 +7638,7 @@ describe("App", () => {
           id: "provider",
           name: "Provider",
           configured: false,
+          apiKey: true,
           oauth: false,
           models: [],
         }],
@@ -10026,6 +10030,7 @@ describe("App", () => {
           id: "oauth",
           name: "OAuth",
           configured: false,
+          apiKey: false,
           oauth: true,
           models: [],
         }],
@@ -10099,6 +10104,7 @@ describe("App", () => {
           id: "anthropic",
           name: "Anthropic (Claude Pro/Max)",
           configured: false,
+          apiKey: true,
           oauth: true,
           models: [],
         }],
@@ -10167,6 +10173,7 @@ describe("App", () => {
       id: "provider",
       name: "Provider",
       configured: true,
+      apiKey: true,
       oauth: false,
       models: [],
     };
@@ -11153,6 +11160,7 @@ describe("App", () => {
             id: "provider",
             name: "Provider",
             configured: true,
+            apiKey: true,
             oauth: false,
             models: [{
               provider: "provider",
