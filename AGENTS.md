@@ -91,8 +91,8 @@ Pi Web 是本机优先的极简 Agent 工作台。当前目标不是复制 Pi �
 
 ## 工具与修改习惯
 
-- 搜索优先使用 `rg` / `rg --files`。
-- 文件修改使用 `apply_patch`。
+- 搜索与读取优先使用 harness 提供的专用工具（`grep` / `find` / `ls` / `read`），不用 shell 的 `cat`、`grep` 代替。
+- 文件修改使用 `edit` 做精确替换；只有新建文件或整体重写才用 `write`。
 - Windows 上删除 worktree 前必须检查其中的 reparse point。若 `node_modules` 是指向另一 worktree 的 Junction，先用不会遍历目标的 `cmd /d /c rmdir "<worktree>\node_modules"` 单独解除链接，再执行 `git worktree remove`；禁止让 Git、`Remove-Item -Recurse` 或其它递归删除直接处理共享 Junction。清理后不能只检查包清单，至少对共享根执行 `npm ls`、关键包动态 import 和 typecheck/build。
 - 保持改动小而可验证；不为尚未确认的功能预建抽象。
 - 新增或重命名知识页时，同步 `.knowledge/INDEX.md`。
