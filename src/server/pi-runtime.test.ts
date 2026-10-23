@@ -3576,6 +3576,44 @@ describe("PiRuntime session ownership", () => {
     expect(applied).toEqual(["independent", "newer", "recovery"]);
   });
 
+  it("announces only credential changes that were actually written", async () => {
+    const runtime = await testRuntime(() => []);
+    const announced: string[] = [];
+    runtime.subscribeCredentialChanges(() => {
+      throw new Error("listener failed");
+    });
+    const unsubscribe = runtime.subscribeCredentialChanges(() => {
+      announced.push("changed");
+    });
+
+    const older = runtime.beginCredentialChange("provider-a");
+    const newer = runtime.beginCredentialChange("provider-a");
+    await expect(runtime.commitCredentialChange(older, () => undefined)).resolves.toBe(false);
+    expect(announced).toEqual([]);
+
+    const failing = runtime.beginCredentialChange("provider-b");
+    await expect(runtime.commitCredentialChange(failing, () => {
+      throw new Error("credential write failed");
+    })).rejects.toThrow("credential write failed");
+    expect(announced).toEqual([]);
+
+    await expect(runtime.commitCredentialChange(newer, () => undefined)).resolves.toBe(true);
+    expect(announced).toEqual(["changed"]);
+
+    // The credential is already stored even if the follow-up catalog refresh fails.
+    vi.spyOn(runtime.modelRuntime, "refresh").mockRejectedValueOnce(new Error("refresh failed"));
+    const written = runtime.beginCredentialChange("provider-b");
+    await expect(runtime.commitCredentialChange(written, () => undefined)).rejects.toThrow(
+      "refresh failed",
+    );
+    expect(announced).toEqual(["changed", "changed"]);
+
+    unsubscribe();
+    const later = runtime.beginCredentialChange("provider-a");
+    await expect(runtime.commitCredentialChange(later, () => undefined)).resolves.toBe(true);
+    expect(announced).toEqual(["changed", "changed"]);
+  });
+
   it("does not let a long configuration flow block session creation or disposal", async () => {
     const cwdA = await temporaryDirectory("piweb-runtime-lock-a-");
     const cwdB = await temporaryDirectory("piweb-runtime-lock-b-");

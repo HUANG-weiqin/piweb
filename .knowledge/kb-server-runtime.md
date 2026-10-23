@@ -1,6 +1,6 @@
 # 服务端运行时
 
-`updated: 2026-10-14`
+`updated: 2026-10-23`
 
 ## 这个模块是干什么的
 
@@ -26,7 +26,7 @@
 - 扩展 provider 只能通过 session-local runtime 注册可快照的静态配置；`streamSimple`、OAuth、`refreshModels` 和 native provider 注册会 fail closed，不允许绕过宿主的进程级边界。合法注册的静态 provider 即使暂时没有模型也必须保留在连接投影中，才能配置凭据并通过后续目录刷新恢复。
 - 连接投影的鉴权能力必须分开报告：`apiKey` 取自 `Provider.auth.apiKey`，`oauth` 取自 `Provider.auth.oauth`。内置 anthropic、openai、xai 等 provider 同时具备两者；不能因为存在 OAuth 就隐藏 API Key，也不能给只有 OAuth 的 provider 一个会写入死凭据的 key 入口。
 - Pi 内置 provider 的远程目录缓存有意由各 runtime 共享同一用户级 `models-store.json`；项目扩展不能注册会写目录缓存的动态/native provider，因此共享缓存只承载 Pi 官方目录，项目差异仍只存在于 session-local 静态 overlay。
-- 配置变更通过 runtime 的串行 refresh 入口清理 credential command cache；基线可按显式 `allowNetwork` 刷新，session/project owner 则固定禁止网络刷新并保留每个 runtime 的错误聚合。后台模型目录在服务启动后立即执行一次非阻塞 `force:true` 联网刷新，15 秒可取消，离线时跳过；运行中仅手动强刷，服务关闭会 abort 并等待该刷新。
+- 配置变更通过 runtime 的串行 refresh 入口清理 credential command cache；基线可按显式 `allowNetwork` 刷新，session/project owner 则固定禁止网络刷新并保留每个 runtime 的错误聚合。后台模型目录由 `model-refresh.ts` 的 `ModelCatalogAutoRefresh` 维护：服务启动后立即执行一次非阻塞 `force:true` 联网刷新；`PiRuntime.commitCredentialChange` 在凭据实际写入后（即使随后本地刷新报错）通知 `subscribeCredentialChanges` 订阅者，再触发一次 `force:true` 刷新，避免运行中新加的凭据要等重启或手动刷新才看到远程目录；另每小时执行一次非强制联网刷新，是否真正下载由 Pi `withRemoteCatalog` 的 4 小时新鲜度窗口决定，主要用于重试失败并发现新发布模型。同一时刻最多一个在途，期间请求合并为一次重跑（任一请求要求 force 则 force）；每次 15 秒可取消，离线时跳过，失败只记日志。服务关闭或 reload 准备会永久 stop 并等待在途刷新退出；手动强刷仍走独立的精确命令。
 - 可为项目创建独立的 model catalog：走与 session 相同的 trust、resource loader、静态 provider 深快照和不安全 provider 拒绝路径，但不创建或启动 `AgentSession`。它让空项目也能列出项目扩展模型并配置第一条会话。
 - 串行执行认证/模型配置提交；OAuth provider 的交互式等待必须在队列外完成。
 - 每个 provider 的 credential intent 在用户操作开始时取得一次性 revision，提交时只允许当前最新 revision 写入，避免旧 OAuth 结果覆盖后来发生的 API Key 或 logout。

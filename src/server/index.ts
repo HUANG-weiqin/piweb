@@ -4,7 +4,7 @@ import express from "express";
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { CustomProviderStore } from "./custom-provider-store.js";
-import { refreshModelCatalogOnStartup } from "./model-refresh.js";
+import { ModelCatalogAutoRefresh } from "./model-refresh.js";
 import { PiRuntime } from "./pi-runtime.js";
 import { attachSocketServer } from "./socket-server.js";
 import { BashCleanupUnconfirmedError } from "./bash-execution.js";
@@ -51,10 +51,8 @@ const socketServer = attachSocketServer(
     builtinProviderIds: new Set(builtinProviders().map((provider) => provider.id)),
   }),
 );
-const startupAbortController = new AbortController();
-const startupModelRefresh = refreshModelCatalogOnStartup(
+const modelCatalogRefresh = new ModelCatalogAutoRefresh(
   runtime,
-  startupAbortController.signal,
   (error) => {
     console.warn(
       "Automatic model refresh failed",
@@ -62,6 +60,10 @@ const startupModelRefresh = refreshModelCatalogOnStartup(
     );
   },
 );
+// A credential saved while running must not wait for a restart or a manual
+// refresh before its provider's remote model catalog appears.
+runtime.subscribeCredentialChanges(() => modelCatalogRefresh.credentialChanged());
+modelCatalogRefresh.start();
 
 let shutdownPromise: Promise<void> | undefined;
 
@@ -89,8 +91,8 @@ function closeHttpServer(): Promise<void> {
 
 function shutdown(): void {
   shutdownPromise ??= (async () => {
-    startupAbortController.abort();
-    await startupModelRefresh;
+    modelCatalogRefresh.stop();
+    await modelCatalogRefresh.drain();
     await Promise.all([
       closeHttpServer(),
       socketServer.close(),
@@ -269,7 +271,7 @@ process.on("message", (message: unknown) => {
   ) {
     const requestId = record.requestId;
     void (async () => {
-      startupAbortController.abort();
+      modelCatalogRefresh.stop();
       let markAdmissionFrozen!: () => void;
       const admissionFrozen = new Promise<void>((resolveFrozen) => {
         markAdmissionFrozen = resolveFrozen;
@@ -294,7 +296,7 @@ process.on("message", (message: unknown) => {
         type: "piweb_reload_accepted",
         requestId,
       });
-      await startupModelRefresh;
+      await modelCatalogRefresh.drain();
       const targets = await targetsPromise;
       await sendToSupervisor({
         type: "piweb_reload_ready",

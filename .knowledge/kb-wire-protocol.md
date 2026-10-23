@@ -1,6 +1,6 @@
 # 线协议
 
-`updated: 2026-10-13`
+`updated: 2026-10-23`
 
 ## 这个模块是干什么的
 
@@ -75,7 +75,7 @@ ClientCommand
 - v42 的可选 `transitionDiagnostics` 只属于成功的 `initialize | focus_conversation` 调用，不覆盖独立 `create_conversation` 命令、错误或后续 refresh。非空 focus 只把它附在本次 attach 后的首个 `conversation_snapshot`；空项目 `initialize(recent)` 没有 snapshot，才附在无 conversation/focus 的 `focus_attached`，且 `snapshotProjectionMs=null`。payload 使用同一 commandId 与 operation 关联，version 固定为 1；`validationMs / contextOrCatalogMs / presentationOrTargetReadMs / actorActivationOrLeaseMs` 以及非空 focus 的 `snapshotProjectionMs` 都是 0–3,600,000 的有限非负整数。actor phase 是 lease、权威文件证明与 runtime activation 的整体 envelope；snapshot phase 只测同步构建，不含 enqueue、delivery 或异步 `project_snapshot`。它不进入 `PublicState` 或磁盘，失败仍只走既有 error，浏览器必须再匹配 active transition 的 session、command、operation 与已 attach focus 后才消费。
 - `conversation_preview` 是 v33 的只读展示事件，只携带 `sessionId + commandId + projectId + conversationId` 关联的 cwd、toolMode、可选固化角色和有界 items/window；它没有 focusId，不是 transcript 或命令 authority。只有 cold exact/recent/focus 在只读完整性证明、当前命令身份以及 emit 前同步 actor/opening gate 都仍有效时才可能发送；display projection 失败可静默跳过，warm actor 直接等待其 live snapshot。后续精确 `focus_attached + conversation_snapshot` 才建立可执行 focus 并替换 preview。
 - `refresh_view` 是页面恢复后的无等待只读重同步，必须精确携带当前 `sessionId + projectId` 以及成对出现的 `conversationId + focusId`；身份已经变化时服务端静默丢弃。它刷新 state、角色目录和项目索引；只要 focused actor 未压缩，就可重发 conversation snapshot。active run 的 snapshot 由 actor 把 durable active branch 与尚未持久化的 live suffix 精确交接后生成，不能用纯持久快照覆盖正在流式生成的尾部，也不能把同一物理消息重复投影两次。
-- `refresh_models` 是 session-scoped 的联网配置命令，必须携带当前 `sessionId + commandId`。它使用 `refreshConfiguration({ allowNetwork: true, force: true, signal })`；成功只能由同一 correlation 的 `command_complete` 证明，失败由同一 correlation 的 command error 结算，不能用普通 state/catalog 更新冒充成功。连接内 commandId 不可复用；15 秒超时是明确失败，断线属于 unknown，生命周期替换会取消旧命令，三者都不得自动重发。服务启动后另有一次非阻塞、`force:true`、15 秒可取消的后台刷新，离线跳过；运行中仅手动强刷，不发送 wire 回执。
+- `refresh_models` 是 session-scoped 的联网配置命令，必须携带当前 `sessionId + commandId`。它使用 `refreshConfiguration({ allowNetwork: true, force: true, signal })`；成功只能由同一 correlation 的 `command_complete` 证明，失败由同一 correlation 的 command error 结算，不能用普通 state/catalog 更新冒充成功。连接内 commandId 不可复用；15 秒超时是明确失败，断线属于 unknown，生命周期替换会取消旧命令，三者都不得自动重发。服务进程另有后台自动刷新（启动时和凭据写入后 `force:true`，每小时非强制，15 秒可取消，离线跳过），只通过普通配置通知更新目录，不发送 wire 回执，也不能被当作某个 `refresh_models` 的结果。
 - 当前 focus 被其它 Agent 删除时，服务端发送带完整 `sessionId + projectId + conversationId + focusId` 的 `focus_invalidated(reason=deleted)`；客户端只结算精确匹配的观察身份，然后回到角色选择页。不能从缺少当前项的截断列表猜测删除。
 - 创建新 conversation 必须显式 roleId。`default` 只是角色 ID，不是省略选择时的隐含值。
 - 工具模式只有 `read_only | full_access`，由角色模板持有并复制到 conversation 当前角色快照；角色 CRUD payload 必须同时携带模型默认思考强度和工具模式。v27 不接受 `initialize.toolMode` 与 `set_tool_mode`，协议仍没有逐工具询问命令或待回答状态。

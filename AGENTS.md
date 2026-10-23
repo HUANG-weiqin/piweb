@@ -53,7 +53,7 @@ Pi Web 是本机优先的极简 Agent 工作台。当前目标不是复制 Pi �
 - Pi 1 prompt disposition 必须精确匹配：initial 只接受 `started`，真正尝试 SDK steering 的 busy browser prompt 和显式 steer 只接受 `queued`，`handled` 不算入队。异步 input handler 下的身份捕获仍由 invocation-scoped `AsyncLocalStorage` 包住 native `agent.steer`，真实 enqueue 前同步复核 exact active ticket；不能按文本或队列长度认领。首个 raw user 无条件归 initial，后续 browser/explicit guidance 按 SDK 接受顺序共用 FIFO，只在队头 captured object 与 raw object 同一引用时认领。浏览器投递由同步包裹同一 SessionManager 的 `appendMessage()` 写入 `piweb.browser_prompt_delivery.v1` 标记，再以紧邻且直接以该标记为父的 raw user entry 证明；孤立标记不是投递证明，run settlement 也不是。每个会话同时最多 64 条、64 MiB 未投递浏览器输入；活动分支决定续投，文件检查验证全部物理记录；不重建 `.piweb/pending-prompts` sidecar。
 - 普通会话操作串行执行；`abort`、认证响应、认证取消和生命周期失效走控制通道，session dispose 排回 actor 队列。
 - 所有 session command/state/event 都带 `sessionId`；run command/event 还带 `runId`。客户端必须丢弃不匹配的身份。
-- 会让界面等待配置结果的命令必须有精确关联身份；当前 API Key、模型选择与远程供应商模型刷新使用 sessionId + 连接内一次性 commandId，不能把任意 PublicState 刷新当作成功回执；服务启动后后台模型目录只做一次非阻塞 force:true 刷新，15 秒可取消且离线跳过，运行中仅手动强刷。
+- 会让界面等待配置结果的命令必须有精确关联身份；当前 API Key、模型选择与远程供应商模型刷新使用 sessionId + 连接内一次性 commandId，不能把任意 PublicState 刷新当作成功回执；后台模型目录由服务进程的 `ModelCatalogAutoRefresh` 自动维护：启动时与每次凭据实际写入后各做一次非阻塞 force:true 联网刷新，另每小时做一次非强制刷新（是否真正下载由 Pi 远程目录自身的新鲜度窗口决定）；同一时刻最多一个在途、期间请求合并重跑，每次 15 秒可取消、离线跳过、失败只记日志且不发送 wire 回执，手动强刷仍保留。
 - Pi 的模型切换不是持久化事务：command success 以目标 model 已进入当前 AgentSession 为准，后续 session/settings 写入失败要单独报告，不能谎称运行态未切换。
 - Pi 的 thinking/name setter 也有相同的“内存先变更”顺序；新增 SDK 状态 setter 接入前必须核对源码顺序并用后置条件测试覆盖部分提交。
 - OAuth 命令与事件都带 `authFlowId`；取消必须覆盖 active 和尚在 actor 队列中的 flow。

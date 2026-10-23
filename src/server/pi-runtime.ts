@@ -908,6 +908,7 @@ export class PiRuntime implements PiRuntimeLike {
   private readonly bashExecutionBudget = new BashExecutionBudget();
   private readonly credentialRevisions = new Map<string, number>();
   private readonly listeners = new Set<() => void>();
+  private readonly credentialChangeListeners = new Set<() => void>();
   private readonly sessionRegistries = new Set<SessionModelRuntime>();
   private readonly createModelRuntime: (options: CreateModelRuntimeOptions) => Promise<ModelRuntime>;
   private readonly createModelsStore?: () => ModelsStore;
@@ -1843,20 +1844,43 @@ export class PiRuntime implements PiRuntimeLike {
     return { provider, revision };
   }
 
-  commitCredentialChange(
+  async commitCredentialChange(
     intent: CredentialChangeIntent,
     change: () => Promise<void> | void,
   ): Promise<boolean> {
-    return this.updateConfiguration(async () => {
-      if (this.credentialRevisions.get(intent.provider) !== intent.revision) {
-        return false;
+    let written = false;
+    try {
+      return await this.updateConfiguration(async () => {
+        if (this.credentialRevisions.get(intent.provider) !== intent.revision) {
+          return false;
+        }
+        // Consume the intent before the external storage mutation so it cannot
+        // be accidentally committed twice, including after a thrown write.
+        this.credentialRevisions.set(intent.provider, intent.revision + 1);
+        await change();
+        written = true;
+        return true;
+      });
+    } finally {
+      // The stored credential is real even if the follow-up local refresh failed.
+      if (written) this.notifyCredentialChange();
+    }
+  }
+
+  /** Observes written credential changes, after the configuration queue settles them. */
+  subscribeCredentialChanges(listener: () => void): () => void {
+    this.credentialChangeListeners.add(listener);
+    return () => this.credentialChangeListeners.delete(listener);
+  }
+
+  private notifyCredentialChange(): void {
+    for (const listener of this.credentialChangeListeners) {
+      try {
+        listener();
+      } catch {
+        // A failing observer must not turn a stored credential into a failed command.
       }
-      // Consume the intent before the external storage mutation so it cannot
-      // be accidentally committed twice, including after a thrown write.
-      this.credentialRevisions.set(intent.provider, intent.revision + 1);
-      await change();
-      return true;
-    });
+    }
   }
 
   updateConfiguration<T>(change: () => Promise<T> | T): Promise<T> {
