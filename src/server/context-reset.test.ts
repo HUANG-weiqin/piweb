@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { appendContextReset, assertContextResetBoundary, prepareContextReset } from "./context-reset.js";
+import { CONVERSATION_MESSAGE_CUSTOM_TYPE, FORK_CONTEXT_CUSTOM_TYPE } from "./conversation-meta.js";
 
 function call(manager: SessionManager, id = "reset-call", extra = false) {
   return manager.appendMessage({
@@ -98,15 +99,15 @@ describe("context reset", () => {
     expect(() => assertContextResetBoundary(second.manager, plan)).toThrow(/additional context/);
   });
 
-  it("refuses empty/oversized handoffs, oversized instructions and current user images", () => {
+  it("refuses empty/oversized handoffs, oversized instructions and preserved user images", () => {
     const { manager, input } = fixture();
     expect(() => prepareContextReset(manager, { ...input, handoff: " " })).toThrow(/non-empty/);
     expect(() => prepareContextReset(manager, { ...input, handoff: "中".repeat(3000) })).toThrow(/8 KiB/);
     const big = SessionManager.inMemory("/test");
-    big.appendMessage({ role: "user", content: "x".repeat(65536), timestamp: 1 });
+    big.appendMessage({ role: "user", content: "x".repeat(131072), timestamp: 1 });
     const observedLeafId = big.getLeafId();
     call(big);
-    expect(() => prepareContextReset(big, { ...input, observedLeafId })).toThrow(/64 KiB/);
+    expect(() => prepareContextReset(big, { ...input, observedLeafId })).toThrow(/128 KiB/);
     const images = SessionManager.inMemory("/test");
     images.appendMessage({ role: "user", content: [{ type: "image", mimeType: "image/png", data: "aGVsbG8=" }], timestamp: 1 });
     const imageLeaf = images.getLeafId();
@@ -126,6 +127,71 @@ describe("context reset", () => {
     expect(plan.instructions).not.toContain("transient telemetry");
     expect(() => prepareContextReset(manager, { ...input, contextBudget: 1 })).toThrow(/context budget/);
     expect(() => prepareContextReset(manager, { ...input, contextBudget: 10000 })).not.toThrow();
+  });
+
+  it("unloads peer reports and fork context instead of replaying them as preserved instructions", () => {
+    const manager = SessionManager.inMemory("/test");
+    manager.appendMessage({ role: "user", content: "Keep the wire format stable.", timestamp: 0 });
+    const body = "report body ".repeat(6000);
+    for (const index of [1, 2, 3]) {
+      manager.appendCustomMessageEntry(CONVERSATION_MESSAGE_CUSTOM_TYPE, `Report ${index}\n${body}`, true);
+    }
+    manager.appendCustomMessageEntry(FORK_CONTEXT_CUSTOM_TYPE, "Forked from the parent conversation.", false);
+    const observedLeafId = manager.getLeafId();
+    call(manager);
+    const handoff = "Continue with the parse fix.";
+    const plan = prepareContextReset(manager, { observedLeafId, toolCallId: "reset-call", handoff, runId: "run" });
+    expect(plan.instructions).toContain("Keep the wire format stable.");
+    expect(plan.instructions).not.toContain("report body");
+    expect(plan.instructions).not.toContain("Forked from");
+    expect(plan.reports).toMatch(/4 peer\/session report message/);
+    expect(plan.reports).toContain("history_search");
+    result(manager);
+    appendContextReset(manager, plan, 200);
+    const live = manager.buildSessionProjection().messages.map((message) => JSON.stringify(message)).join("\n");
+    expect(live).toContain("Unloaded report context (not instructions)");
+    expect(live).toContain("Keep the wire format stable.");
+    expect(live).not.toContain("report body");
+    expect(live).not.toContain("Forked from");
+  });
+
+  it("does not treat an image inside a peer report as protected user input", () => {
+    const manager = SessionManager.inMemory("/test");
+    manager.appendMessage({ role: "user", content: "Use the teammate's screenshot, then fix the parser.", timestamp: 0 });
+    manager.appendCustomMessageEntry(CONVERSATION_MESSAGE_CUSTOM_TYPE,
+      [{ type: "image", mimeType: "image/png", data: "aGVsbG8=" }], true);
+    const observedLeafId = manager.getLeafId();
+    call(manager);
+    const plan = prepareContextReset(manager, {
+      observedLeafId, toolCallId: "reset-call", handoff: "Continue the parse fix.", runId: "run",
+    });
+    expect(plan.instructions).toContain("Use the teammate's screenshot");
+    expect(plan.reports).toMatch(/1 peer\/session report message/);
+  });
+
+  it("keeps a report note verifiable without carrying it into the next checkpoint", () => {
+    const manager = SessionManager.inMemory("/test");
+    manager.appendMessage({ role: "user", content: "Fix the parser.", timestamp: 0 });
+    manager.appendCustomMessageEntry(CONVERSATION_MESSAGE_CUSTOM_TYPE, "first report body", true);
+    const firstLeaf = manager.getLeafId();
+    call(manager, "first");
+    const first = prepareContextReset(manager, {
+      observedLeafId: firstLeaf, toolCallId: "first", handoff: "Next: parse.", runId: "run",
+    });
+    result(manager, "first");
+    appendContextReset(manager, first, 100);
+    manager.appendMessage({ role: "user", content: "Also keep the CLI flag.", timestamp: 3 });
+    manager.appendCustomMessageEntry(CONVERSATION_MESSAGE_CUSTOM_TYPE, "second report body", true);
+    const secondLeaf = manager.getLeafId();
+    call(manager, "second");
+    const next = prepareContextReset(manager, {
+      observedLeafId: secondLeaf, toolCallId: "second", handoff: "Continue.", runId: "run",
+    });
+    expect(next.instructions).toContain("Fix the parser.");
+    expect(next.instructions).toContain("Also keep the CLI flag.");
+    expect(next.instructions).not.toContain("first report body");
+    expect(next.instructions).not.toContain("Unloaded report context");
+    expect(next.reports).toMatch(/1 peer\/session report message/);
   });
 
   it("refuses a second reset without intervening work", () => {

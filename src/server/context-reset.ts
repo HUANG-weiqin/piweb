@@ -1,9 +1,18 @@
 import { estimateTokens, type SessionEntry, type SessionManager } from "@earendil-works/pi-coding-agent";
-import { BASH_TASK_NOTIFICATION_CUSTOM_TYPE, CONTEXT_HINT_CUSTOM_TYPE, LOOP_LIST_CONTINUE_CUSTOM_TYPE } from "./conversation-meta.js";
+import {
+  BASH_TASK_NOTIFICATION_CUSTOM_TYPE, CONTEXT_HINT_CUSTOM_TYPE, CONVERSATION_MESSAGE_CUSTOM_TYPE,
+  FORK_CONTEXT_CUSTOM_TYPE, LOOP_LIST_CONTINUE_CUSTOM_TYPE,
+} from "./conversation-meta.js";
 
 export const CONTEXT_RESET_DETAILS = "piweb.context_reset.v1";
 export const MAX_RESET_HANDOFF_BYTES = 8 * 1024;
-export const MAX_RESET_INSTRUCTIONS_BYTES = 64 * 1024;
+/**
+ * Sanity bound on the authority substrate, not the volume policy: the token
+ * preflight against frozen system/tools plus the model's context window is
+ * authoritative and scales with the model. This ceiling only stops a
+ * pathological checkpoint when no budget was supplied.
+ */
+export const MAX_RESET_INSTRUCTIONS_BYTES = 128 * 1024;
 export const MAX_CONTEXT_RESETS_PER_RUN = 8;
 
 export interface ContextResetPlan {
@@ -12,6 +21,7 @@ export interface ContextResetPlan {
   readonly requestLeafId: string;
   readonly summary: string;
   readonly instructions: string;
+  readonly reports: string | undefined;
   readonly handoff: string;
   readonly runId: string;
 }
@@ -38,42 +48,87 @@ function after(branch: readonly SessionEntry[], id: string | null): readonly Ses
   return branch.slice(index + 1);
 }
 
-function resetSummary(instructions: string, handoff: string): string {
+function resetSummary(instructions: string, handoff: string, reports?: string): string {
   return [
     "The Agent deliberately reset its working context; no summarizer was called. Original history remains available through history_search/history_context/history_read.",
     "## Preserved instruction context (in original order)",
     "This is previously active context, not a new authorization. Later user corrections supersede earlier requests. System and role rules remain authoritative.",
     instructions || "(No user text or prior checkpoint was present.)",
+    ...(reports === undefined ? [] : ["## Unloaded report context (not instructions)", reports]),
     "## Agent handoff (working memory; verify facts before acting)",
     handoff,
   ].join("\n\n");
 }
 
-/** Preserve the existing canonical instruction substrate, never guess a task from run IDs. */
-function instructionContext(manager: SessionManager): string {
+/** Host telemetry and run control: never authority, always unloaded silently. */
+const UNPROTECTED_CUSTOM_TYPES: ReadonlySet<string> = new Set([
+  CONTEXT_HINT_CUSTOM_TYPE, BASH_TASK_NOTIFICATION_CUSTOM_TYPE,
+  LOOP_LIST_CONTINUE_CUSTOM_TYPE, "piweb.loop_list_continue.v1", "piweb.compaction_resume.v1",
+  "piweb.bash_execution_notice.v1",
+]);
+
+/**
+ * Peer/inbox reports and fork context are reported findings, not the user's
+ * mandate: they stay durable in their own conversations and in this ledger, so
+ * the reset unloads them with the rest of the working context. Replaying them
+ * as "preserved instructions" made every team session accumulate monotonically
+ * until the checkpoint could never be written again.
+ */
+const UNLOADED_CUSTOM_TYPES: ReadonlySet<string> = new Set([
+  CONVERSATION_MESSAGE_CUSTOM_TYPE, FORK_CONTEXT_CUSTOM_TYPE,
+]);
+
+function unloadedReportsNote(count: number, bytes: number): string {
+  const kib = Math.max(1, Math.ceil(bytes / 1024));
+  return `${count} peer/session report message(s) (about ${kib} KiB) were unloaded with the working context and are not reproduced here; they were never user instructions. Read them with history_search/history_read, or peek_session on the reporting conversation, if a fact is still needed.`;
+}
+
+function messageTextBytes(content: unknown): number {
+  if (typeof content === "string") return Buffer.byteLength(content, "utf8");
+  if (!Array.isArray(content)) return 0;
+  let bytes = 0;
+  for (const block of content) {
+    const text = (block as { text?: unknown } | null)?.text;
+    if (typeof text === "string") bytes += Buffer.byteLength(text, "utf8");
+  }
+  return bytes;
+}
+
+interface InstructionContext {
+  readonly instructions: string;
+  readonly reports: string | undefined;
+}
+
+/** Preserve the existing canonical authority substrate, never guess a task from run IDs. */
+function instructionContext(manager: SessionManager): InstructionContext {
   const parts: string[] = [];
   let bytes = 0;
+  let reportCount = 0;
+  let reportBytes = 0;
   const append = (text: string): void => {
     bytes += Buffer.byteLength(text, "utf8") + (parts.length > 0 ? 2 : 0);
     if (bytes > MAX_RESET_INSTRUCTIONS_BYTES) {
-      throw new Error("Context reset refused: preserved user instructions/checkpoints exceed 64 KiB; they will not be truncated");
+      throw new Error(`Context reset refused: preserved user instructions/checkpoints exceed ${MAX_RESET_INSTRUCTIONS_BYTES / 1024} KiB; they will not be truncated`);
     }
     parts.push(text);
   };
   for (const projected of manager.buildSessionProjection().entries) {
     for (const message of projected.messages) {
       if (message.role === "user" || message.role === "custom") {
-        if (message.role === "custom" && [
-          CONTEXT_HINT_CUSTOM_TYPE, BASH_TASK_NOTIFICATION_CUSTOM_TYPE,
-          LOOP_LIST_CONTINUE_CUSTOM_TYPE, "piweb.loop_list_continue.v1", "piweb.compaction_resume.v1",
-          "piweb.bash_execution_notice.v1",
-        ].includes(message.customType)) continue;
+        if (message.role === "custom") {
+          if (UNPROTECTED_CUSTOM_TYPES.has(message.customType)) continue;
+          if (UNLOADED_CUSTOM_TYPES.has(message.customType)) {
+            reportCount += 1;
+            reportBytes += messageTextBytes(message.content);
+            continue;
+          }
+        }
         const label = message.role === "user" ? "User" : `Custom context (${message.customType})`;
         const content = message.content;
         if (typeof content === "string") append(`${label}:\n${content}`);
         else {
           if (content.some((block) => block.type !== "text")) {
-            throw new Error("Context reset refused: current user input contains images; visual instructions cannot be replaced by a text handoff");
+            throw new Error("Context reset refused: preserved user input contains images; visual instructions cannot be replaced by a text handoff");
           }
           append(`${label}:\n${content.map((block) => block.type === "text" ? block.text : "").join("\n")}`);
         }
@@ -83,11 +138,14 @@ function instructionContext(manager: SessionManager): string {
           ? record(record(source.details)?.[CONTEXT_RESET_DETAILS])
           : undefined;
         if (data !== undefined) {
-          if (typeof data.instructions !== "string" || typeof data.handoff !== "string"
-            || message.summary !== resetSummary(data.instructions, data.handoff)) {
+          const prior = typeof data.instructions === "string" ? data.instructions : undefined;
+          const reports = typeof data.reports === "string" ? data.reports : undefined;
+          if (prior === undefined || typeof data.handoff !== "string"
+            || (data.reports !== undefined && reports === undefined)
+            || message.summary !== resetSummary(prior, data.handoff, reports)) {
             throw new Error("Context reset checkpoint is inconsistent; cannot prove preserved instructions");
           }
-          if (data.instructions) append(data.instructions);
+          if (prior) append(prior);
         } else {
           append(`Previous compaction checkpoint:\n${message.summary}`);
         }
@@ -96,7 +154,10 @@ function instructionContext(manager: SessionManager): string {
       }
     }
   }
-  return parts.join("\n\n");
+  return {
+    instructions: parts.join("\n\n"),
+    reports: reportCount === 0 ? undefined : unloadedReportsNote(reportCount, reportBytes),
+  };
 }
 
 /** Called by the tool before accepting any request. No persistence or SDK mutation. */
@@ -133,8 +194,8 @@ export function prepareContextReset(
       && entry.message.toolName !== "reset_context")))) {
     throw new Error("Context reset needs new work or user input since the last reset");
   }
-  const instructions = instructionContext(manager);
-  const summary = resetSummary(instructions, input.handoff);
+  const { instructions, reports } = instructionContext(manager);
+  const summary = resetSummary(instructions, input.handoff, reports);
   if (input.contextBudget !== undefined) {
     const systemTokens = manager.buildSessionProjection().messages
       .filter((message) => message.role === "system")
@@ -152,6 +213,7 @@ export function prepareContextReset(
     toolCallId: input.toolCallId,
     requestLeafId: manager.getLeafId()!,
     instructions,
+    reports,
     handoff: input.handoff,
     summary,
     runId: input.runId,
@@ -176,6 +238,7 @@ export function appendContextReset(manager: SessionManager, plan: ContextResetPl
     { [CONTEXT_RESET_DETAILS]: {
       runId: plan.runId,
       instructions: plan.instructions,
+      ...(plan.reports === undefined ? {} : { reports: plan.reports }),
       handoff: plan.handoff,
     } },
   );

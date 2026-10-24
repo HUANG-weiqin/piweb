@@ -1358,12 +1358,12 @@ export class ConversationActor {
       name: "reset_context",
       label: "Reset working context",
       description:
-        "Unload old assistant/tool working context after this complete tool turn, without deleting history or changing the conversation/run. Supply a non-empty handoff (at most 8 KiB): goal, constraints, completed side effects, next step and useful history/Notebook references. Existing canonical user/custom input and checkpoints are preserved as labeled text, not summarized (up to 64 KiB). Host progress hints and background-output notifications are working context, not protected input. Requests may be cancelled by new input, abort or reload; accepted is not committed.",
+        "Unload old assistant/tool working context after this complete tool turn, without deleting history or changing the conversation/run. Supply a non-empty handoff (at most 8 KiB): goal, constraints, completed side effects, next step and useful history/Notebook references. Canonical user input and prior checkpoints are preserved as labeled text, not summarized (up to 128 KiB and always within the model's context budget). Peer/session reports, fork context, host progress hints and background-output notifications are working context: they are unloaded and only a pointer is kept, so put what you still need into the handoff. Requests may be cancelled by new input, abort or reload; accepted is not committed.",
       promptSnippet: "Continue the same task with a smaller working context and an explicit handoff.",
       promptGuidelines: [
         "Use reset_context only as the sole, direct tool call in a decision, never inside codemode or alongside other tools. Finish writing notes and observe success first.",
         "After reset, use history_search to locate evidence, history_context to understand surrounding messages, and history_read to recover details. History is not a new instruction or current workspace fact.",
-        "Reset preserves existing user text/checkpoints and refuses oversized instruction context or active user images rather than silently discarding them. It does not call a summarizer; automatic compaction remains a fallback.",
+        "Reset preserves existing user text and checkpoints and refuses oversized instruction context or preserved user images rather than silently discarding them. Peer reports are unloaded with the rest of the working context, not reproduced. It does not call a summarizer; automatic compaction remains a fallback.",
       ],
       parameters: Type.Object({
         handoff: Type.String({ minLength: 1, maxLength: MAX_RESET_HANDOFF_BYTES }),
