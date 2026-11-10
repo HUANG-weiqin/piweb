@@ -1,0 +1,69 @@
+/*
+ * Quiet Rebel palette. Colors only; shapes and decoration belong to the skin.
+ * :root keeps this palette as the first-paint default before the app sets the theme.
+ */
+
+:root,
+html[data-color-scheme="quiet-rebel"] {
+  color-scheme: dark;
+  --foreground: #e6e0d5;
+  --canvas: #141719;
+  --panel: #181c1e;
+  --panel-strong: #1d2225;
+  --soft: #242a2d;
+  --soft-hover: #2c3438;
+  --line: #374044;
+  --line-strong: #69757a;
+  --muted: #aaa69d;
+  --intent: #aaa9df;
+  --intent-soft: #27283a;
+  --intent-line: #545678;
+  --accent: #d97965;
+  --accent-hover: #a75042;
+  --on-accent: #141719;
+  --success: #73b98f;
+  --success-soft: #183127;
+  --warning: #d2a85f;
+  --warning-soft: #352b1b;
+  --danger: #e17a70;
+  --danger-solid: #a75042;
+  --danger-soft: #3a2221;
+  --focus: #9cb7c9;
+  --scheme-rebel-black: #141719;
+  --scheme-rebel-rail-raised: #1d2225;
+  --scheme-rebel-app-raised: #1d2225;
+  --scheme-rebel-overlay-raised: #1d2225;
+  --scheme-rebel-paper: #e6e0d5;
+  --scheme-rebel-paper-muted: #aaa69d;
+  --scheme-rebel-on-oxide: #141719;
+  --scheme-rebel-red: #d97965;
+  --scheme-rebel-red-dark: #a75042;
+  --scheme-rebel-rail-line: rgb(105 117 122 / 52%);
+  --scheme-rebel-line: #374044;
+  --cleanup-warning-text: #e5a092;
+  --cleanup-warning-strong: #f0ad9f;
+  --status-active-text: #d66a5a;
+  --loop-active-text: #d6b1a8;
+  --paper-lift: white;
+  --running-soft: rgb(185 79 67 / 12%);
+  --hover-veil: rgb(216 209 193 / 7%);
+  --scrollbar-thumb: #67635b;
+  --sidebar-ordinal-text: #777368;
+  --sidebar-selected-kind-text: #4b4740;
+  --sidebar-meta-text: #77736a;
+  --sidebar-selected-meta-text: #514c43;
+  --sidebar-action-text: #878277;
+  --sidebar-selected-action-text: #585249;
+  --scrim-light: rgb(19 18 14 / 48%);
+  --on-danger: #fff;
+  --danger-shade: #000;
+  --toast-text: #ffffff;
+  --toast-close-bg: rgb(255 255 255 / 12%);
+  --toast-close-hover-bg: rgb(255 255 255 / 22%);
+  --scrim-black-heavy: rgb(0 0 0 / 78%);
+  --scrim-black-mid: rgb(0 0 0 / 62%);
+  --status-error-text: #e18475;
+  --link-tint: #286da8;
+  --scrim-heavy: rgb(19 18 14 / 74%);
+  --status-pending-text: #b98014;
+}

@@ -1,82 +1,8 @@
 :root {
-  font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-  color: #e6e0d5;
-  background: #141719;
+  font-family: var(--font-ui);
+  color: var(--foreground);
+  background: var(--canvas);
   font-synthesis: none;
-  color-scheme: dark;
-  --canvas: #141719;
-  --panel: #181c1e;
-  --panel-strong: #1d2225;
-  --soft: #242a2d;
-  --soft-hover: #2c3438;
-  --line: #374044;
-  --line-strong: #69757a;
-  --muted: #aaa69d;
-  --intent: #aaa9df;
-  --intent-soft: #27283a;
-  --intent-line: #545678;
-  --accent: #d97965;
-  --accent-hover: #a75042;
-  --on-accent: #141719;
-  --success: #73b98f;
-  --success-soft: #183127;
-  --warning: #d2a85f;
-  --warning-soft: #352b1b;
-  --danger: #e17a70;
-  --danger-solid: #a75042;
-  --danger-soft: #3a2221;
-  --focus: #9cb7c9;
-  --shadow-sm: 0 8px 24px rgb(0 0 0 / 18%);
-  --shadow-lg: 0 24px 80px rgb(0 0 0 / 38%);
-  --scheme-rebel-black: #141719;
-  --scheme-rebel-rail-raised: #1d2225;
-  --scheme-rebel-app-raised: #1d2225;
-  --scheme-rebel-overlay-raised: #1d2225;
-  --scheme-rebel-paper: #e6e0d5;
-  --scheme-rebel-paper-muted: #aaa69d;
-  --scheme-rebel-on-oxide: #141719;
-  --scheme-rebel-red: #d97965;
-  --scheme-rebel-red-dark: #a75042;
-  --scheme-rebel-rail-line: rgb(105 117 122 / 52%);
-  --scheme-rebel-line: #374044;
-}
-
-html[data-color-scheme="classic-rebel"] {
-  color: #d8d1c1;
-  background: #171a1b;
-  --canvas: #171a1b;
-  --panel: #202526;
-  --panel-strong: #272d2d;
-  --soft: #303636;
-  --soft-hover: #394141;
-  --line: #454b4b;
-  --line-strong: #737979;
-  --muted: #a39d91;
-  --intent: #d8d1c1;
-  --intent-soft: #2c3031;
-  --intent-line: #68675f;
-  --accent: #b94f43;
-  --accent-hover: #9b4138;
-  --on-accent: #fff;
-  --success: #8eb49a;
-  --success-soft: #24332a;
-  --warning: #d0aa66;
-  --warning-soft: #382e20;
-  --danger: #d87368;
-  --danger-solid: #b94f43;
-  --danger-soft: #442724;
-  --focus: #d8d1c1;
-  --scheme-rebel-black: #171a1b;
-  --scheme-rebel-rail-raised: #1d2222;
-  --scheme-rebel-app-raised: #202526;
-  --scheme-rebel-overlay-raised: #272d2d;
-  --scheme-rebel-paper: #d8d1c1;
-  --scheme-rebel-paper-muted: #a39d91;
-  --scheme-rebel-on-oxide: #fff;
-  --scheme-rebel-red: #b94f43;
-  --scheme-rebel-red-dark: #71332e;
-  --scheme-rebel-rail-line: rgb(216 209 193 / 22%);
-  --scheme-rebel-line: #454b4b;
 }
 
 * {
@@ -93,8 +19,7 @@ body,
 body {
   color: inherit;
   background:
-    radial-gradient(circle at 12% -10%, color-mix(in srgb, var(--panel-strong) 72%, transparent), transparent 34rem),
-    var(--canvas);
+    var(--decor-bg-body-glow, var(--canvas));
 }
 
 button,
@@ -118,7 +43,7 @@ button,
   min-height: 38px;
   padding: 9px 13px;
   border: 1px solid transparent;
-  border-radius: 10px;
+  border-radius: var(--radius-10);
   color: var(--on-accent);
   background: var(--accent);
   font-weight: 650;
@@ -136,7 +61,7 @@ button:not(:disabled):hover,
 }
 
 button:not(:disabled):active {
-  transform: translateY(1px);
+  transform: var(--decor-transform-button-active, none);
 }
 
 button:focus-visible,
@@ -174,15 +99,15 @@ p {
 h1,
 h2,
 h3 {
-  letter-spacing: -0.02em;
+  letter-spacing: calc(-0.02em * var(--tracking-scale));
 }
 
 label,
 .setting-label {
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--fs-12);
   font-weight: 700;
-  letter-spacing: 0.03em;
+  letter-spacing: calc(0.03em * var(--tracking-scale));
 }
 
 input,
@@ -192,7 +117,7 @@ select {
   min-height: 42px;
   padding: 10px 12px;
   border: 1px solid var(--line);
-  border-radius: 11px;
+  border-radius: var(--radius-11);
   outline: none;
   color: inherit;
   background: var(--panel-strong);
@@ -215,14 +140,14 @@ textarea::placeholder {
 
 code,
 pre {
-  font-family: "Cascadia Code", Consolas, monospace;
+  font-family: var(--font-mono);
 }
 
 .eyebrow {
   color: var(--muted);
-  font-size: 10px;
+  font-size: var(--fs-10);
   font-weight: 800;
-  letter-spacing: 0.15em;
+  letter-spacing: calc(0.15em * var(--tracking-scale));
 }
 
 .field,
@@ -248,7 +173,7 @@ pre {
   gap: 18px;
   padding: 32px;
   border: 1px solid color-mix(in srgb, var(--line) 88%, transparent);
-  border-radius: 22px;
+  border-radius: var(--radius-22);
   background: color-mix(in srgb, var(--panel) 94%, transparent);
   box-shadow: var(--shadow-sm);
   backdrop-filter: blur(18px);
@@ -266,7 +191,7 @@ pre {
 }
 
 .setup-brand h1 {
-  font-size: 27px;
+  font-size: var(--fs-27);
 }
 
 .logo,
@@ -276,11 +201,11 @@ pre {
   display: grid;
   flex: 0 0 auto;
   place-items: center;
-  border-radius: 15px;
+  border-radius: var(--radius-15);
   color: var(--on-accent);
   background: var(--accent);
-  box-shadow: 0 8px 20px rgb(35 32 24 / 16%);
-  font: 700 30px Georgia, serif;
+  box-shadow: var(--shadow-card);
+  font: 700 var(--fs-30) var(--font-display);
 }
 
 .setup-intro {
@@ -290,7 +215,7 @@ pre {
 
 .setup-intro code {
   padding: 2px 5px;
-  border-radius: 5px;
+  border-radius: var(--radius-5);
   color: inherit;
   background: var(--soft);
   font-size: 0.9em;
@@ -309,7 +234,7 @@ pre {
 
 .setup-directory-hint {
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--fs-12);
 }
 
 .setup-footnote {
@@ -318,19 +243,19 @@ pre {
   justify-content: center;
   gap: 7px;
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--fs-12);
 }
 
 .status-dot {
   width: 7px;
   height: 7px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--muted);
 }
 
 .status-dot.online {
   background: var(--success);
-  box-shadow: 0 0 0 4px color-mix(in srgb, var(--success) 12%, transparent);
+  box-shadow: var(--decor-shadow-status-dot-online, none);
 }
 
 .setup-card > pre {
@@ -338,7 +263,7 @@ pre {
   overflow: auto;
   padding: 12px;
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: var(--radius-10);
   background: var(--soft);
   white-space: pre-wrap;
 }

@@ -56,7 +56,7 @@
   gap: 7px;
   margin: 0 clamp(10px, 3vw, 36px);
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--fs-12);
   font-weight: 620;
   white-space: nowrap;
 }
@@ -110,10 +110,10 @@
   height: 35px;
   display: grid;
   place-items: center;
-  border-radius: 10px;
+  border-radius: var(--radius-10);
   color: var(--on-accent);
   background: var(--accent);
-  font: 700 22px Georgia, serif;
+  font: 700 var(--fs-22) var(--font-display);
 }
 
 .brand small {
@@ -153,10 +153,10 @@
   gap: 6px;
   padding: 3px 5px 3px 9px;
   border: 1px solid var(--line);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   color: var(--muted);
   background: color-mix(in srgb, var(--panel) 78%, transparent);
-  font-size: 11px;
+  font-size: var(--fs-11);
   white-space: nowrap;
 }
 
@@ -166,17 +166,17 @@
   min-height: 24px;
   padding: 3px 24px 3px 7px;
   border: 0;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   color: var(--text);
   background-color: var(--panel);
-  font-size: 11px;
+  font-size: var(--fs-11);
 }
 
 .banner {
   padding: 7px 12px;
   color: var(--warning);
   background: var(--warning-soft);
-  font-size: 13px;
+  font-size: var(--fs-13);
   text-align: center;
 }
 
@@ -192,7 +192,7 @@
 .transcript {
   overflow-y: auto;
   padding: 34px max(20px, calc((100% - var(--conversation-content-width)) / 2)) calc(var(--composer-inset, 138px) + 32px);
-  font-size: 14px;
+  font-size: var(--fs-14);
   scrollbar-gutter: stable;
 }
 
@@ -216,20 +216,20 @@
   height: 88px;
   display: grid;
   place-items: center;
-  border: 2px solid color-mix(in srgb, var(--rebel-red) 62%, var(--line));
+  border: var(--stroke-2) solid color-mix(in srgb, var(--rebel-red) 62%, var(--line));
   border-radius: 0;
   color: var(--rebel-red);
   background: color-mix(in srgb, var(--rebel-black) 92%, var(--canvas));
-  clip-path: polygon(0 0, 100% 0, calc(100% - 12px) 100%, 0 100%);
-  font: 900 italic 38px/1 Georgia, serif;
-  letter-spacing: -0.04em;
-  transform: rotate(-2deg);
+  clip-path: var(--decor-clip-empty-panel, none);
+  font: 900 italic var(--fs-38)/1 var(--font-display);
+  letter-spacing: calc(-0.04em * var(--tracking-scale));
+  transform: var(--decor-transform-empty-panel, none);
 }
 
 .empty h1 {
   font-size: clamp(23px, 2.6vw, 32px);
   font-weight: 700;
-  letter-spacing: -0.025em;
+  letter-spacing: calc(-0.025em * var(--tracking-scale));
   margin: 0;
 }
 
@@ -237,7 +237,7 @@
   max-width: 380px;
   margin: 0;
   color: var(--muted);
-  font-size: 15px;
+  font-size: var(--fs-15);
   line-height: 1.66;
 }
 
@@ -254,15 +254,15 @@
   margin-left: auto;
   padding: 10px 15px;
   border: 1px solid color-mix(in srgb, var(--line) 72%, transparent);
-  border-radius: 16px 16px 5px 16px;
+  border-radius: var(--radius-16) var(--radius-16) var(--radius-5) var(--radius-16);
   background: var(--soft);
   white-space: pre-wrap;
 }
 
 .message.error {
   padding: 10px 12px;
-  border-left: 3px solid var(--danger);
-  border-radius: 0 9px 9px 0;
+  border-left: var(--stroke-3) solid var(--danger);
+  border-radius: 0 var(--radius-9) var(--radius-9) 0;
   color: var(--danger);
   background: var(--danger-soft);
 }
@@ -295,10 +295,10 @@
   gap: 4px;
   padding: 2px 7px;
   border-color: transparent;
-  border-radius: 6px;
+  border-radius: var(--radius-6);
   color: var(--muted);
   background: transparent;
-  font-size: 11px;
+  font-size: var(--fs-11);
   font-weight: 650;
   opacity: 0.42;
   transition:
@@ -347,11 +347,11 @@
   max-width: 100%;
   margin: 0 0 16px;
   padding: 5px 0 5px 10px;
-  border-left: 4px solid var(--rebel-red);
+  border-left: var(--stroke-4) solid var(--rebel-red);
   color: var(--rebel-paper-muted);
   background: transparent;
-  font-family: "Cascadia Code", Consolas, monospace;
-  font-size: 10px;
+  font-family: var(--font-label);
+  font-size: var(--fs-10);
   line-height: 1.45;
   overflow-wrap: anywhere;
   white-space: normal;
@@ -360,8 +360,8 @@
 .app-shell .history-window-marker strong {
   flex: 0 0 auto;
   color: var(--rebel-paper);
-  font-size: 10px;
-  letter-spacing: 0.06em;
+  font-size: var(--fs-10);
+  letter-spacing: calc(0.06em * var(--tracking-scale));
 }
 
 .app-shell .history-window-marker span {
@@ -374,7 +374,7 @@
   gap: 10px;
   margin: 15px 0;
   color: var(--muted);
-  font-size: 11px;
+  font-size: var(--fs-11);
   white-space: nowrap;
 }
 
@@ -393,7 +393,7 @@
   margin: 14px 0;
   padding: 11px 13px;
   border: 1px solid color-mix(in srgb, var(--warning) 24%, var(--line));
-  border-radius: 12px;
+  border-radius: var(--radius-12);
   color: color-mix(in srgb, var(--warning) 82%, currentColor);
   background: color-mix(in srgb, var(--warning) 7%, var(--surface));
 }
@@ -408,13 +408,13 @@
 }
 
 .compaction-progress-copy strong {
-  font-size: 12px;
+  font-size: var(--fs-12);
   font-weight: 680;
 }
 
 .compaction-progress-copy small {
   color: var(--muted);
-  font-size: 11px;
+  font-size: var(--fs-11);
 }
 
 .markdown {
@@ -459,7 +459,7 @@
   margin: 1.55em 0 0.55em;
   color: inherit;
   font-weight: 720;
-  letter-spacing: -0.025em;
+  letter-spacing: calc(-0.025em * var(--tracking-scale));
   line-height: 1.28;
 }
 
@@ -535,7 +535,7 @@
 
 .markdown blockquote {
   padding: 0.15em 0 0.15em 1em;
-  border-left: 3px solid color-mix(in srgb, var(--line-strong) 72%, transparent);
+  border-left: var(--stroke-3) solid color-mix(in srgb, var(--line-strong) 72%, transparent);
   color: var(--muted);
 }
 
@@ -567,7 +567,7 @@
 
 .markdown a,
 .markdown .local-file-link {
-  color: color-mix(in srgb, var(--accent) 78%, #286da8);
+  color: color-mix(in srgb, var(--accent) 78%, var(--link-tint));
   font-weight: 550;
   text-decoration-color: color-mix(in srgb, currentColor 42%, transparent);
   text-decoration-thickness: 1px;
@@ -628,7 +628,7 @@
   display: block;
   max-width: 100%;
   height: auto;
-  border-radius: 8px;
+  border-radius: var(--radius-8);
 }
 
 .markdown pre {
@@ -636,16 +636,16 @@
   overflow: auto;
   padding: 12px;
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: var(--radius-10);
   background: var(--soft);
-  font-size: 13px;
+  font-size: var(--fs-13);
   line-height: 1.55;
   scrollbar-width: thin;
 }
 
 .markdown :not(pre) > code {
   padding: 2px 5px;
-  border-radius: 5px;
+  border-radius: var(--radius-5);
   background: var(--soft);
   font-size: 0.92em;
   overflow-wrap: anywhere;
@@ -664,7 +664,7 @@
   margin: 0 0 1em;
   overflow: hidden;
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: var(--radius-10);
   background: var(--panel-strong);
 }
 
@@ -677,9 +677,9 @@
 .markdown .mermaid-diagram-expand {
   min-height: 30px;
   padding: 4px 9px;
-  border-radius: 7px;
+  border-radius: var(--radius-7);
   color: var(--muted);
-  font-size: 11px;
+  font-size: var(--fs-11);
   line-height: 1;
 }
 
@@ -714,7 +714,7 @@
     max(12px, env(safe-area-inset-right))
     max(12px, env(safe-area-inset-bottom))
     max(12px, env(safe-area-inset-left));
-  background: rgb(19 18 14 / 74%);
+  background: var(--scrim-heavy);
   backdrop-filter: blur(4px);
 }
 
@@ -727,7 +727,7 @@
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   border: 1px solid var(--line-strong);
-  border-radius: 14px;
+  border-radius: var(--radius-14);
   background: var(--panel-strong);
   box-shadow: var(--shadow-lg);
 }
@@ -750,7 +750,7 @@
 
 .mermaid-viewer-header h2 {
   overflow: hidden;
-  font-size: 17px;
+  font-size: var(--fs-17);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -770,7 +770,7 @@
 .mermaid-viewer-close {
   width: 40px;
   padding: 0;
-  font-size: 24px;
+  font-size: var(--fs-24);
   line-height: 1;
 }
 
@@ -878,7 +878,7 @@
   min-height: 28px;
   padding: 1px 0;
   cursor: pointer;
-  font-size: 12px;
+  font-size: var(--fs-12);
   list-style: none;
 }
 
@@ -914,12 +914,12 @@
   height: 16px;
   place-items: center;
   color: var(--success);
-  font-size: 11px;
+  font-size: var(--fs-11);
   font-weight: 750;
 }
 
 .assistant-activity-group.is-active .activity-group-status {
-  color: #b98014;
+  color: var(--status-pending-text);
 }
 
 .assistant-activity-group.is-error .activity-group-status {
@@ -938,14 +938,14 @@
 .activity-group-copy strong {
   flex: 0 0 auto;
   color: currentColor;
-  font-size: 12px;
+  font-size: var(--fs-12);
   font-weight: 600;
 }
 
 .activity-group-label {
   flex: 0 0 auto;
   color: color-mix(in srgb, currentColor 86%, var(--accent));
-  font-size: 12px;
+  font-size: var(--fs-12);
   font-weight: 600;
 }
 
@@ -960,20 +960,20 @@
 .activity-group-detail {
   overflow: hidden;
   color: var(--muted);
-  font-family: "Cascadia Code", Consolas, monospace;
-  font-size: 11px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-11);
   text-overflow: ellipsis;
 }
 
 .activity-group-count {
   color: var(--muted);
-  font-size: 11px;
+  font-size: var(--fs-11);
   opacity: 0.82;
   white-space: nowrap;
 }
 
 .activity-group-chevron {
-  font-size: 11px;
+  font-size: var(--fs-11);
   transition: transform 160ms ease;
 }
 
@@ -1012,7 +1012,7 @@
   position: relative;
   min-height: 28px;
   padding: 2px 0;
-  font-size: 12px;
+  font-size: var(--fs-12);
 }
 
 .activity-timeline > .thinking > summary::before,
@@ -1064,7 +1064,7 @@
   min-height: 32px;
   padding: 4px 0;
   cursor: pointer;
-  font-size: 13px;
+  font-size: var(--fs-13);
   list-style: none;
 }
 
@@ -1111,7 +1111,7 @@
 
 .thinking-complete {
   color: var(--success);
-  font-size: 12px;
+  font-size: var(--fs-12);
 }
 
 .activity-spinner {
@@ -1167,7 +1167,7 @@
 
 .thinking > .thinking-body {
   padding: 8px 20px 5px;
-  font-size: 13px;
+  font-size: var(--fs-13);
   line-height: 1.6;
 }
 
@@ -1188,14 +1188,14 @@
 }
 
 .tool-stack::-webkit-scrollbar-thumb {
-  border-radius: 8px;
+  border-radius: var(--radius-8);
   background: color-mix(in srgb, var(--muted) 24%, transparent);
 }
 
 .tool-stack-note {
   margin: 6px 0 4px;
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--fs-12);
 }
 
 .tool-toggle {
@@ -1203,43 +1203,31 @@
   min-height: auto;
   margin: 6px 0 2px;
   padding: 6px 9px;
-  font-size: 12px;
+  font-size: var(--fs-12);
 }
 
 .commitment-card {
   margin: 9px 0 11px;
   overflow: hidden;
   border: 1px solid var(--intent-line);
-  border-left: 3px solid var(--intent);
-  border-radius: 11px;
+  border-left: var(--stroke-3) solid var(--intent);
+  border-radius: var(--radius-11);
   color: color-mix(in srgb, var(--intent) 34%, var(--accent));
-  background: linear-gradient(
-    135deg,
-    color-mix(in srgb, var(--intent-soft) 82%, var(--panel)) 0%,
-    color-mix(in srgb, var(--intent-soft) 42%, var(--panel)) 100%
-  );
+  background: var(--decor-bg-commitment-card, transparent);
 }
 
 .commitment-card.is-warning {
   border-color: color-mix(in srgb, var(--warning) 32%, var(--line));
   border-left-color: var(--warning);
   color: color-mix(in srgb, var(--warning) 72%, var(--accent));
-  background: linear-gradient(
-    135deg,
-    color-mix(in srgb, var(--warning-soft) 68%, var(--panel)) 0%,
-    color-mix(in srgb, var(--warning-soft) 26%, var(--panel)) 100%
-  );
+  background: var(--decor-bg-commitment-card-warning, transparent);
 }
 
 .commitment-card.is-error {
   border-color: color-mix(in srgb, var(--danger) 30%, var(--line));
   border-left-color: var(--danger);
   color: color-mix(in srgb, var(--danger) 68%, var(--accent));
-  background: linear-gradient(
-    135deg,
-    color-mix(in srgb, var(--danger-soft) 62%, var(--panel)) 0%,
-    color-mix(in srgb, var(--danger-soft) 24%, var(--panel)) 100%
-  );
+  background: var(--decor-bg-commitment-card-error, transparent);
 }
 
 .commitment-card > summary {
@@ -1282,9 +1270,9 @@
   width: 9px;
   height: 9px;
   margin-left: 2px;
-  transform: rotate(45deg);
-  border: 2px solid currentColor;
-  border-radius: 2px;
+  transform: var(--decor-transform-commitment-node, none);
+  border: var(--stroke-2) solid currentColor;
+  border-radius: var(--radius-2);
   background: color-mix(in srgb, var(--panel) 72%, transparent);
 }
 
@@ -1296,15 +1284,15 @@
 
 .commitment-eyebrow {
   color: currentColor;
-  font-size: 10px;
+  font-size: var(--fs-10);
   font-weight: 800;
-  letter-spacing: 0.13em;
+  letter-spacing: calc(0.13em * var(--tracking-scale));
 }
 
 .commitment-copy strong {
   overflow: hidden;
   color: color-mix(in srgb, currentColor 58%, var(--accent));
-  font-size: 13px;
+  font-size: var(--fs-13);
   font-weight: 720;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1314,7 +1302,7 @@
   display: -webkit-box;
   overflow: hidden;
   color: color-mix(in srgb, var(--muted) 88%, currentColor);
-  font-size: 12px;
+  font-size: var(--fs-12);
   line-height: 1.45;
   overflow-wrap: anywhere;
   -webkit-box-orient: vertical;
@@ -1336,17 +1324,17 @@
   gap: 5px;
   padding: 2px 7px;
   border: 1px solid color-mix(in srgb, currentColor 18%, transparent);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   color: color-mix(in srgb, currentColor 80%, var(--accent));
   background: color-mix(in srgb, var(--panel-strong) 66%, transparent);
-  font-size: 11px;
+  font-size: var(--fs-11);
   font-weight: 680;
   white-space: nowrap;
 }
 
 .commitment-chevron {
   grid-column: 4;
-  font-size: 11px;
+  font-size: var(--fs-11);
   transition: transform 160ms ease;
 }
 
@@ -1389,7 +1377,7 @@
 }
 
 .tool-status-symbol {
-  font-size: 13px;
+  font-size: var(--fs-13);
   font-weight: 800;
   line-height: 1;
 }
@@ -1404,15 +1392,15 @@
 .tool-summary strong {
   flex: 0 0 auto;
   color: color-mix(in srgb, currentColor 88%, var(--accent));
-  font-size: 13px;
+  font-size: var(--fs-13);
   font-weight: 680;
 }
 
 .tool-target {
   overflow: hidden;
   color: var(--muted);
-  font-family: "Cascadia Code", Consolas, monospace;
-  font-size: 12px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-12);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1435,9 +1423,9 @@
 .tool-result-details h5 {
   margin: 0 0 8px;
   color: var(--muted);
-  font-size: 11px;
+  font-size: var(--fs-11);
   font-weight: 750;
-  letter-spacing: 0.08em;
+  letter-spacing: calc(0.08em * var(--tracking-scale));
 }
 
 .tool-result-details {
@@ -1459,14 +1447,14 @@
 
 .tool-field dt {
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--fs-12);
 }
 
 .tool-field dd {
   min-width: 0;
   margin: 0;
   color: color-mix(in srgb, currentColor 90%, var(--accent));
-  font-size: 12px;
+  font-size: var(--fs-12);
 }
 
 .tool-value {
@@ -1488,7 +1476,7 @@
 .tool-value-list .tool-fields {
   padding: 8px 9px;
   border: 1px solid color-mix(in srgb, var(--line) 76%, transparent);
-  border-radius: 8px;
+  border-radius: var(--radius-8);
   background: color-mix(in srgb, var(--panel) 72%, transparent);
 }
 
@@ -1499,11 +1487,11 @@
   margin: 0;
   padding: 9px 10px;
   border: 1px solid color-mix(in srgb, var(--line) 82%, transparent);
-  border-radius: 8px;
+  border-radius: var(--radius-8);
   color: color-mix(in srgb, currentColor 90%, var(--accent));
   background: color-mix(in srgb, var(--panel) 72%, transparent);
-  font-family: "Cascadia Code", Consolas, monospace;
-  font-size: 12px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-12);
   line-height: 1.55;
   scrollbar-width: thin;
   white-space: pre-wrap;
@@ -1511,7 +1499,7 @@
 
 .tool-pending .tool-status,
 .tool-running .tool-status {
-  color: #b98014;
+  color: var(--status-pending-text);
   background: color-mix(in srgb, var(--warning-soft) 72%, transparent);
 }
 
@@ -1546,9 +1534,9 @@
   margin-left: auto;
   padding: 9px 12px 9px 14px;
   border: 1px dashed color-mix(in srgb, var(--warning) 45%, var(--line));
-  border-radius: 14px 14px 5px 14px;
+  border-radius: var(--radius-14) var(--radius-14) var(--radius-5) var(--radius-14);
   background: color-mix(in srgb, var(--warning) 7%, var(--panel));
-  box-shadow: 0 4px 14px rgb(35 31 23 / 5%);
+  box-shadow: var(--shadow-card-2);
   line-height: 1.6;
 }
 
@@ -1568,12 +1556,12 @@
   gap: 6px;
   margin-top: 4px;
   padding: 2px 9px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   color: var(--warning);
   background: var(--warning-soft);
-  font-size: 11px;
+  font-size: var(--fs-11);
   font-weight: 620;
-  letter-spacing: 0.04em;
+  letter-spacing: calc(0.04em * var(--tracking-scale));
   white-space: nowrap;
 }
 
@@ -1586,7 +1574,7 @@
   border: 0;
   background: transparent;
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--fs-12);
   white-space: nowrap;
 }
 
@@ -1621,9 +1609,9 @@
   margin: 0 8px 8px;
   overflow: hidden;
   border: 1px solid var(--line);
-  border-radius: 12px;
+  border-radius: var(--radius-12);
   background: color-mix(in srgb, var(--panel-strong) 96%, transparent);
-  box-shadow: 0 7px 22px rgb(35 31 23 / 7%);
+  box-shadow: var(--shadow-panel);
 }
 
 .loop-list-toggle {
@@ -1650,10 +1638,10 @@
 
 .loop-list-status {
   padding: 2px 7px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   color: var(--muted);
   background: var(--soft);
-  font-size: 10px;
+  font-size: var(--fs-10);
 }
 
 .loop-list-status.executing {
@@ -1667,7 +1655,7 @@
 .loop-list-count {
   margin-left: auto;
   color: var(--muted);
-  font-size: 11px;
+  font-size: var(--fs-11);
 }
 
 .loop-list-items {
@@ -1696,10 +1684,10 @@
   place-items: center;
   margin-top: 2px;
   border: 1px solid var(--line-strong);
-  border-radius: 5px;
+  border-radius: var(--radius-5);
   color: var(--muted);
   background: var(--panel-strong);
-  font-size: 13px;
+  font-size: var(--fs-13);
   font-weight: 800;
   line-height: 1;
 }
@@ -1736,11 +1724,11 @@
   padding: 6px 12px;
   /* Global button:active owns transform; centering must not depend on it. */
   border-color: var(--line);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   color: var(--muted);
   background: var(--panel-strong);
-  box-shadow: 0 8px 24px rgb(35 31 23 / 12%);
-  font-size: 12px;
+  box-shadow: var(--shadow-float);
+  font-size: var(--fs-12);
 }
 
 .composer {
@@ -1749,26 +1737,25 @@
   gap: 8px;
   padding: 8px;
   border: 1px solid var(--line);
-  border-radius: 17px;
+  border-radius: var(--radius-17);
   background: var(--panel-strong);
-  box-shadow: 0 10px 32px rgb(35 31 23 / 10%);
+  box-shadow: var(--shadow-composer);
 }
 
 .composer:focus-within {
   border-color: var(--line-strong);
   box-shadow:
-    0 0 0 3px color-mix(in srgb, var(--focus) 8%, transparent),
-    0 10px 32px rgb(35 31 23 / 10%);
+    0 0 0 3px color-mix(in srgb, var(--focus) 8%, transparent), var(--shadow-composer);
 }
 
 .composer-notice {
   margin: 0 8px 8px;
   padding: 7px 10px;
   border: 1px solid color-mix(in srgb, var(--warning) 28%, var(--line));
-  border-radius: 10px;
+  border-radius: var(--radius-10);
   color: var(--warning);
   background: color-mix(in srgb, var(--warning-soft) 90%, var(--panel));
-  font-size: 12px;
+  font-size: var(--fs-12);
 }
 
 .composer-notice.pending {
@@ -1798,14 +1785,14 @@
   min-height: 0;
   flex: 0 0 auto;
   padding: 0;
-  border-radius: 11px;
-  font-size: 20px;
+  border-radius: var(--radius-11);
+  font-size: var(--fs-20);
 }
 
 .send.stop {
   color: var(--warning);
   background: var(--warning-soft);
-  font-size: 13px;
+  font-size: var(--fs-13);
 }
 
 .compaction-threshold-control {
@@ -1815,7 +1802,7 @@
   gap: 9px;
   margin: 7px 4px 0;
   color: var(--muted);
-  font-size: 11px;
+  font-size: var(--fs-11);
 }
 
 .compaction-threshold-control input {
@@ -1844,10 +1831,10 @@
   gap: 5px;
   padding: 4px 9px;
   border: 1px solid color-mix(in srgb, var(--line) 88%, transparent);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   color: var(--muted);
   background: color-mix(in srgb, var(--panel) 78%, transparent);
-  font-size: 11px;
+  font-size: var(--fs-11);
   white-space: nowrap;
 }
 
@@ -1887,10 +1874,10 @@
 .session-stats {
   padding: 5px 9px;
   border: 1px solid color-mix(in srgb, var(--line) 88%, transparent);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   color: var(--muted);
   background: color-mix(in srgb, var(--panel) 78%, transparent);
-  font-size: 11px;
+  font-size: var(--fs-11);
   white-space: nowrap;
 }
 
@@ -1909,11 +1896,11 @@
   gap: 4px;
   padding: 9px 11px;
   border: 1px solid var(--line);
-  border-radius: 9px;
+  border-radius: var(--radius-9);
   color: var(--text);
   background: var(--panel);
   box-shadow: var(--shadow);
-  font-size: 12px;
+  font-size: var(--fs-12);
   line-height: 1.35;
   pointer-events: none;
   opacity: 0;

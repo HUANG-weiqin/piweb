@@ -26,7 +26,7 @@
   padding: 10px 12px 9px 18px;
   border-bottom-width: 1px;
   background:
-    linear-gradient(90deg, var(--rebel-black), var(--rebel-raised) 58%, var(--rebel-black));
+    var(--decor-bg-topbar, transparent);
 }
 
 .app-shell .topbar::after {
@@ -34,7 +34,7 @@
   bottom: -1px;
   width: clamp(120px, 12vw, 184px);
   height: 5px;
-  clip-path: polygon(0 42%, 92% 0, 100% 100%, 5% 82%);
+  clip-path: var(--decor-clip-topbar-after, none);
 }
 
 .app-shell .brand {
@@ -55,15 +55,15 @@
 .app-shell .brand > span:last-child::before {
   color: var(--rebel-red);
   content: "PROJECT";
-  font-family: "Cascadia Code", Consolas, monospace;
-  font-size: 8px;
+  font-family: var(--font-label);
+  font-size: var(--fs-8);
   font-weight: 900;
-  letter-spacing: 0.16em;
+  letter-spacing: calc(0.16em * var(--tracking-scale));
 }
 
 .app-shell .brand small {
   max-width: 100px;
-  font-size: 9px;
+  font-size: var(--fs-9);
   line-height: 1.2;
 }
 
@@ -73,8 +73,7 @@
   height: 72px;
   padding: 0 10px 0 6px;
   background:
-    linear-gradient(104deg, rgb(185 79 67 / 13%) 0 84px, transparent 85px),
-    linear-gradient(90deg, rgb(32 37 38 / 88%), rgb(23 26 27 / 72%));
+    var(--decor-bg-topbar-conversation-context, transparent);
   box-shadow:
     inset 1px 0 var(--rebel-line),
     inset -1px 0 var(--rebel-line),
@@ -110,7 +109,7 @@
   padding: 20px 26px 7px 11px;
   border-color: var(--rebel-line);
   box-shadow: inset 3px 0 var(--rebel-red);
-  font-size: 10px;
+  font-size: var(--fs-10);
   text-align: left;
 }
 
@@ -120,10 +119,10 @@
   left: 11px;
   color: var(--rebel-red);
   content: "SETTINGS";
-  font-family: "Cascadia Code", Consolas, monospace;
-  font-size: 8px;
+  font-family: var(--font-label);
+  font-size: var(--fs-8);
   font-weight: 900;
-  letter-spacing: 0.16em;
+  letter-spacing: calc(0.16em * var(--tracking-scale));
   line-height: 1;
 }
 
@@ -173,8 +172,8 @@
   }
 
   .topbar-session-ordinal {
-    font-size: 35px;
-    text-shadow: 2px 2px 0 var(--rebel-paper);
+    font-size: var(--fs-35);
+    text-shadow: var(--decor-shadow-session-ordinal, none);
   }
 
   .topbar-conversation-title {
@@ -184,8 +183,8 @@
 
   .topbar-conversation-metadata {
     gap: 5px;
-    font-size: 7px;
-    letter-spacing: 0.03em;
+    font-size: var(--fs-7);
+    letter-spacing: calc(0.03em * var(--tracking-scale));
   }
 
   .app-shell .topbar-controls {
@@ -200,13 +199,13 @@
     max-width: 70px;
     min-height: 56px;
     padding: 20px 17px 6px 7px;
-    font-size: 8px;
+    font-size: var(--fs-8);
   }
 
   .app-shell .model-button::before {
     top: 7px;
     left: 7px;
-    font-size: 7px;
+    font-size: var(--fs-7);
   }
 
   .app-shell .model-button span {
@@ -244,14 +243,14 @@
     max-width: 58px;
     min-height: 54px;
     padding: 20px 13px 5px 6px;
-    font-size: 7px;
+    font-size: var(--fs-7);
   }
 
   .app-shell .model-button::before {
     top: 7px;
     left: 6px;
-    font-size: 7px;
-    letter-spacing: 0.08em;
+    font-size: var(--fs-7);
+    letter-spacing: calc(0.08em * var(--tracking-scale));
   }
 
   .app-shell .model-button span {
@@ -260,15 +259,6 @@
 }
 
 /* Gate 6: short, state-owned motion for primary shell surfaces only */
-
-.workspace-rail,
-.conversation-sidebar,
-.app-shell {
-  --motion-punch-duration: 110ms;
-  --motion-slash-duration: 150ms;
-  --motion-stamp-duration: 130ms;
-  --motion-hit-easing: cubic-bezier(0.2, 0.8, 0.2, 1);
-}
 
 .workspace-rail-item,
 .workspace-rail-item.active::before,
@@ -291,13 +281,13 @@
 
 .app-shell .model-button:not(:disabled):active,
 .app-shell .send:not(:disabled):active {
-  transform: translateY(1px) scale(0.98);
+  transform: var(--decor-transform-send-model-active, none);
 }
 
 .conversation-group-chevron,
 .conversation-group-chevron::before {
   transition-duration: var(--motion-slash-duration);
-  transition-timing-function: steps(3, end);
+  transition-timing-function: var(--motion-steps-3);
 }
 
 .transcript .compaction-state {
@@ -307,12 +297,12 @@
 .transcript .compaction-state::after {
   position: absolute;
   inset: -4px -6px;
-  border: 2px solid currentColor;
+  border: var(--stroke-2) solid currentColor;
   content: "";
   opacity: 0;
   pointer-events: none;
-  transform: rotate(-2deg);
-  animation: rebel-motion-stamp var(--motion-stamp-duration) steps(3, end);
+  transform: var(--decor-transform-compaction-state-after, none);
+  animation: rebel-motion-stamp var(--motion-stamp-duration) var(--motion-steps-3);
 }
 
 @keyframes rebel-motion-stamp {
@@ -366,9 +356,7 @@
   position: relative;
   color: var(--rebel-paper);
   background:
-    linear-gradient(116deg, transparent 0 69%, var(--rebel-red-dark) 69% 71%, transparent 71%),
-    repeating-linear-gradient(135deg, rgb(216 209 193 / 2%) 0 1px, transparent 1px 13px),
-    var(--rebel-black);
+    var(--decor-bg-setup-shell, var(--rebel-black));
 }
 
 .setup-shell::before,
@@ -387,12 +375,12 @@
   width: min(520px, 100%);
   gap: 21px;
   padding: 36px 38px 34px;
-  border: 3px solid var(--rebel-black);
+  border: var(--stroke-3) solid var(--rebel-black);
   border-radius: 0;
   color: var(--rebel-black);
   background: var(--rebel-paper);
-  box-shadow: 14px 14px 0 var(--rebel-red);
-  clip-path: polygon(0 0, calc(100% - 18px) 0, 100% 18px, 100% 100%, 12px 100%, 0 calc(100% - 12px));
+  box-shadow: var(--decor-shadow-setup-card, none);
+  clip-path: var(--decor-clip-setup-card, none);
   backdrop-filter: none;
 }
 
@@ -404,8 +392,8 @@
   color: var(--rebel-paper);
   background: var(--rebel-black);
   content: "LOCAL // WORKSPACE";
-  font: 850 8px/1.2 "Cascadia Code", Consolas, monospace;
-  letter-spacing: 0.12em;
+  font: 850 var(--fs-8)/1.2 var(--font-label);
+  letter-spacing: calc(0.12em * var(--tracking-scale));
 }
 
 .setup-brand {
@@ -419,9 +407,9 @@
   border-radius: 0;
   color: var(--rebel-on-oxide);
   background: var(--rebel-red);
-  box-shadow: 5px 5px 0 var(--rebel-black);
-  clip-path: polygon(7px 0, 100% 5px, calc(100% - 5px) 100%, 0 calc(100% - 7px));
-  font-family: Georgia, serif;
+  box-shadow: var(--decor-shadow-logo, none);
+  clip-path: var(--decor-clip-logo-mark, none);
+  font-family: var(--font-display);
   font-style: italic;
   font-weight: 900;
 }
@@ -432,7 +420,7 @@
 .role-selection-header h1 {
   font-style: italic;
   font-weight: 950;
-  letter-spacing: -0.055em;
+  letter-spacing: calc(-0.055em * var(--tracking-scale));
   text-transform: uppercase;
 }
 
@@ -440,7 +428,7 @@
 .workspace-placeholder .eyebrow,
 .role-selection-page .eyebrow {
   color: var(--rebel-red);
-  font-family: "Cascadia Code", Consolas, monospace;
+  font-family: var(--font-label);
 }
 
 .setup-intro,
@@ -461,10 +449,10 @@
 .setup-card input,
 .setup-card textarea,
 .setup-card select {
-  border: 2px solid var(--rebel-black);
+  border: var(--stroke-2) solid var(--rebel-black);
   border-radius: 0;
   color: var(--rebel-black);
-  background: color-mix(in srgb, var(--rebel-paper) 92%, white);
+  background: color-mix(in srgb, var(--rebel-paper) 92%, var(--paper-lift));
   box-shadow: none;
 }
 
@@ -478,16 +466,16 @@
 .setup-card button,
 .workspace-placeholder button,
 .role-selection-page button {
-  border: 2px solid var(--rebel-black);
+  border: var(--stroke-2) solid var(--rebel-black);
   border-radius: 0;
   color: var(--rebel-paper);
   background: var(--rebel-black);
-  box-shadow: 4px 4px 0 var(--rebel-red);
-  font-family: "Cascadia Code", Consolas, monospace;
-  font-size: 11px;
+  box-shadow: var(--decor-shadow-button, none);
+  font-family: var(--font-label);
+  font-size: var(--fs-11);
   font-style: italic;
   font-weight: 900;
-  letter-spacing: 0.04em;
+  letter-spacing: calc(0.04em * var(--tracking-scale));
 }
 
 .setup-card button:not(:disabled):hover,
@@ -495,7 +483,7 @@
 .role-selection-page button:not(:disabled):hover {
   color: var(--rebel-on-oxide);
   background: var(--rebel-red);
-  box-shadow: 4px 4px 0 var(--rebel-black);
+  box-shadow: var(--decor-shadow-button-hover, none);
 }
 
 .setup-card button.ghost,
@@ -508,7 +496,7 @@
 .setup-card .status-dot {
   border-radius: 0;
   background: color-mix(in srgb, var(--rebel-black) 45%, var(--rebel-paper));
-  transform: rotate(45deg);
+  transform: var(--decor-transform-setup-status-dot, none);
 }
 
 .setup-card .status-dot.online {
@@ -520,12 +508,12 @@
   width: min(610px, 100%);
   gap: 14px;
   padding: 35px 38px 38px;
-  border-top: 3px solid var(--rebel-paper);
-  border-bottom: 3px solid var(--rebel-paper);
+  border-top: var(--stroke-3) solid var(--rebel-paper);
+  border-bottom: var(--stroke-3) solid var(--rebel-paper);
   color: var(--rebel-paper-muted);
   background: var(--rebel-raised);
-  box-shadow: 13px 13px 0 var(--rebel-red-dark);
-  clip-path: polygon(0 10px, 98% 0, 100% calc(100% - 13px), 8px 100%);
+  box-shadow: var(--decor-shadow-workspace-placeholder, none);
+  clip-path: var(--decor-clip-workspace-placeholder, none);
 }
 
 .workspace-placeholder-content h1,
@@ -536,13 +524,13 @@
 .workspace-placeholder-content code {
   color: var(--rebel-paper);
   background: var(--rebel-black);
-  font-family: "Cascadia Code", Consolas, monospace;
+  font-family: var(--font-mono);
 }
 
 .workspace-placeholder-mark.warning {
   color: var(--rebel-on-oxide);
   background: var(--rebel-red);
-  font-family: Inter, sans-serif;
+  font-family: var(--font-label-sans);
 }
 
 .workspace-opening-spinner,
@@ -566,7 +554,7 @@
 .role-selection-header {
   position: relative;
   padding: 0 0 22px 20px;
-  border-bottom: 3px solid var(--rebel-paper);
+  border-bottom: var(--stroke-3) solid var(--rebel-paper);
 }
 
 .role-selection-header::before {
@@ -577,7 +565,7 @@
   width: 7px;
   background: var(--rebel-red);
   content: "";
-  transform: skewY(-10deg);
+  transform: var(--decor-transform-role-selection-header-before, none);
 }
 
 .role-selection-header h1 {
@@ -604,12 +592,12 @@
   padding: 23px 22px 20px;
   overflow: hidden;
   border: 0;
-  border-left: 7px solid var(--rebel-red);
+  border-left: var(--stroke-7) solid var(--rebel-red);
   border-radius: 0;
   color: var(--rebel-black);
   background: var(--rebel-paper);
-  box-shadow: 8px 8px 0 var(--rebel-red-dark);
-  clip-path: polygon(0 5px, 100% 0, calc(100% - 6px) 100%, 5px calc(100% - 2px));
+  box-shadow: var(--decor-shadow-role-card, none);
+  clip-path: var(--decor-clip-role-card, none);
 }
 
 .role-card::before {
@@ -620,16 +608,16 @@
   height: 5px;
   background: var(--rebel-black);
   content: "";
-  transform: skewX(-28deg);
+  transform: var(--decor-transform-role-card-before, none);
 }
 
 .role-card:not(.role-card-add):hover,
 .role-card-add:not(:disabled):hover {
   border-color: var(--rebel-red);
   color: var(--rebel-black);
-  background: color-mix(in srgb, var(--rebel-paper) 92%, white);
-  box-shadow: 8px 8px 0 var(--rebel-red);
-  transform: translateY(-2px);
+  background: color-mix(in srgb, var(--rebel-paper) 92%, var(--paper-lift));
+  box-shadow: var(--decor-shadow-role-card-hover, none);
+  transform: var(--decor-transform-role-card-hover, none);
 }
 
 .role-card.unavailable {
@@ -640,7 +628,7 @@
 
 .role-card-heading {
   color: var(--rebel-black);
-  font-size: 20px;
+  font-size: var(--fs-20);
   font-style: italic;
   font-weight: 950;
   text-transform: uppercase;
@@ -654,15 +642,15 @@
 .role-card-model {
   padding-top: 9px;
   border-top: 1px solid color-mix(in srgb, var(--rebel-black) 28%, var(--rebel-paper));
-  font-size: 10px;
+  font-size: var(--fs-10);
   font-weight: 800;
-  letter-spacing: 0.04em;
+  letter-spacing: calc(0.04em * var(--tracking-scale));
   text-transform: uppercase;
 }
 
 .role-card-add {
-  border: 2px dashed var(--rebel-paper-muted);
-  border-left: 7px solid var(--rebel-paper-muted);
+  border: var(--stroke-2) dashed var(--rebel-paper-muted);
+  border-left: var(--stroke-7) solid var(--rebel-paper-muted);
   color: var(--rebel-paper);
   background: var(--rebel-raised);
   box-shadow: none;
@@ -673,7 +661,7 @@
 }
 
 .role-card-action {
-  border: 2px solid var(--rebel-black) !important;
+  border: var(--stroke-2) solid var(--rebel-black) !important;
   border-radius: 0 !important;
   color: var(--rebel-black) !important;
   background: transparent !important;
@@ -689,34 +677,33 @@
 
 .drawer-backdrop,
 .modal-backdrop {
-  background: rgb(0 0 0 / 78%);
+  background: var(--scrim-black-heavy);
   backdrop-filter: none;
 }
 
 .drawer {
   padding: 0 30px 34px;
-  border-left: 3px solid var(--rebel-red);
+  border-left: var(--stroke-3) solid var(--rebel-red);
   color: var(--rebel-paper);
   background:
-    repeating-linear-gradient(135deg, rgb(216 209 193 / 2%) 0 1px, transparent 1px 12px),
-    var(--rebel-black);
-  box-shadow: -14px 0 0 rgb(185 79 67 / 36%);
+    var(--decor-bg-drawer, var(--rebel-black));
+  box-shadow: var(--decor-shadow-drawer, none);
 }
 
 .drawer-header {
   margin: 0 -30px 25px;
   padding: 25px 30px 19px;
-  border-bottom: 3px solid var(--rebel-paper);
+  border-bottom: var(--stroke-3) solid var(--rebel-paper);
   background: var(--rebel-black);
   backdrop-filter: none;
 }
 
 .drawer-header h2 {
   color: var(--rebel-paper);
-  font-size: 27px;
+  font-size: var(--fs-27);
   font-style: italic;
   font-weight: 950;
-  letter-spacing: -0.045em;
+  letter-spacing: calc(-0.045em * var(--tracking-scale));
   text-transform: uppercase;
 }
 
@@ -731,11 +718,11 @@
 .drawer .eyebrow,
 .modal .eyebrow {
   color: var(--rebel-red);
-  font-family: "Cascadia Code", Consolas, monospace;
+  font-family: var(--font-label);
 }
 
 .drawer .icon-button {
-  border: 2px solid var(--rebel-paper);
+  border: var(--stroke-2) solid var(--rebel-paper);
   border-radius: 0;
   color: var(--rebel-paper);
   background: transparent;
@@ -764,7 +751,7 @@
 
 .drawer .current-model {
   padding: 17px;
-  border-left: 6px solid var(--rebel-red);
+  border-left: var(--stroke-6) solid var(--rebel-red);
 }
 
 .drawer .status-badge,
@@ -773,10 +760,10 @@
   border-radius: 0;
   color: var(--rebel-paper-muted);
   background: transparent;
-  font-family: "Cascadia Code", Consolas, monospace;
-  font-size: 9px;
+  font-family: var(--font-label);
+  font-size: var(--fs-9);
   font-weight: 900;
-  letter-spacing: 0.08em;
+  letter-spacing: calc(0.08em * var(--tracking-scale));
   text-transform: uppercase;
 }
 
@@ -790,7 +777,7 @@
   border-radius: 0;
   color: var(--rebel-on-oxide);
   background: var(--rebel-red);
-  clip-path: polygon(4px 0, 100% 2px, calc(100% - 3px) 100%, 0 calc(100% - 4px));
+  clip-path: var(--decor-clip-drawer-step-number, none);
 }
 
 .drawer .provider-actions button,
@@ -851,7 +838,7 @@
 }
 
 .drawer .inline-status.success {
-  border-left: 4px solid var(--rebel-paper);
+  border-left: var(--stroke-4) solid var(--rebel-paper);
   background: color-mix(in srgb, var(--rebel-paper) 12%, var(--rebel-black));
 }
 
@@ -867,12 +854,12 @@
   position: relative;
   gap: 16px;
   padding: 27px;
-  border: 3px solid var(--rebel-black);
+  border: var(--stroke-3) solid var(--rebel-black);
   border-radius: 0;
   color: var(--rebel-black);
   background: var(--rebel-paper);
-  box-shadow: 12px 12px 0 var(--rebel-red);
-  clip-path: polygon(0 0, calc(100% - 16px) 0, 100% 16px, 100% 100%, 10px 100%, 0 calc(100% - 10px));
+  box-shadow: var(--decor-shadow-modal, none);
+  clip-path: var(--decor-clip-modal, none);
 }
 
 .modal::before {
@@ -883,7 +870,7 @@
   height: 5px;
   background: var(--rebel-red);
   content: "";
-  transform: skewX(-28deg);
+  transform: var(--decor-transform-modal-before, none);
 }
 
 .modal-header {
@@ -897,10 +884,10 @@
 
 .modal-header h2 {
   color: var(--rebel-paper);
-  font-size: 23px;
+  font-size: var(--fs-23);
   font-style: italic;
   font-weight: 950;
-  letter-spacing: -0.04em;
+  letter-spacing: calc(-0.04em * var(--tracking-scale));
   text-transform: uppercase;
 }
 
@@ -931,13 +918,13 @@
 
 .modal button,
 .modal .primary-link {
-  border: 2px solid var(--rebel-black);
+  border: var(--stroke-2) solid var(--rebel-black);
   border-radius: 0;
   color: var(--rebel-paper);
   background: var(--rebel-black);
-  box-shadow: 3px 3px 0 var(--rebel-red);
-  font-family: "Cascadia Code", Consolas, monospace;
-  font-size: 11px;
+  box-shadow: var(--decor-shadow-modal-button, none);
+  font-family: var(--font-label);
+  font-size: var(--fs-11);
   font-weight: 850;
 }
 
@@ -946,7 +933,7 @@
   border-color: var(--rebel-red);
   color: var(--rebel-on-oxide);
   background: var(--rebel-red);
-  box-shadow: 3px 3px 0 var(--rebel-black);
+  box-shadow: var(--decor-shadow-modal-button-hover, none);
 }
 
 .modal button.ghost,
@@ -968,10 +955,10 @@
 .modal .device-code,
 .modal .directory-browser-location code,
 .modal .directory-browser-list {
-  border: 2px solid var(--rebel-black);
+  border: var(--stroke-2) solid var(--rebel-black);
   border-radius: 0;
   color: var(--rebel-black);
-  background: color-mix(in srgb, var(--rebel-paper) 92%, white);
+  background: color-mix(in srgb, var(--rebel-paper) 92%, var(--paper-lift));
   box-shadow: none;
 }
 
@@ -1001,7 +988,7 @@
 
 .modal .directory-browser-error {
   border: 0;
-  border-left: 5px solid var(--rebel-red);
+  border-left: var(--stroke-5) solid var(--rebel-red);
   color: var(--rebel-paper);
   background: var(--rebel-red-dark);
 }
@@ -1024,12 +1011,12 @@
 .modal .role-manager-list {
   gap: 4px;
   padding-right: 13px;
-  border-right: 2px solid var(--rebel-black);
+  border-right: var(--stroke-2) solid var(--rebel-black);
 }
 
 .modal .role-manager-list button {
   border: 0;
-  border-left: 4px solid transparent;
+  border-left: var(--stroke-4) solid transparent;
   color: var(--rebel-black);
   background: transparent;
   box-shadow: none;
@@ -1047,13 +1034,13 @@
 }
 
 .modal .role-capability-switch {
-  border: 2px solid var(--rebel-black);
+  border: var(--stroke-2) solid var(--rebel-black);
   border-radius: 0;
   background: color-mix(in srgb, var(--rebel-black) 8%, var(--rebel-paper));
 }
 
 .modal .role-capability-switch input {
-  border: 2px solid var(--rebel-black);
+  border: var(--stroke-2) solid var(--rebel-black);
   border-radius: 0;
   background: var(--rebel-paper);
 }
@@ -1086,7 +1073,7 @@
   border-color: var(--rebel-black);
   color: var(--rebel-black);
   background: var(--rebel-paper);
-  box-shadow: 14px 14px 0 var(--rebel-red);
+  box-shadow: var(--decor-shadow-setup-card, none);
 }
 
 .workspace-setup-close {
@@ -1096,7 +1083,7 @@
   border-radius: 0;
   color: var(--rebel-paper) !important;
   background: var(--rebel-black) !important;
-  box-shadow: 3px 3px 0 var(--rebel-red) !important;
+  box-shadow: var(--decor-shadow-workspace-setup-close, none) !important;
 }
 
 /* Feedback stays a signal strip and never takes focus ownership. */
@@ -1104,11 +1091,11 @@
 .banner {
   padding: 8px 14px;
   border: 0;
-  border-left: 7px solid var(--rebel-paper);
+  border-left: var(--stroke-7) solid var(--rebel-paper);
   color: var(--rebel-paper);
   background: var(--rebel-red-dark);
-  font: 850 10px/1.4 "Cascadia Code", Consolas, monospace;
-  letter-spacing: 0.07em;
+  font: 850 var(--fs-10)/1.4 var(--font-label);
+  letter-spacing: calc(0.07em * var(--tracking-scale));
   text-align: center;
   text-transform: uppercase;
 }
@@ -1124,15 +1111,15 @@
 .toast {
   position: relative;
   padding: 13px 43px 13px 16px;
-  border: 2px solid var(--rebel-paper);
-  border-left: 7px solid var(--rebel-red);
+  border: var(--stroke-2) solid var(--rebel-paper);
+  border-left: var(--stroke-7) solid var(--rebel-red);
   border-radius: 0;
   color: var(--rebel-paper);
   background: var(--rebel-black);
-  box-shadow: 7px 7px 0 rgb(185 79 67 / 44%);
-  clip-path: polygon(0 3px, 100% 0, calc(100% - 5px) 100%, 3px 100%);
-  font-family: "Cascadia Code", Consolas, monospace;
-  font-size: 11px;
+  box-shadow: var(--decor-shadow-toast, none);
+  clip-path: var(--decor-clip-toast, none);
+  font-family: var(--font-label);
+  font-size: var(--fs-11);
   font-weight: 750;
 }
 
@@ -1166,10 +1153,10 @@
    secondary visual rhythm is narrowed here. */
 
 .app-shell .token-tooltip {
-  border-left: 4px solid var(--rebel-red);
-  box-shadow: 5px 5px 0 rgb(0 0 0 / 42%);
-  font-family: "Cascadia Code", Consolas, monospace;
-  font-size: 9px;
+  border-left: var(--stroke-4) solid var(--rebel-red);
+  box-shadow: var(--decor-shadow-token-tooltip, none);
+  font-family: var(--font-label);
+  font-size: var(--fs-9);
 }
 
 .transcript .assistant-activity-group > summary,
@@ -1184,13 +1171,12 @@
   .workspace-placeholder,
   .role-selection-page {
     background:
-      linear-gradient(125deg, transparent 0 82%, var(--rebel-red-dark) 82%),
-      var(--rebel-black);
+      var(--decor-bg-setup-shell-compact, var(--rebel-black));
   }
 
   .setup-card {
     padding: 30px 23px 27px;
-    box-shadow: 8px 8px 0 var(--rebel-red);
+    box-shadow: var(--decor-shadow-setup-card-mobile, none);
   }
 
   .setup-card::before {
@@ -1203,7 +1189,7 @@
 
   .workspace-placeholder-content {
     padding: 28px 22px 31px;
-    box-shadow: 8px 8px 0 var(--rebel-red-dark);
+    box-shadow: var(--decor-shadow-workspace-placeholder-mobile, none);
   }
 
   .workspace-placeholder-actions {
@@ -1223,7 +1209,7 @@
   }
 
   .role-selection-header h1 {
-    font-size: 31px;
+    font-size: var(--fs-31);
   }
 
   .role-card-grid {
@@ -1232,12 +1218,12 @@
 
   .role-card {
     min-height: 184px;
-    box-shadow: 6px 6px 0 var(--rebel-red-dark);
+    box-shadow: var(--decor-shadow-role-card-mobile, none);
   }
 
   .drawer {
     border-left: 0;
-    border-top: 5px solid var(--rebel-red);
+    border-top: var(--stroke-5) solid var(--rebel-red);
     box-shadow: none;
   }
 
@@ -1247,9 +1233,9 @@
 
   .modal {
     padding: 23px 19px 21px;
-    border-width: 2px;
-    box-shadow: 0 -7px 0 var(--rebel-red);
-    clip-path: polygon(0 0, calc(100% - 13px) 0, 100% 13px, 100% 100%, 0 100%);
+    border-width: var(--stroke-2);
+    box-shadow: var(--decor-shadow-modal-mobile, none);
+    clip-path: var(--decor-clip-modal-compact, none);
   }
 
   .modal-header {
@@ -1269,7 +1255,7 @@
     padding-right: 0;
     padding-bottom: 10px;
     border-right: 0;
-    border-bottom: 2px solid var(--rebel-black);
+    border-bottom: var(--stroke-2) solid var(--rebel-black);
   }
 
   .conversation-role-switch,
@@ -1283,7 +1269,7 @@
   }
 
   .toast {
-    box-shadow: 5px 5px 0 rgb(185 79 67 / 44%);
+    box-shadow: var(--decor-shadow-toast-mobile, none);
   }
 
   .transition-status-overlay {
@@ -1350,7 +1336,7 @@
     align-items: center;
     gap: 8px;
     padding: max(8px, env(safe-area-inset-top)) max(10px, env(safe-area-inset-right)) 8px max(10px, env(safe-area-inset-left));
-    border-bottom: 2px solid var(--rebel-red);
+    border-bottom: var(--stroke-2) solid var(--rebel-red);
     background: var(--rebel-black);
   }
 
@@ -1374,15 +1360,15 @@
   .mobile-page-header h1,
   .mobile-chat-identity strong {
     color: var(--rebel-paper);
-    font: 800 16px/1.2 "Cascadia Code", Consolas, monospace;
+    font: 800 var(--fs-16)/1.2 var(--font-label);
   }
 
   .mobile-page-header small,
   .mobile-chat-identity small {
     margin-bottom: 3px;
     color: var(--rebel-red);
-    font: 800 11px/1 Inter, sans-serif;
-    letter-spacing: 0.08em;
+    font: 800 var(--fs-11)/1 var(--font-label-sans);
+    letter-spacing: calc(0.08em * var(--tracking-scale));
   }
 
   .mobile-page-header button,
@@ -1394,7 +1380,7 @@
     border-radius: 0;
     color: var(--rebel-paper);
     background: var(--rebel-raised);
-    font: 800 11px/1 "Cascadia Code", Consolas, monospace;
+    font: 800 var(--fs-11)/1 var(--font-label);
   }
 
   .workspace-rail {
@@ -1454,7 +1440,7 @@
     width: 42px;
     height: 42px;
     place-items: center;
-    font-size: 25px !important;
+    font-size: var(--fs-25) !important;
     transform: none !important;
   }
 
@@ -1463,7 +1449,7 @@
     display: block;
     overflow: hidden;
     color: var(--rebel-paper);
-    font: 800 15px/1.2 "Cascadia Code", Consolas, monospace;
+    font: 800 var(--fs-15)/1.2 var(--font-label);
     text-overflow: ellipsis;
     white-space: nowrap;
   }
@@ -1471,7 +1457,7 @@
   .workspace-rail-state {
     max-width: none;
     padding: 4px 5px;
-    font-size: 11px;
+    font-size: var(--fs-11);
   }
 
   .workspace-rail-close {
@@ -1493,10 +1479,10 @@
     margin: 0 12px;
     width: calc(100% - 24px);
     border: 0;
-    font-family: "Cascadia Code", Consolas, monospace;
-    font-size: 13px;
+    font-family: var(--font-label);
+    font-size: var(--fs-13);
     font-weight: 800;
-    letter-spacing: 0.05em;
+    letter-spacing: calc(0.05em * var(--tracking-scale));
   }
 
   .workspace-rail-add::after {
@@ -1548,7 +1534,7 @@
   .conversation-sidebar-handle,
   .conversation-sidebar-activity,
   .conversation-sidebar-truncated {
-    font-size: 11px;
+    font-size: var(--fs-11);
   }
 
   .conversation-sidebar-rename,
@@ -1604,7 +1590,7 @@
   }
 
   .mobile-settings-button > span:first-child {
-    font-size: 16px;
+    font-size: var(--fs-16);
     line-height: 1;
   }
 
@@ -1634,7 +1620,7 @@
     min-height: 56px;
     max-height: 124px;
     padding: 11px 10px 9px 12px;
-    font-size: 16px;
+    font-size: var(--fs-16);
     line-height: 1.4;
   }
 
@@ -1663,9 +1649,9 @@
     border-radius: 0;
     color: var(--rebel-paper-muted);
     background: var(--rebel-raised);
-    font-size: 9px;
+    font-size: var(--fs-9);
     font-weight: 800;
-    letter-spacing: 0.07em;
+    letter-spacing: calc(0.07em * var(--tracking-scale));
   }
 
   .mobile-composer-launchers button[aria-expanded="true"] {
@@ -1686,7 +1672,7 @@
     position: fixed;
     z-index: 30;
     inset: 0;
-    background: rgb(0 0 0 / 62%);
+    background: var(--scrim-black-mid);
   }
 
   .app-shell .composer,
@@ -1709,10 +1695,10 @@
     padding: 0 max(12px, env(safe-area-inset-right)) max(12px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left));
     overflow-y: auto;
     border: 0;
-    border-top: 4px solid var(--rebel-red);
+    border-top: var(--stroke-4) solid var(--rebel-red);
     border-radius: 0;
     background: var(--rebel-black);
-    box-shadow: 0 -18px 50px rgb(0 0 0 / 55%);
+    box-shadow: var(--shadow-sheet);
   }
 
   .mobile-sheet-header {
@@ -1732,13 +1718,13 @@
   .mobile-sheet-header h2 {
     margin: 0;
     color: var(--rebel-paper);
-    font: 800 17px/1 "Cascadia Code", Consolas, monospace;
+    font: 800 var(--fs-17)/1 var(--font-label);
   }
 
   .mobile-sheet-header button {
     width: 44px;
     padding: 0;
-    font-size: 20px;
+    font-size: var(--fs-20);
   }
 
   .app-shell .mobile-sheet-surface.pending-admissions {
@@ -1916,8 +1902,7 @@ html:not([data-color-scheme="classic-rebel"])
 
 html:not([data-color-scheme="classic-rebel"]) .drawer {
   background:
-    repeating-linear-gradient(135deg, rgb(230 224 213 / 0.7%) 0 1px, transparent 1px 16px),
-    var(--rebel-black);
+    var(--decor-bg-drawer-non-classic, var(--rebel-black));
 }
 
 html:not([data-color-scheme="classic-rebel"])
@@ -1925,7 +1910,7 @@ html:not([data-color-scheme="classic-rebel"])
   border-color: var(--rebel-line);
   color: var(--rebel-paper);
   background: var(--rebel-raised);
-  box-shadow: 8px 8px 0 color-mix(in srgb, var(--rebel-red) 32%, transparent);
+  box-shadow: var(--decor-shadow-modal-tinted, none);
 }
 
 html:not([data-color-scheme="classic-rebel"])

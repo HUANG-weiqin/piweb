@@ -17,12 +17,12 @@
   padding: 7px 5px;
   overflow: hidden;
   border: 0;
-  border-bottom: 2px solid transparent;
+  border-bottom: var(--stroke-2) solid transparent;
   border-radius: 0;
   color: var(--rebel-paper-muted);
   background: var(--rebel-black);
-  font: 800 9px "Cascadia Code", Consolas, monospace;
-  letter-spacing: 0.04em;
+  font: 800 var(--fs-9) var(--font-label);
+  letter-spacing: calc(0.04em * var(--tracking-scale));
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -75,7 +75,7 @@
   min-width: 0;
   margin: 0;
   color: var(--rebel-paper-muted);
-  font: 800 9px "Cascadia Code", Consolas, monospace;
+  font: 800 var(--fs-9) var(--font-label);
   overflow-wrap: anywhere;
 }
 
@@ -94,7 +94,7 @@
 
 .workspace-changes-count strong {
   color: var(--rebel-paper);
-  font-size: 13px;
+  font-size: var(--fs-13);
 }
 
 .workspace-changes-header button {
@@ -105,7 +105,7 @@
   border-radius: 0;
   color: var(--rebel-paper-muted);
   background: var(--rebel-black);
-  font: 800 9px "Cascadia Code", Consolas, monospace;
+  font: 800 var(--fs-9) var(--font-label);
 }
 
 .workspace-changes-header button:not(:disabled):hover {
@@ -120,7 +120,7 @@
   margin: 0;
   padding: 9px 10px;
   color: var(--rebel-paper-muted);
-  font-size: 10px;
+  font-size: var(--fs-10);
   line-height: 1.45;
   overflow-wrap: anywhere;
 }
@@ -152,8 +152,8 @@
   padding: 2px 5px;
   border: 1px solid var(--rebel-line);
   color: var(--rebel-paper-muted);
-  font: 800 8px "Cascadia Code", Consolas, monospace;
-  letter-spacing: 0.04em;
+  font: 800 var(--fs-8) var(--font-label);
+  letter-spacing: calc(0.04em * var(--tracking-scale));
 }
 
 .workspace-change-status.is-conflicted {
@@ -164,7 +164,7 @@
 .workspace-change-path {
   min-width: 0;
   color: var(--rebel-paper);
-  font: 600 10px/1.45 "Cascadia Code", Consolas, monospace;
+  font: 600 var(--fs-10)/1.45 var(--font-mono);
   overflow-wrap: anywhere;
 }
 
@@ -212,7 +212,7 @@
     border-left: 1px solid var(--rebel-line);
     color: var(--rebel-black);
     background: color-mix(in srgb, var(--rebel-paper) 92%, var(--canvas));
-    box-shadow: -10px 0 0 rgb(0 0 0 / 22%);
+    box-shadow: var(--decor-shadow-mission-command, none);
   }
 
   .mission-command-header {
@@ -232,7 +232,7 @@
     width: 92px;
     height: 38px;
     background: var(--rebel-red);
-    transform: rotate(-11deg);
+    transform: var(--decor-transform-mission-command-header-after, none);
     content: "";
   }
 
@@ -256,7 +256,7 @@
   .mission-objective-copy small,
   .mission-objective-count span,
   .mission-context-threshold {
-    font-family: "Cascadia Code", Consolas, monospace;
+    font-family: var(--font-label);
   }
 
   .mission-command-kicker {
@@ -267,17 +267,17 @@
     gap: 8px;
     margin: 0 0 3px;
     color: var(--rebel-red);
-    font-size: 9px;
+    font-size: var(--fs-9);
     font-weight: 900;
-    letter-spacing: 0.24em;
+    letter-spacing: calc(0.24em * var(--tracking-scale));
   }
 
   .mission-command-status {
     margin-left: auto;
     color: var(--rebel-paper-muted);
-    font-size: 8px;
+    font-size: var(--fs-8);
     font-weight: 900;
-    letter-spacing: 0.05em;
+    letter-spacing: calc(0.05em * var(--tracking-scale));
     white-space: nowrap;
   }
 
@@ -303,7 +303,7 @@
     font-size: clamp(15px, 1.15vw, 19px);
     font-style: italic;
     font-weight: 850;
-    letter-spacing: -0.02em;
+    letter-spacing: calc(-0.02em * var(--tracking-scale));
     line-height: 1;
   }
 
@@ -316,18 +316,18 @@
 
   .mission-objective-count strong {
     color: var(--rebel-red);
-    font-size: 25px;
+    font-size: var(--fs-25);
     font-style: italic;
     font-weight: 950;
-    letter-spacing: -0.05em;
+    letter-spacing: calc(-0.05em * var(--tracking-scale));
     line-height: 0.8;
   }
 
   .mission-objective-count span {
     color: var(--rebel-paper-muted);
-    font-size: 6px;
+    font-size: var(--fs-6);
     font-weight: 850;
-    letter-spacing: 0.08em;
+    letter-spacing: calc(0.08em * var(--tracking-scale));
     line-height: 1.45;
   }
 
@@ -364,8 +364,8 @@
     width: 8px;
     height: 8px;
     margin-top: 4px;
-    border: 2px solid var(--rebel-paper-muted);
-    transform: rotate(45deg);
+    border: var(--stroke-2) solid var(--rebel-paper-muted);
+    transform: var(--decor-transform-mission-objective-mark, none);
   }
 
   .mission-objective-copy {
@@ -376,14 +376,14 @@
 
   .mission-objective-copy small {
     color: var(--rebel-paper-muted);
-    font-size: 8px;
+    font-size: var(--fs-8);
     font-weight: 900;
-    letter-spacing: 0.11em;
+    letter-spacing: calc(0.11em * var(--tracking-scale));
   }
 
   .mission-objective-copy > span {
     overflow-wrap: anywhere;
-    font-size: 11px;
+    font-size: var(--fs-11);
     font-weight: 700;
     line-height: 1.42;
   }
@@ -394,7 +394,7 @@
     border-bottom: 0;
     color: var(--rebel-on-oxide);
     background: var(--rebel-red);
-    clip-path: polygon(0 0, 100% 0, calc(100% - 9px) 100%, 0 100%);
+    clip-path: var(--decor-clip-mission-objective-active, none);
   }
 
   .mission-objective.is-active .mission-objective-mark {
@@ -423,7 +423,7 @@
     margin: 0;
     padding: 20px 8px;
     color: var(--rebel-paper-muted);
-    font-size: 11px;
+    font-size: var(--fs-11);
     line-height: 1.5;
   }
 
@@ -445,15 +445,15 @@
 
   .mission-section-heading h3 {
     margin: 0;
-    font-size: 10px;
+    font-size: var(--fs-10);
     font-weight: 900;
-    letter-spacing: 0.11em;
+    letter-spacing: calc(0.11em * var(--tracking-scale));
   }
 
   .mission-section-heading > span {
     color: var(--rebel-paper-muted);
-    font-size: 8px;
-    letter-spacing: 0.08em;
+    font-size: var(--fs-8);
+    letter-spacing: calc(0.08em * var(--tracking-scale));
   }
 
   .mission-context-meter {
@@ -461,7 +461,7 @@
     overflow: hidden;
     border: 1px solid var(--rebel-paper);
     background: var(--rebel-raised);
-    transform: skewX(-10deg);
+    transform: var(--decor-transform-mission-context-meter, none);
   }
 
   .mission-context-meter > span {
@@ -477,7 +477,7 @@
   .mission-context-reading {
     margin: 10px 0 0;
     color: var(--rebel-paper);
-    font-size: 11px;
+    font-size: var(--fs-11);
     line-height: 1.35;
   }
 
@@ -489,8 +489,8 @@
     margin: 10px 0 0;
     padding-top: 8px;
     border-top: 1px solid color-mix(in srgb, var(--rebel-paper) 22%, transparent);
-    font: 800 8px "Cascadia Code", Consolas, monospace;
-    letter-spacing: 0.1em;
+    font: 800 var(--fs-8) var(--font-label);
+    letter-spacing: calc(0.1em * var(--tracking-scale));
   }
 
   .mission-context-rate > span {
@@ -499,8 +499,8 @@
 
   .mission-context-rate strong {
     color: var(--rebel-red);
-    font-size: 11px;
-    letter-spacing: 0.04em;
+    font-size: var(--fs-11);
+    letter-spacing: calc(0.04em * var(--tracking-scale));
   }
 
   .mission-context-threshold {
@@ -509,8 +509,8 @@
     gap: 8px;
     margin: 8px 0 0;
     color: var(--rebel-paper-muted);
-    font-size: 8px;
-    letter-spacing: 0.08em;
+    font-size: var(--fs-8);
+    letter-spacing: calc(0.08em * var(--tracking-scale));
   }
 
   .mission-context-threshold strong {
@@ -564,8 +564,8 @@
 
   .workspace-rail-state {
     max-width: 32px;
-    font-size: 6px;
-    letter-spacing: 0.02em;
+    font-size: var(--fs-6);
+    letter-spacing: calc(0.02em * var(--tracking-scale));
   }
 
   .workspace-rail-item.active {
@@ -582,7 +582,7 @@
     bottom: 0;
     left: 52px;
     width: min(86vw, 320px);
-    box-shadow: 18px 0 52px rgb(18 16 12 / 28%);
+    box-shadow: var(--shadow-sidebar);
   }
 
   .conversation-sidebar-resize-handle {
@@ -595,7 +595,7 @@
     bottom: auto;
     overflow: hidden;
     border-bottom: 1px solid var(--line);
-    border-bottom-right-radius: 12px;
+    border-bottom-right-radius: var(--radius-12);
   }
 
   .conversation-sidebar.collapsed .conversation-sidebar-footer {
@@ -651,7 +651,7 @@
 
   .setup-card {
     padding: 24px;
-    border-radius: 18px;
+    border-radius: var(--radius-18);
   }
 
   .app-shell .brand {
@@ -669,18 +669,18 @@
   }
 
   .topbar-session-ordinal {
-    font-size: 35px;
-    text-shadow: 2px 2px 0 var(--rebel-paper);
+    font-size: var(--fs-35);
+    text-shadow: var(--decor-shadow-session-ordinal, none);
   }
 
   .topbar-conversation-eyebrow {
-    font-size: 7px;
-    letter-spacing: 0.08em;
+    font-size: var(--fs-7);
+    letter-spacing: calc(0.08em * var(--tracking-scale));
   }
 
   .topbar-conversation-title {
     gap: 4px;
-    font-size: 16px;
+    font-size: var(--fs-16);
   }
 
   .app-shell .topbar-conversation-context.has-current .topbar-conversation-root,
@@ -694,8 +694,8 @@
 
   .topbar-conversation-metadata {
     gap: 5px;
-    font-size: 7px;
-    letter-spacing: 0.03em;
+    font-size: var(--fs-7);
+    letter-spacing: calc(0.03em * var(--tracking-scale));
   }
 
   .topbar-conversation-metadata > span + span {
@@ -741,7 +741,7 @@
     gap: 7px;
     padding-right: 7px;
     padding-left: 8px;
-    font-size: 7px;
+    font-size: var(--fs-7);
   }
 
   .transcript .compaction-metric {
@@ -775,7 +775,7 @@
   }
 
   .transcript .commitment-budget-metric strong {
-    font-size: 31px;
+    font-size: var(--fs-31);
   }
 
   .transcript .commitment-facts {
@@ -901,7 +901,7 @@
   }
 
   .settings-menu-copy > strong {
-    font-size: 17px;
+    font-size: var(--fs-17);
   }
 
   .drawer-header p:last-child,
@@ -982,7 +982,7 @@
     width: 100%;
     max-height: calc(100dvh - 16px - env(safe-area-inset-bottom));
     padding: 22px 18px;
-    border-radius: 18px;
+    border-radius: var(--radius-18);
   }
 
   .directory-browser-location {

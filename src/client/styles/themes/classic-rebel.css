@@ -1,0 +1,67 @@
+/*
+ * Classic Rebel palette. Colors only; shapes and decoration belong to the skin.
+ */
+
+html[data-color-scheme="classic-rebel"] {
+  color-scheme: dark;
+  --foreground: #d8d1c1;
+  --canvas: #171a1b;
+  --panel: #202526;
+  --panel-strong: #272d2d;
+  --soft: #303636;
+  --soft-hover: #394141;
+  --line: #454b4b;
+  --line-strong: #737979;
+  --muted: #a39d91;
+  --intent: #d8d1c1;
+  --intent-soft: #2c3031;
+  --intent-line: #68675f;
+  --accent: #b94f43;
+  --accent-hover: #9b4138;
+  --on-accent: #fff;
+  --success: #8eb49a;
+  --success-soft: #24332a;
+  --warning: #d0aa66;
+  --warning-soft: #382e20;
+  --danger: #d87368;
+  --danger-solid: #b94f43;
+  --danger-soft: #442724;
+  --focus: #d8d1c1;
+  --scheme-rebel-black: #171a1b;
+  --scheme-rebel-rail-raised: #1d2222;
+  --scheme-rebel-app-raised: #202526;
+  --scheme-rebel-overlay-raised: #272d2d;
+  --scheme-rebel-paper: #d8d1c1;
+  --scheme-rebel-paper-muted: #a39d91;
+  --scheme-rebel-on-oxide: #fff;
+  --scheme-rebel-red: #b94f43;
+  --scheme-rebel-red-dark: #71332e;
+  --scheme-rebel-rail-line: rgb(216 209 193 / 22%);
+  --scheme-rebel-line: #454b4b;
+  --cleanup-warning-text: #e5a092;
+  --cleanup-warning-strong: #f0ad9f;
+  --status-active-text: #d66a5a;
+  --loop-active-text: #d6b1a8;
+  --paper-lift: white;
+  --running-soft: rgb(185 79 67 / 12%);
+  --hover-veil: rgb(216 209 193 / 7%);
+  --scrollbar-thumb: #67635b;
+  --sidebar-ordinal-text: #777368;
+  --sidebar-selected-kind-text: #4b4740;
+  --sidebar-meta-text: #77736a;
+  --sidebar-selected-meta-text: #514c43;
+  --sidebar-action-text: #878277;
+  --sidebar-selected-action-text: #585249;
+  --scrim-light: rgb(19 18 14 / 48%);
+  --on-danger: #fff;
+  --danger-shade: #000;
+  --toast-text: #ffffff;
+  --toast-close-bg: rgb(255 255 255 / 12%);
+  --toast-close-hover-bg: rgb(255 255 255 / 22%);
+  --scrim-black-heavy: rgb(0 0 0 / 78%);
+  --scrim-black-mid: rgb(0 0 0 / 62%);
+  --status-error-text: #e18475;
+  --link-tint: #286da8;
+  --scrim-heavy: rgb(19 18 14 / 74%);
+  --status-pending-text: #b98014;
+}

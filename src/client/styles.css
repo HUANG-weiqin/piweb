@@ -1,4 +1,8 @@
 /* Import order preserves the former global cascade: foundation through shell, polish, responsive, and theme overrides. */
+@import "./styles/tokens.css";
+@import "./styles/themes/quiet-rebel.css";
+@import "./styles/themes/classic-rebel.css";
+@import "./styles/skins/rebel.css";
 @import "./styles/foundation-project-setup.css";
 @import "./styles/workbench.css";
 @import "./styles/conversations-roles.css";

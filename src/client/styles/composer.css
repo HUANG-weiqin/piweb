@@ -16,15 +16,15 @@
   margin: 0;
   padding: 8px 14px;
   border: 1px solid var(--rebel-paper);
-  border-top: 4px solid var(--rebel-red);
+  border-top: var(--stroke-4) solid var(--rebel-red);
   border-radius: 0;
   color: var(--rebel-paper);
   background: var(--rebel-black);
   box-shadow: none;
-  font-family: "Cascadia Code", Consolas, monospace;
-  font-size: 10px;
+  font-family: var(--font-label);
+  font-size: var(--fs-10);
   font-weight: 900;
-  letter-spacing: 0.05em;
+  letter-spacing: calc(0.05em * var(--tracking-scale));
 }
 
 .app-shell > .composer-wrap > .jump-latest:not(:disabled):hover {
@@ -46,11 +46,11 @@
   margin: 0 8px 7px;
   padding: 6px 9px;
   border: 1px solid var(--rebel-line);
-  border-left: 3px solid var(--rebel-red-dark);
+  border-left: var(--stroke-3) solid var(--rebel-red-dark);
   color: var(--rebel-paper-muted);
   background: var(--rebel-black);
-  font-family: "Cascadia Code", Consolas, monospace;
-  font-size: 9px;
+  font-family: var(--font-label);
+  font-size: var(--fs-9);
   line-height: 1.4;
 }
 
@@ -62,11 +62,11 @@
 
 .app-shell .bash-activity-strip.cleanup-unknown {
   border-left-color: var(--rebel-red);
-  color: #e5a092;
+  color: var(--cleanup-warning-text);
 }
 
 .app-shell .bash-activity-strip.cleanup-unknown strong:last-child {
-  color: #f0ad9f;
+  color: var(--cleanup-warning-strong);
 }
 
 .app-shell > .composer-wrap > .pending-admissions {
@@ -82,13 +82,13 @@
   margin: 0;
   padding: 7px 10px;
   border: 0;
-  border-left: 4px solid var(--rebel-red-dark);
+  border-left: var(--stroke-4) solid var(--rebel-red-dark);
   border-radius: 0;
   color: var(--rebel-paper);
   background: var(--rebel-raised);
   box-shadow: none;
-  font-family: "Cascadia Code", Consolas, monospace;
-  font-size: 10px;
+  font-family: var(--font-label);
+  font-size: var(--fs-10);
   line-height: 1.45;
 }
 
@@ -97,18 +97,18 @@
   padding: 2px 6px;
   border: 1px solid var(--rebel-red);
   border-radius: 0;
-  color: #d66a5a;
+  color: var(--status-active-text);
   background: var(--rebel-black);
-  font-size: 8px;
+  font-size: var(--fs-8);
   font-weight: 900;
-  letter-spacing: 0.06em;
+  letter-spacing: calc(0.06em * var(--tracking-scale));
 }
 
 .app-shell .pending-admission-status::before {
   width: 5px;
   height: 5px;
   border-radius: 0;
-  transform: rotate(45deg);
+  transform: var(--decor-transform-pending-admission-marker, none);
 }
 
 .app-shell .pending-admission-withdraw {
@@ -117,9 +117,9 @@
   border-radius: 0;
   color: var(--rebel-paper-muted);
   background: transparent;
-  font-size: 10px;
+  font-size: var(--fs-10);
   font-weight: 800;
-  letter-spacing: 0.04em;
+  letter-spacing: calc(0.04em * var(--tracking-scale));
 }
 
 .app-shell .pending-admission-withdraw:not(:disabled):hover {
@@ -136,7 +136,7 @@
 .app-shell > .composer-wrap > .loop-list {
   margin: 0 8px 8px;
   border: 1px solid var(--rebel-line);
-  border-left: 4px solid var(--rebel-red-dark);
+  border-left: var(--stroke-4) solid var(--rebel-red-dark);
   border-radius: 0;
   color: var(--rebel-paper);
   background: var(--rebel-black);
@@ -149,8 +149,8 @@
   border-radius: 0;
   color: var(--rebel-paper);
   background: transparent;
-  font-family: "Cascadia Code", Consolas, monospace;
-  font-size: 10px;
+  font-family: var(--font-label);
+  font-size: var(--fs-10);
 }
 
 .app-shell .loop-list-toggle:not(:disabled):hover {
@@ -166,7 +166,7 @@
 .app-shell .loop-list-title {
   color: var(--rebel-paper);
   font-weight: 900;
-  letter-spacing: 0.05em;
+  letter-spacing: calc(0.05em * var(--tracking-scale));
   text-transform: uppercase;
 }
 
@@ -176,13 +176,13 @@
   border-radius: 0;
   color: var(--rebel-paper-muted);
   background: var(--rebel-raised);
-  font-size: 8px;
-  letter-spacing: 0.05em;
+  font-size: var(--fs-8);
+  letter-spacing: calc(0.05em * var(--tracking-scale));
 }
 
 .app-shell .loop-list-status.executing {
   border-color: var(--rebel-red);
-  color: #d66a5a;
+  color: var(--status-active-text);
 }
 
 .app-shell .loop-list-status.completed {
@@ -191,7 +191,7 @@
 
 .app-shell .loop-list-count {
   color: var(--rebel-paper-muted);
-  font-size: 9px;
+  font-size: var(--fs-9);
 }
 
 .app-shell .loop-list-items {
@@ -204,8 +204,8 @@
   padding: 5px 0;
   border-bottom: 1px solid color-mix(in srgb, var(--rebel-line) 58%, transparent);
   color: var(--rebel-paper);
-  font-family: "Cascadia Code", Consolas, monospace;
-  font-size: 10px;
+  font-family: var(--font-label);
+  font-size: var(--fs-10);
 }
 
 .app-shell .loop-list-item-marker {
@@ -228,7 +228,7 @@
 }
 
 .app-shell .loop-list-item.active .loop-list-item-text {
-  color: #d6b1a8;
+  color: var(--loop-active-text);
 }
 
 .app-shell .loop-list-item.completed .loop-list-item-text {
@@ -240,12 +240,12 @@
   padding: 7px 10px;
   overflow-wrap: anywhere;
   border: 1px solid var(--rebel-red-dark);
-  border-left: 4px solid var(--rebel-red);
+  border-left: var(--stroke-4) solid var(--rebel-red);
   border-radius: 0;
   color: var(--rebel-paper);
   background: var(--rebel-raised);
-  font-family: "Cascadia Code", Consolas, monospace;
-  font-size: 9px;
+  font-family: var(--font-label);
+  font-size: var(--fs-9);
 }
 
 .app-shell > .composer-wrap > .composer-notice.pending {
@@ -302,12 +302,12 @@
   border-radius: 0;
   color: var(--rebel-black);
   background: var(--rebel-paper);
-  box-shadow: 0 -6px 0 rgb(0 0 0 / 42%);
-  clip-path: polygon(9px 0, 100% 0, calc(100% - 8px) 100%, 0 100%, 0 10px);
+  box-shadow: var(--decor-shadow-composer-edge, none);
+  clip-path: var(--decor-clip-composer, none);
 }
 
 .app-shell .composer:focus-within {
-  box-shadow: 0 -6px 0 rgb(0 0 0 / 42%);
+  box-shadow: var(--decor-shadow-composer-edge, none);
 }
 
 .app-shell .composer-command-label {
@@ -320,11 +320,11 @@
   overflow: hidden;
   color: var(--rebel-paper);
   background: var(--rebel-black);
-  clip-path: polygon(0 0, 100% 0, calc(100% - 15px) 100%, 0 100%);
+  clip-path: var(--decor-clip-composer-command-label, none);
   font-size: clamp(15px, 1.2vw, 19px);
   font-style: italic;
   font-weight: 900;
-  letter-spacing: -0.035em;
+  letter-spacing: calc(-0.035em * var(--tracking-scale));
   line-height: 1;
 }
 
@@ -335,7 +335,7 @@
   margin-right: 10px;
   background: var(--rebel-red);
   content: "";
-  transform: skewY(-13deg);
+  transform: var(--decor-transform-composer-command-label, none);
 }
 
 .app-shell .composer:focus-within .composer-command-label {
@@ -358,13 +358,13 @@
   background: var(--rebel-paper);
   box-shadow: none;
   caret-color: var(--rebel-red);
-  font-size: 15px;
+  font-size: var(--fs-15);
   font-weight: 650;
   line-height: 1.45;
 }
 
 .app-shell .composer:focus-within textarea {
-  background: color-mix(in srgb, var(--rebel-paper) 92%, white);
+  background: color-mix(in srgb, var(--rebel-paper) 92%, var(--paper-lift));
 }
 
 .app-shell .composer textarea:focus-visible {
@@ -393,12 +393,12 @@
   border-radius: 0;
   color: var(--rebel-on-oxide);
   background: var(--rebel-red);
-  clip-path: polygon(8px 0, 100% 0, calc(100% - 7px) 100%, 0 100%);
-  font-family: "Cascadia Code", Consolas, monospace;
-  font-size: 12px;
+  clip-path: var(--decor-clip-send-button, none);
+  font-family: var(--font-label);
+  font-size: var(--fs-12);
   font-style: italic;
   font-weight: 900;
-  letter-spacing: 0.07em;
+  letter-spacing: calc(0.07em * var(--tracking-scale));
 }
 
 .app-shell .send:not(:disabled):hover {
@@ -412,8 +412,8 @@
   color: var(--rebel-paper);
   background: var(--rebel-black);
   box-shadow: none;
-  clip-path: polygon(6px 0, 100% 0, calc(100% - 6px) 100%, 0 100%);
-  font-size: 10px;
+  clip-path: var(--decor-clip-send-button-stop, none);
+  font-size: var(--fs-10);
 }
 
 .app-shell .send.stop:not(:disabled):hover {
@@ -436,10 +436,10 @@
 .app-shell .composer-meta-key {
   flex: 0 0 auto;
   color: var(--rebel-red);
-  font-family: "Cascadia Code", Consolas, monospace;
-  font-size: 9px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-9);
   font-weight: 950;
-  letter-spacing: 0.11em;
+  letter-spacing: calc(0.11em * var(--tracking-scale));
   line-height: 1;
 }
 
@@ -465,8 +465,8 @@
   border-radius: 0;
   color: var(--rebel-paper);
   background: transparent;
-  font-family: "Cascadia Code", Consolas, monospace;
-  font-size: 10px;
+  font-family: var(--font-label);
+  font-size: var(--fs-10);
 }
 
 .app-shell .composer-meta .conversation-role-pill:not(:disabled):hover {
@@ -481,7 +481,7 @@
   gap: 5px;
   overflow: hidden;
   color: color-mix(in srgb, var(--rebel-paper) 74%, var(--rebel-paper-muted));
-  font-size: 9px;
+  font-size: var(--fs-9);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -507,8 +507,8 @@
   border-radius: 0;
   color: var(--rebel-paper);
   background-color: var(--rebel-raised);
-  font-family: "Cascadia Code", Consolas, monospace;
-  font-size: 10px;
+  font-family: var(--font-label);
+  font-size: var(--fs-10);
 }
 
 .app-shell .composer-meta .context-management {
@@ -537,16 +537,16 @@
   border-radius: 0;
   color: var(--rebel-paper-muted);
   background: transparent;
-  font-family: "Cascadia Code", Consolas, monospace;
-  font-size: 9px;
+  font-family: var(--font-label);
+  font-size: var(--fs-9);
 }
 
 .app-shell .composer-meta .context-summary::before {
   margin-right: 6px;
   color: var(--rebel-red);
-  font-size: 9px;
+  font-size: var(--fs-9);
   font-weight: 950;
-  letter-spacing: 0.1em;
+  letter-spacing: calc(0.1em * var(--tracking-scale));
   content: "CONTEXT";
 }
 
@@ -562,8 +562,8 @@
   border-top: 1px solid var(--rebel-line);
   color: var(--rebel-paper-muted);
   background: var(--rebel-black);
-  font-family: "Cascadia Code", Consolas, monospace;
-  font-size: 9px;
+  font-family: var(--font-label);
+  font-size: var(--fs-9);
 }
 
 .app-shell .composer-meta .compaction-threshold-value {
@@ -586,7 +586,7 @@
     grid-row: 1;
     grid-column: 1 / -1;
     padding: 5px 16px 4px 14px;
-    letter-spacing: -0.025em;
+    letter-spacing: calc(-0.025em * var(--tracking-scale));
   }
 
   .app-shell .composer-command-label::before {
@@ -597,7 +597,7 @@
   .app-shell .composer textarea {
     grid-row: 2;
     grid-column: 1;
-    font-size: 14px;
+    font-size: var(--fs-14);
   }
 
   .app-shell .composer-actions {
@@ -620,7 +620,7 @@
 
   .app-shell .composer-command-label {
     width: 132px;
-    font-size: 14px;
+    font-size: var(--fs-14);
   }
 
   .app-shell .composer-command-label::before {
@@ -642,7 +642,7 @@
     min-height: 49px;
     flex: 1 1 0;
     padding: 0 4px;
-    font-size: 8px;
+    font-size: var(--fs-8);
   }
 }
 
@@ -709,12 +709,12 @@
   .app-shell .composer {
     grid-template-columns: minmax(0, 1fr) auto;
     grid-template-rows: 26px minmax(62px, auto);
-    clip-path: polygon(7px 0, 100% 0, calc(100% - 6px) 100%, 0 100%, 0 8px);
+    clip-path: var(--decor-clip-composer-compact, none);
   }
 
   .app-shell .composer-command-label {
     width: 122px;
-    font-size: 13px;
+    font-size: var(--fs-13);
   }
 
   .app-shell .composer-command-label::before {
@@ -730,12 +730,12 @@
     width: 63px;
     min-height: 53px;
     padding: 0 7px;
-    font-size: 10px;
+    font-size: var(--fs-10);
   }
 
   .app-shell .send.stop {
     width: 54px;
-    font-size: 8px;
+    font-size: var(--fs-8);
   }
 
   .app-shell .composer-meta {
@@ -845,7 +845,7 @@
     max-width: none;
     min-height: 20px;
     padding: 1px 15px 1px 3px;
-    font-size: 8px;
+    font-size: var(--fs-8);
   }
 
   .app-shell .composer-meta .context-management {
@@ -866,7 +866,7 @@
     overflow: hidden;
     border-right: 1px solid var(--rebel-line);
     border-bottom: 0;
-    font-size: 8px;
+    font-size: var(--fs-8);
     white-space: nowrap;
   }
 }

@@ -50,7 +50,7 @@
 .workspace-session-repair-issue-heading span,
 .workspace-session-repair-summary span {
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--fs-12);
 }
 
 .workspace-session-repair-issue-heading code,

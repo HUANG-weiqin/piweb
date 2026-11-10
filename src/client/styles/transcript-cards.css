@@ -5,22 +5,22 @@
   margin: 0 auto 10px;
   overflow: hidden;
   border: 1px solid var(--line);
-  border-radius: 12px;
+  border-radius: var(--radius-12);
   background: var(--panel);
 }
 
 .session-message-card.is-expanded {
   margin-bottom: 24px;
-  border-radius: 16px;
+  border-radius: var(--radius-16);
   box-shadow: var(--shadow-sm);
 }
 
 .session-message-card.direction-incoming {
-  border-left: 3px solid var(--success);
+  border-left: var(--stroke-3) solid var(--success);
 }
 
 .session-message-card.direction-outgoing {
-  border-left: 3px solid var(--focus);
+  border-left: var(--stroke-3) solid var(--focus);
 }
 
 .session-message-card.state-failed,
@@ -65,14 +65,14 @@
 
 .session-message-direction,
 .session-message-status {
-  font-size: 11px;
+  font-size: var(--fs-11);
   font-weight: 800;
 }
 
 .session-message-peer {
   overflow: hidden;
   color: var(--text);
-  font-size: 12px;
+  font-size: var(--fs-12);
   font-weight: 650;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -84,7 +84,7 @@
   margin: 0;
   padding: 0 14px 12px;
   color: var(--text);
-  font-size: 12px;
+  font-size: var(--fs-12);
   line-height: 1.45;
   text-overflow: ellipsis;
   white-space: normal;
@@ -99,7 +99,7 @@
 
 .session-message-chevron {
   color: var(--muted);
-  font-size: 14px;
+  font-size: var(--fs-14);
   line-height: 1;
   transition: transform 120ms ease;
 }
@@ -131,11 +131,11 @@
 .session-message-endpoint-handle,
 .session-message-updated {
   color: var(--muted);
-  font-size: 10px;
+  font-size: var(--fs-10);
 }
 
 .session-message-endpoint-handle {
-  font-family: "Cascadia Code", Consolas, monospace;
+  font-family: var(--font-label);
 }
 
 .session-message-route-arrow {
@@ -147,13 +147,13 @@
   gap: 5px;
   margin: 0 14px 14px;
   padding: 12px;
-  border-left: 3px solid var(--focus);
+  border-left: var(--stroke-3) solid var(--focus);
   background: var(--soft);
 }
 
 .session-message-summary-label {
   color: var(--text);
-  font-size: 11px;
+  font-size: var(--fs-11);
   font-weight: 800;
 }
 
@@ -173,7 +173,7 @@
   gap: 5px;
   margin: 0 14px 14px;
   padding: 12px;
-  border-radius: 10px;
+  border-radius: var(--radius-10);
   background: var(--success-soft);
   white-space: pre-wrap;
 }
@@ -196,7 +196,7 @@
   color: var(--accent);
   cursor: pointer;
   font: inherit;
-  font-size: 11px;
+  font-size: var(--fs-11);
   padding: 2px 0;
 }
 
@@ -227,7 +227,7 @@
   gap: 18px;
   padding: 12px 24px 10px;
   overflow: hidden;
-  border-bottom: 2px solid var(--rebel-paper);
+  border-bottom: var(--stroke-2) solid var(--rebel-paper);
   color: var(--rebel-paper);
   background: var(--rebel-black);
   backdrop-filter: none;
@@ -241,7 +241,7 @@
   height: 7px;
   content: "";
   background: var(--rebel-red);
-  clip-path: polygon(0 38%, 88% 0, 100% 100%, 7% 82%);
+  clip-path: var(--decor-clip-topbar-after-alt, none);
 }
 
 .app-shell .brand {
@@ -249,9 +249,9 @@
   align-self: center;
   gap: 9px;
   color: var(--rebel-paper);
-  font-size: 12px;
+  font-size: var(--fs-12);
   font-weight: 900;
-  letter-spacing: 0.04em;
+  letter-spacing: calc(0.04em * var(--tracking-scale));
   text-transform: uppercase;
 }
 
@@ -261,20 +261,20 @@
   border-radius: 0;
   color: var(--rebel-on-oxide);
   background: var(--rebel-red);
-  clip-path: polygon(10% 0, 100% 12%, 86% 100%, 0 84%);
-  font-family: Georgia, serif;
-  font-size: 25px;
+  clip-path: var(--decor-clip-brand-mark, none);
+  font-family: var(--font-display);
+  font-size: var(--fs-25);
   font-style: italic;
   font-weight: 900;
-  transform: rotate(-3deg);
+  transform: var(--decor-transform-brand-mark, none);
 }
 
 .app-shell .brand small {
   max-width: 92px;
   margin-top: 2px;
   color: var(--rebel-paper-muted);
-  font-family: "Cascadia Code", Consolas, monospace;
-  font-size: 8px;
+  font-family: var(--font-label);
+  font-size: var(--fs-8);
   font-weight: 500;
   letter-spacing: 0;
   text-transform: none;
@@ -303,10 +303,10 @@
   font-size: clamp(54px, 4.3vw, 70px);
   font-style: italic;
   font-weight: 950;
-  letter-spacing: -0.1em;
+  letter-spacing: calc(-0.1em * var(--tracking-scale));
   line-height: 0.8;
-  text-shadow: 3px 3px 0 var(--rebel-paper);
-  transform: rotate(-4deg) skewX(-7deg);
+  text-shadow: var(--decor-shadow-session-ordinal-strong, none);
+  transform: var(--decor-transform-topbar-session-ordinal, none);
 }
 
 .topbar-conversation-copy {
@@ -318,10 +318,10 @@
 
 .topbar-conversation-eyebrow {
   color: var(--rebel-red);
-  font-family: "Cascadia Code", Consolas, monospace;
-  font-size: 9px;
+  font-family: var(--font-label);
+  font-size: var(--fs-9);
   font-weight: 900;
-  letter-spacing: 0.16em;
+  letter-spacing: calc(0.16em * var(--tracking-scale));
   line-height: 1;
 }
 
@@ -335,7 +335,7 @@
   font-size: clamp(24px, 2.05vw, 33px);
   font-style: italic;
   font-weight: 950;
-  letter-spacing: -0.055em;
+  letter-spacing: calc(-0.055em * var(--tracking-scale));
   line-height: 1.08;
 }
 
@@ -355,7 +355,7 @@
   font-size: 0.47em;
   font-style: normal;
   font-weight: 750;
-  letter-spacing: -0.02em;
+  letter-spacing: calc(-0.02em * var(--tracking-scale));
 }
 
 .app-shell .topbar-conversation-context.has-current .topbar-conversation-current {
@@ -376,10 +376,10 @@
   gap: 8px;
   overflow: hidden;
   color: var(--rebel-paper-muted);
-  font-family: "Cascadia Code", Consolas, monospace;
-  font-size: 9px;
+  font-family: var(--font-label);
+  font-size: var(--fs-9);
   font-weight: 750;
-  letter-spacing: 0.08em;
+  letter-spacing: calc(0.08em * var(--tracking-scale));
   line-height: 1.2;
   text-transform: uppercase;
   white-space: nowrap;
@@ -400,25 +400,25 @@
   padding: 8px 13px 8px 17px;
   color: var(--rebel-on-oxide);
   background: var(--rebel-red);
-  clip-path: polygon(8px 0, 100% 0, calc(100% - 9px) 100%, 0 calc(100% - 6px));
-  transform: rotate(-1deg);
+  clip-path: var(--decor-clip-topbar-status, none);
+  transform: var(--decor-transform-topbar-conversation-status, none);
 }
 
 .topbar-conversation-status > span {
   color: var(--rebel-on-oxide);
-  font-family: "Cascadia Code", Consolas, monospace;
-  font-size: 8px;
+  font-family: var(--font-label);
+  font-size: var(--fs-8);
   font-weight: 950;
-  letter-spacing: 0.15em;
+  letter-spacing: calc(0.15em * var(--tracking-scale));
 }
 
 .topbar-conversation-status strong {
   max-width: 100%;
   overflow: hidden;
-  font-size: 14px;
+  font-size: var(--fs-14);
   font-style: italic;
   font-weight: 950;
-  letter-spacing: -0.035em;
+  letter-spacing: calc(-0.035em * var(--tracking-scale));
   line-height: 1.05;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -447,10 +447,10 @@
   border-radius: 0;
   color: var(--rebel-paper-muted);
   background: var(--rebel-raised);
-  font-family: "Cascadia Code", Consolas, monospace;
-  font-size: 9px;
+  font-family: var(--font-label);
+  font-size: var(--fs-9);
   font-weight: 700;
-  letter-spacing: 0.02em;
+  letter-spacing: calc(0.02em * var(--tracking-scale));
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -503,25 +503,25 @@
   height: 13px;
   content: "";
   background: var(--rebel-red);
-  transform: skewY(-18deg);
+  transform: var(--decor-transform-message-event-header-before, none);
 }
 
 .transcript .message-event-kind {
   padding-left: 12px;
-  font-family: "Cascadia Code", Consolas, monospace;
-  font-size: 8px;
+  font-family: var(--font-label);
+  font-size: var(--fs-8);
   font-weight: 850;
-  letter-spacing: 0.14em;
+  letter-spacing: calc(0.14em * var(--tracking-scale));
 }
 
 .transcript .message-event-actor {
   min-width: 0;
   overflow: hidden;
   color: var(--rebel-paper);
-  font-size: 13px;
+  font-size: var(--fs-13);
   font-style: italic;
   font-weight: 900;
-  letter-spacing: -0.015em;
+  letter-spacing: calc(-0.015em * var(--tracking-scale));
   text-overflow: ellipsis;
   text-transform: uppercase;
   white-space: nowrap;
@@ -530,16 +530,16 @@
 .transcript .message-event-state {
   padding: 3px 6px;
   color: var(--rebel-paper-muted);
-  font-family: "Cascadia Code", Consolas, monospace;
-  font-size: 8px;
+  font-family: var(--font-label);
+  font-size: var(--fs-8);
   font-weight: 850;
-  letter-spacing: 0.1em;
+  letter-spacing: calc(0.1em * var(--tracking-scale));
 }
 
 .transcript .message-event-header.is-running .message-event-state {
   color: var(--rebel-on-oxide);
   background: var(--rebel-red);
-  clip-path: polygon(4px 0, 100% 0, calc(100% - 3px) 100%, 0 82%);
+  clip-path: var(--decor-clip-message-event-state-running, none);
 }
 
 .transcript .message.user {
@@ -551,13 +551,13 @@
   border-radius: 0;
   color: var(--rebel-paper);
   background: transparent;
-  font-size: 15px;
+  font-size: var(--fs-15);
   font-weight: 650;
 }
 
 .transcript .message.user .message-event-actor {
   color: var(--rebel-red);
-  font-size: 15px;
+  font-size: var(--fs-15);
 }
 
 .transcript .message.assistant {
@@ -568,7 +568,7 @@
   margin-left: 112px;
   padding: 9px 12px;
   border: 0;
-  border-left: 5px solid var(--rebel-red);
+  border-left: var(--stroke-5) solid var(--rebel-red);
   border-radius: 0;
   color: var(--rebel-paper);
   background: var(--rebel-red-dark);
@@ -587,8 +587,8 @@
 .transcript .message-action {
   border-radius: 0;
   color: var(--rebel-paper-muted);
-  font-family: "Cascadia Code", Consolas, monospace;
-  font-size: 9px;
+  font-family: var(--font-label);
+  font-size: var(--fs-9);
 }
 
 .transcript .message-action:not(:disabled):hover {
@@ -608,9 +608,9 @@
   border-bottom: 1px solid var(--rebel-line);
   color: var(--rebel-paper-muted);
   background: var(--rebel-raised);
-  font-family: "Cascadia Code", Consolas, monospace;
-  font-size: 9px;
-  letter-spacing: 0.06em;
+  font-family: var(--font-label);
+  font-size: var(--fs-9);
+  letter-spacing: calc(0.06em * var(--tracking-scale));
   white-space: nowrap;
 }
 
@@ -650,7 +650,7 @@
   margin: 12px 0 26px 112px;
   padding: 10px 12px;
   border: 0;
-  border-left: 5px solid var(--rebel-red);
+  border-left: var(--stroke-5) solid var(--rebel-red);
   border-radius: 0;
   color: var(--rebel-paper);
   background: var(--rebel-raised);
@@ -662,7 +662,7 @@
 
 .transcript .markdown {
   color: color-mix(in srgb, var(--rebel-paper) 92%, var(--rebel-paper-muted));
-  font-size: 14px;
+  font-size: var(--fs-14);
   line-height: 1.76;
 }
 
@@ -699,15 +699,15 @@
   margin: 2px 3px;
   padding: 4px 8px;
   border: 1px solid var(--rebel-line);
-  border-left: 2px solid var(--rebel-red);
+  border-left: var(--stroke-2) solid var(--rebel-red);
   border-radius: 0;
   color: var(--rebel-paper);
   background: transparent;
   box-shadow: none;
   transform: none;
   transition: none;
-  font: 800 9px/1 "Cascadia Code", Consolas, monospace;
-  letter-spacing: 0.07em;
+  font: 800 var(--fs-9)/1 var(--font-label);
+  letter-spacing: calc(0.07em * var(--tracking-scale));
   vertical-align: middle;
   white-space: nowrap;
 }
@@ -743,7 +743,7 @@
 .transcript .markdown pre {
   padding: 13px 15px;
   border: 0;
-  border-left: 4px solid var(--rebel-red);
+  border-left: var(--stroke-4) solid var(--rebel-red);
   border-radius: 0;
   color: var(--rebel-paper);
   background: var(--rebel-raised);
@@ -768,7 +768,7 @@
   margin: 10px 0 14px;
   overflow: visible;
   border: 1px solid var(--rebel-line);
-  border-left: 5px solid var(--rebel-red-dark);
+  border-left: var(--stroke-5) solid var(--rebel-red-dark);
   border-radius: 0;
   color: var(--rebel-paper-muted);
   background: var(--rebel-raised);
@@ -824,22 +824,22 @@
   color: var(--rebel-paper);
   background: transparent;
   clip-path: none;
-  font-family: "Cascadia Code", Consolas, monospace;
-  font-size: 8px;
+  font-family: var(--font-label);
+  font-size: var(--fs-8);
   font-style: normal;
   font-weight: 900;
-  letter-spacing: 0.11em;
+  letter-spacing: calc(0.11em * var(--tracking-scale));
 }
 
 .transcript .activity-group-label {
   color: var(--rebel-paper);
-  font-size: 12px;
+  font-size: var(--fs-12);
   font-weight: 800;
 }
 
 .transcript .assistant-activity-group.is-active .activity-group-label,
 .transcript .assistant-activity-group.is-error .activity-group-label {
-  color: #d66a5a;
+  color: var(--status-active-text);
 }
 
 .transcript .activity-group-detail,
@@ -857,8 +857,8 @@
   align-items: center;
   gap: 6px;
   color: var(--rebel-paper-muted);
-  font-family: "Cascadia Code", Consolas, monospace;
-  font-size: 9px;
+  font-family: var(--font-label);
+  font-size: var(--fs-9);
 }
 
 .transcript .activity-group-status > * {
@@ -873,13 +873,13 @@
 }
 
 .transcript .activity-group-status::after {
-  font-size: 8px;
+  font-size: var(--fs-8);
   font-weight: 900;
-  letter-spacing: 0.1em;
+  letter-spacing: calc(0.1em * var(--tracking-scale));
 }
 
 .transcript .assistant-activity-group.is-active .activity-group-status {
-  color: #d66a5a;
+  color: var(--status-active-text);
 }
 
 .transcript .assistant-activity-group.is-active .activity-group-status::after {
@@ -891,7 +891,7 @@
 }
 
 .transcript .assistant-activity-group.is-error .activity-group-status {
-  color: #e18475;
+  color: var(--status-error-text);
 }
 
 .transcript .assistant-activity-group.is-error .activity-group-status::after {
@@ -902,9 +902,9 @@
   grid-column: 1;
   grid-row: 2;
   padding-left: 1px;
-  font-family: "Cascadia Code", Consolas, monospace;
-  font-size: 8px;
-  letter-spacing: 0.04em;
+  font-family: var(--font-label);
+  font-size: var(--fs-8);
+  letter-spacing: calc(0.04em * var(--tracking-scale));
 }
 
 .transcript .activity-group-chevron {
@@ -939,8 +939,8 @@
   min-height: 36px;
   padding: 5px 8px 5px 1px;
   color: var(--rebel-paper);
-  font-family: "Cascadia Code", Consolas, monospace;
-  font-size: 11px;
+  font-family: var(--font-label);
+  font-size: var(--fs-11);
   font-weight: 800;
 }
 
@@ -958,7 +958,7 @@
   border: 1px solid var(--rebel-paper-muted);
   border-radius: 0;
   background: var(--rebel-black);
-  transform: translateY(-50%) rotate(45deg);
+  transform: translateY(-50%) var(--decor-transform-activity-summary-marker, rotate(0deg));
 }
 
 .transcript .activity-timeline > .thinking.is-active > summary::before {
@@ -984,10 +984,10 @@
   padding: 5px 8px;
   color: var(--rebel-paper-muted);
   background: var(--rebel-raised);
-  font-family: "Cascadia Code", Consolas, monospace;
-  font-size: 10px;
+  font-family: var(--font-label);
+  font-size: var(--fs-10);
   font-weight: 850;
-  letter-spacing: 0.05em;
+  letter-spacing: calc(0.05em * var(--tracking-scale));
 }
 
 .transcript .assistant-response > summary::before,
@@ -1032,10 +1032,10 @@
 
 .transcript .tool-summary strong {
   color: var(--rebel-paper);
-  font-family: "Cascadia Code", Consolas, monospace;
-  font-size: 10px;
+  font-family: var(--font-label);
+  font-size: var(--fs-10);
   font-weight: 850;
-  letter-spacing: 0.04em;
+  letter-spacing: calc(0.04em * var(--tracking-scale));
 }
 
 .transcript .tool-status {
@@ -1049,7 +1049,7 @@
   border-radius: 0;
   color: var(--rebel-paper-muted);
   background: transparent;
-  font-family: "Cascadia Code", Consolas, monospace;
+  font-family: var(--font-label);
 }
 
 .transcript .tool-status > * {
@@ -1063,9 +1063,9 @@
 }
 
 .transcript .tool-status::after {
-  font-size: 8px;
+  font-size: var(--fs-8);
   font-weight: 900;
-  letter-spacing: 0.09em;
+  letter-spacing: calc(0.09em * var(--tracking-scale));
 }
 
 .transcript .tool-running .tool-status,
@@ -1074,7 +1074,7 @@
 }
 
 .transcript .tool-error .tool-status {
-  color: #e18475;
+  color: var(--status-error-text);
 }
 
 .transcript .tool-running .tool-status::after {
@@ -1097,8 +1097,8 @@
   display: block;
   margin-top: 3px;
   color: var(--rebel-paper-muted);
-  font-family: "Cascadia Code", Consolas, monospace;
-  font-size: 8px;
+  font-family: var(--font-label);
+  font-size: var(--fs-8);
   line-height: 1.4;
 }
 
@@ -1116,7 +1116,7 @@
 }
 
 .transcript .tool-bash-ended .tool-status {
-  color: #e18475;
+  color: var(--status-error-text);
 }
 
 .transcript .tool-bash-ended .tool-status::after {
@@ -1125,11 +1125,11 @@
 
 .transcript .tool-bash-status-label.tool-bash-in-progress,
 .transcript .tool-bash-status-label.tool-bash-stopping {
-  color: #d66a5a;
+  color: var(--status-active-text);
 }
 
 .transcript .tool-bash-status-label.tool-bash-ended {
-  color: #e18475;
+  color: var(--status-error-text);
 }
 
 .transcript .tool-chevron {
@@ -1157,10 +1157,10 @@
 .transcript .tool-section h4,
 .transcript .tool-result-details h5 {
   color: var(--rebel-red);
-  font-family: "Cascadia Code", Consolas, monospace;
-  font-size: 8px;
+  font-family: var(--font-label);
+  font-size: var(--fs-8);
   font-weight: 900;
-  letter-spacing: 0.12em;
+  letter-spacing: calc(0.12em * var(--tracking-scale));
 }
 
 .transcript .tool-field {
@@ -1173,15 +1173,15 @@
 
 .transcript .tool-field dt {
   color: var(--rebel-paper-muted);
-  font-family: "Cascadia Code", Consolas, monospace;
-  font-size: 9px;
-  letter-spacing: 0.04em;
+  font-family: var(--font-label);
+  font-size: var(--fs-9);
+  letter-spacing: calc(0.04em * var(--tracking-scale));
 }
 
 .transcript .tool-field dd {
   min-width: 0;
   color: var(--rebel-paper);
-  font-size: 10px;
+  font-size: var(--fs-10);
 }
 
 .transcript .tool-value-list .tool-fields {
@@ -1195,7 +1195,7 @@
   min-width: 0;
   overflow: auto;
   border: 0;
-  border-left: 4px solid var(--rebel-red-dark);
+  border-left: var(--stroke-4) solid var(--rebel-red-dark);
   border-radius: 0;
   color: var(--rebel-paper);
   background: var(--rebel-raised);
@@ -1208,10 +1208,10 @@
   color: var(--rebel-paper);
   background: var(--rebel-black);
   box-shadow: none;
-  font-family: "Cascadia Code", Consolas, monospace;
-  font-size: 9px;
+  font-family: var(--font-label);
+  font-size: var(--fs-9);
   font-weight: 850;
-  letter-spacing: 0.05em;
+  letter-spacing: calc(0.05em * var(--tracking-scale));
 }
 
 .transcript .commitment-card {
@@ -1232,7 +1232,7 @@
   gap: 11px;
   padding: 8px 13px 8px 9px;
   border: 1px solid var(--rebel-paper);
-  border-left: 7px solid var(--rebel-red);
+  border-left: var(--stroke-7) solid var(--rebel-red);
   color: var(--rebel-black);
   background: var(--rebel-paper);
 }
@@ -1273,7 +1273,7 @@
   justify-items: center;
   padding: 7px 9px;
   border: 1px solid var(--rebel-line);
-  border-bottom: 4px solid var(--rebel-red);
+  border-bottom: var(--stroke-4) solid var(--rebel-red);
   color: var(--rebel-paper);
   background: var(--rebel-black);
   clip-path: none;
@@ -1287,25 +1287,25 @@
 }
 
 .transcript .commitment-budget-metric strong {
-  font-size: 38px;
+  font-size: var(--fs-38);
   font-style: italic;
   font-weight: 950;
-  letter-spacing: -0.08em;
+  letter-spacing: calc(-0.08em * var(--tracking-scale));
 }
 
 .transcript .commitment-budget-metric > span > span {
   color: var(--rebel-red);
-  font-size: 18px;
+  font-size: var(--fs-18);
   font-weight: 900;
 }
 
 .transcript .commitment-budget-metric small {
   margin-top: 5px;
   color: var(--rebel-paper-muted);
-  font-family: "Cascadia Code", Consolas, monospace;
-  font-size: 7px;
+  font-family: var(--font-label);
+  font-size: var(--fs-7);
   font-weight: 850;
-  letter-spacing: 0.12em;
+  letter-spacing: calc(0.12em * var(--tracking-scale));
 }
 
 .transcript .commitment-node {
@@ -1316,14 +1316,14 @@
 
 .transcript .commitment-eyebrow {
   color: var(--rebel-red);
-  font-family: "Cascadia Code", Consolas, monospace;
-  font-size: 9px;
-  letter-spacing: 0.14em;
+  font-family: var(--font-label);
+  font-size: var(--fs-9);
+  letter-spacing: calc(0.14em * var(--tracking-scale));
 }
 
 .transcript .commitment-copy strong {
   color: var(--rebel-black);
-  font-size: 15px;
+  font-size: var(--fs-15);
   font-style: italic;
   font-weight: 900;
 }
@@ -1334,7 +1334,7 @@
 
 .transcript .commitment-reason {
   color: color-mix(in srgb, var(--rebel-black) 76%, var(--rebel-paper));
-  font-size: 11px;
+  font-size: var(--fs-11);
 }
 
 .transcript .commitment-card.is-error .commitment-reason {
@@ -1348,8 +1348,8 @@
   border-radius: 0;
   color: var(--rebel-paper);
   background: var(--rebel-black);
-  font-family: "Cascadia Code", Consolas, monospace;
-  font-size: 8px;
+  font-family: var(--font-label);
+  font-size: var(--fs-8);
 }
 
 .transcript .commitment-chevron {
@@ -1375,7 +1375,7 @@
   border: 0;
   border-top: 1px solid var(--rebel-line);
   border-bottom: 1px solid var(--rebel-line);
-  border-left: 4px solid var(--rebel-red);
+  border-left: var(--stroke-4) solid var(--rebel-red);
   border-radius: 0;
   color: var(--rebel-paper-muted);
   background: transparent;
@@ -1414,8 +1414,8 @@
 
 .transcript .session-message-direction {
   color: var(--rebel-red);
-  font-family: "Cascadia Code", Consolas, monospace;
-  letter-spacing: 0.08em;
+  font-family: var(--font-label);
+  letter-spacing: calc(0.08em * var(--tracking-scale));
 }
 
 .transcript .session-message-peer {
@@ -1462,10 +1462,10 @@
   color: var(--rebel-paper);
   background: var(--rebel-black);
   box-shadow: none;
-  font-family: "Cascadia Code", Consolas, monospace;
-  font-size: 9px;
+  font-family: var(--font-label);
+  font-size: var(--fs-9);
   font-weight: 850;
-  letter-spacing: 0.05em;
+  letter-spacing: calc(0.05em * var(--tracking-scale));
   text-decoration: none;
 }
 
@@ -1485,8 +1485,8 @@
   margin: 0 auto 14px;
   padding: 10px 12px;
   border: 1px solid var(--line);
-  border-left: 3px solid var(--focus);
-  border-radius: 12px;
+  border-left: var(--stroke-3) solid var(--focus);
+  border-radius: var(--radius-12);
   background: var(--panel);
 }
 
@@ -1501,9 +1501,9 @@
 .bash-task-notification-header {
   justify-content: space-between;
   color: var(--muted);
-  font-family: "Cascadia Code", Consolas, monospace;
-  font-size: 10px;
-  letter-spacing: 0.08em;
+  font-family: var(--font-label);
+  font-size: var(--fs-10);
+  letter-spacing: calc(0.08em * var(--tracking-scale));
 }
 
 .bash-task-notification-list {
@@ -1524,7 +1524,7 @@
 .bash-task-notification-task-heading {
   min-width: 0;
   color: var(--text);
-  font-size: 11px;
+  font-size: var(--fs-11);
 }
 
 .bash-task-notification-task-heading strong {
@@ -1541,20 +1541,20 @@
 .bash-task-notification-output-file code {
   min-width: 0;
   overflow-wrap: anywhere;
-  font-family: "Cascadia Code", Consolas, monospace;
+  font-family: var(--font-mono);
 }
 
 .bash-task-notification-task-facts {
   flex-wrap: wrap;
   margin-top: 6px;
   color: var(--muted);
-  font-size: 10px;
+  font-size: var(--fs-10);
 }
 
 .bash-task-notification-output-file {
   margin-top: 6px;
   color: var(--muted);
-  font-size: 10px;
+  font-size: var(--fs-10);
   overflow-wrap: anywhere;
 }
 
@@ -1566,7 +1566,7 @@
   border: 1px solid var(--line);
   color: var(--text);
   background: var(--soft);
-  font: 11px/1.5 "Cascadia Code", Consolas, monospace;
+  font: var(--fs-11)/1.5 var(--font-mono);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
@@ -1577,7 +1577,7 @@
   border: 0;
   border-top: 1px solid var(--rebel-line);
   border-bottom: 1px solid var(--rebel-line);
-  border-left: 4px solid var(--rebel-red);
+  border-left: var(--stroke-4) solid var(--rebel-red);
   border-radius: 0;
   color: var(--rebel-paper);
   background: var(--rebel-black);
