@@ -6,25 +6,46 @@
  * same as every other skin. Colors still come from the palette.
  */
 
-/* Workspace rail as an activity bar: the active item is marked by a 2px bar on
-   its left edge in the item's own text color, not by a filled block. */
-html[data-skin="code"] .workspace-rail-item.active::before {
-  inset: 0 auto 0 0;
-  width: 2px;
-  background: currentColor;
+/* Workspace rail as an activity bar with project tiles. A 1px line separates
+   the rail from the conversation list, and each project is a raised tile with a
+   1px outline so it reads as a card on the rail. A running workspace keeps the
+   neutral tile; its busy marker shows the state. */
+html[data-skin="code"] .workspace-rail {
+  box-shadow: inset -1px 0 0 var(--scheme-rebel-rail-line);
 }
 
-html[data-skin="code"] .workspace-rail-item:not(.active) {
+html[data-skin="code"] .workspace-rail-item:not(.active),
+html[data-skin="code"] .workspace-rail-item.running:not(.active) {
   color: var(--muted);
+  background: var(--panel-strong);
+  box-shadow: inset 0 0 0 1px var(--line-strong);
 }
 
 html[data-skin="code"] .workspace-rail-item:not(.active):not(:disabled):hover {
   color: var(--foreground);
+  background: var(--soft-hover);
 }
 
-/* A running workspace is shown by its busy marker, not by a selection fill. */
-html[data-skin="code"] .workspace-rail-item.running:not(.active) {
-  background: transparent;
+/* The active tile matches the selected conversation: tinted fill and a focus
+   outline, plus a 2px bar on its left edge like the activity bar. */
+html[data-skin="code"] .workspace-rail-item.active,
+html[data-skin="code"] .workspace-rail-item.active:not(:disabled):hover {
+  background: var(--intent-soft);
+  box-shadow: inset 0 0 0 1px var(--focus);
+}
+
+html[data-skin="code"] .workspace-rail-item.active::before {
+  inset: 0 auto 0 0;
+  width: 2px;
+  background: var(--focus);
+}
+
+/* The phone layout already draws a 1px border around each item; hide it so the
+   tile outline is the only line. */
+@media (max-width: 600px) {
+  html[data-skin="code"] .workspace-rail-item {
+    border-color: transparent;
+  }
 }
 
 /* Selected conversation reads as a focused list row: fill plus a 1px focus
