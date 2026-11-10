@@ -1706,41 +1706,190 @@ describe("ProjectStore", () => {
     ]);
   });
 
-  it("removes a selected browser prompt's admission when truncating its delivery", async () => {
+  function admitBrowserPrompt(
+    conversation: SessionManager,
+    text: string,
+  ): { promptId: string; runId: string; admissionId: string } {
+    const promptId = randomUUID();
+    const runId = randomUUID();
+    const admission = createBrowserPromptAdmissionEntry({ promptId, runId, text });
+    const admissionId = conversation.appendCustomEntry(
+      admission.customType,
+      admission.data,
+    );
+    return { promptId, runId, admissionId };
+  }
+
+  function deliverBrowserPrompt(
+    conversation: SessionManager,
+    prompt: { promptId: string; runId: string },
+    text: string,
+  ): string {
+    const delivery = createBrowserPromptDeliveryEntry({
+      promptId: prompt.promptId,
+      runId: prompt.runId,
+    });
+    conversation.appendCustomEntry(delivery.customType, delivery.data);
+    return conversation.appendMessage({ role: "user", content: text, timestamp: 2 });
+  }
+
+  function assistantMessage(text: string) {
+    return {
+      role: "assistant",
+      content: [{ type: "text", text }],
+      api: "test",
+      provider: "test",
+      model: "model-a",
+      usage: {
+        input: 1,
+        output: 1,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 2,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+      stopReason: "stop",
+      timestamp: 3,
+    } as never;
+  }
+
+  async function readSessionLines(sessionFile: string): Promise<string[]> {
+    return (await readFile(sessionFile, "utf8")).trim().split(/\r?\n/);
+  }
+
+  it("withdraws a selected browser prompt and keeps every earlier line byte-identical", async () => {
     const cwd = await createTemporaryDirectory("piweb-truncate-browser-prompt-");
     const store = await ProjectStore.open(cwd);
     const conversation = await store.createConversation(undefined, discoveryMeta());
     conversation.appendMessage({ role: "user", content: "retained", timestamp: 1 });
+    const prompt = admitBrowserPrompt(conversation, "rewind me");
+    const selectedId = deliverBrowserPrompt(conversation, prompt, "rewind me");
+    const sessionFile = conversation.getSessionFile()!;
+    const before = await readSessionLines(sessionFile);
 
-    const promptId = randomUUID();
-    const runId = randomUUID();
-    const admission = createBrowserPromptAdmissionEntry({
-      promptId,
-      runId,
-      text: "rewind me",
+    await store.truncateConversation(conversation.getSessionId(), selectedId);
+
+    const after = await readSessionLines(sessionFile);
+    // Header, meta, retained user and admission stay exactly as written.
+    expect(after.slice(0, 4)).toEqual(before.slice(0, 4));
+    expect(after).toHaveLength(5);
+    expect(JSON.parse(after[4]!)).toMatchObject({
+      type: "custom",
+      customType: "piweb.browser_prompt_withdrawal.v1",
+      data: { promptId: prompt.promptId, runId: prompt.runId },
+      parentId: prompt.admissionId,
     });
-    conversation.appendCustomEntry(admission.customType, admission.data);
-    const delivery = createBrowserPromptDeliveryEntry({ promptId, runId });
-    conversation.appendCustomEntry(delivery.customType, delivery.data);
-    const selectedId = conversation.appendMessage({
-      role: "user",
-      content: "rewind me",
-      timestamp: 2,
+    const reopened = await store.openConversation(conversation.getSessionId(), {
+      updateRecent: false,
     });
+    expect(inspectBrowserPromptLedger(reopened.getEntries())).toMatchObject({
+      pending: [],
+      deliveries: [],
+      withdrawals: [{ promptId: prompt.promptId, runId: prompt.runId }],
+    });
+    expect(reopened.buildSessionContext().messages).toEqual([
+      expect.objectContaining({ role: "user", content: "retained" }),
+    ]);
+  });
+
+  it("rewinds a prompt whose admission has kept entries recorded under it", async () => {
+    // Real runtime shapes: a LoopList re-arm or system state is written after
+    // the admission, and steered input is admitted while the Agent still works.
+    const cwd = await createTemporaryDirectory("piweb-truncate-admission-gap-");
+    const store = await ProjectStore.open(cwd);
+    const conversation = await store.createConversation(undefined, discoveryMeta());
+    conversation.appendMessage({ role: "user", content: "start", timestamp: 1 });
+    const prompt = admitBrowserPrompt(conversation, "steer");
+    const betweenId = conversation.appendCustomEntry("test.between", { kept: true });
+    const workId = conversation.appendMessage(assistantMessage("work before steer"));
+    const selectedId = deliverBrowserPrompt(conversation, prompt, "steer");
+    conversation.appendMessage(assistantMessage("work after steer"));
 
     await store.truncateConversation(conversation.getSessionId(), selectedId);
 
     const reopened = await store.openConversation(conversation.getSessionId(), {
       updateRecent: false,
     });
+    const ids = reopened.getEntries().map(({ id }) => id);
+    expect(ids).toEqual(expect.arrayContaining([
+      prompt.admissionId,
+      betweenId,
+      workId,
+    ]));
+    expect(ids).not.toContain(selectedId);
     expect(inspectBrowserPromptLedger(reopened.getEntries())).toMatchObject({
-      admissions: [],
       pending: [],
-      deliveries: [],
+      withdrawals: [{ promptId: prompt.promptId }],
     });
     expect(reopened.buildSessionContext().messages).toEqual([
-      expect.objectContaining({ role: "user", content: "retained" }),
+      expect.objectContaining({ role: "user", content: "start" }),
+      expect.objectContaining({ role: "assistant" }),
     ]);
+  });
+
+  it("withdraws every prompt the cut would replay and chains kept receipts after them", async () => {
+    const cwd = await createTemporaryDirectory("piweb-truncate-queued-prompts-");
+    const store = await ProjectStore.open(cwd);
+    const conversation = await store.createConversation(undefined, discoveryMeta());
+    const conversationId = conversation.getSessionId();
+    conversation.appendMessage({ role: "user", content: "retained", timestamp: 1 });
+    // Already undelivered before the rewind: it must stay pending.
+    const waiting = admitBrowserPrompt(conversation, "still waiting");
+    const first = admitBrowserPrompt(conversation, "first");
+    const queued = admitBrowserPrompt(conversation, "queued behind first");
+    const selectedId = deliverBrowserPrompt(conversation, first, "first");
+    conversation.appendMessage(assistantMessage("answer to first"));
+    deliverBrowserPrompt(conversation, queued, "queued behind first");
+    const targetRunId = randomUUID();
+    const receipt = createMessageDeliveryReceiptEntry({
+      messageId: randomUUID(),
+      cardId: randomUUID(),
+      fromConversationId: randomUUID(),
+      toConversationId: conversationId,
+      sourceRunId: randomUUID(),
+      targetRunId,
+      kind: "message",
+      sentAt: "2026-01-01T00:01:00.000Z",
+      payloadFingerprint: "a".repeat(64),
+      deliveredAt: "2026-01-01T00:02:00.000Z",
+    });
+    const receiptId = conversation.appendCustomEntry(receipt.customType, receipt.data);
+    const settlement = createRunSettlementEntry({
+      runId: targetRunId,
+      outcome: "aborted",
+      finalText: "",
+      settledAt: "2026-01-01T00:03:00.000Z",
+    });
+    const settlementId = conversation.appendCustomEntry(
+      settlement.customType,
+      settlement.data,
+    );
+    const sessionFile = conversation.getSessionFile()!;
+
+    await store.truncateConversation(conversationId, selectedId);
+
+    const after = (await readSessionLines(sessionFile))
+      .map((line) => JSON.parse(line) as {
+        id?: string;
+        parentId?: string | null;
+        customType?: string;
+        data?: { promptId?: string };
+      });
+    const withdrawals = after.filter(({ customType }) =>
+      customType === "piweb.browser_prompt_withdrawal.v1"
+    );
+    expect(withdrawals.map(({ data }) => data?.promptId)).toEqual([
+      first.promptId,
+      queued.promptId,
+    ]);
+    expect(withdrawals[0]!.parentId).toBe(queued.admissionId);
+    expect(after.find(({ id }) => id === receiptId)?.parentId)
+      .toBe(withdrawals[1]!.id);
+    expect(after.find(({ id }) => id === settlementId)?.parentId).toBe(receiptId);
+    const inspection = await store.inspectConversation(conversationId);
+    expect(inspection.pendingBrowserPrompts.map(({ promptId }) => promptId))
+      .toEqual([waiting.promptId]);
+    expect(inspection.messageDeliveryReceipts).toEqual([receipt.data]);
   });
 
   it("rewinds context while preserving receipt settlements without pruned output metrics", async () => {

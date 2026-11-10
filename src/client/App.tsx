@@ -316,6 +316,8 @@ interface ConversationRenamePresentation {
 interface PendingConversationTruncation {
   commandId: string;
   messageId: string;
+  /** Composer text replaced by the selected message; a refused rewind restores it. */
+  previousDraft: string;
 }
 
 interface PendingCompactionThreshold {
@@ -3662,6 +3664,13 @@ export function App() {
           const pending = pendingConversationTruncationRef.current;
           if (!pending || pending.commandId !== event.commandId) return;
           updatePendingConversationTruncation(undefined);
+          // The composer stayed locked while it previewed the selected text,
+          // so the refused rewind gives the user's own draft back.
+          updateDraft(pending.previousDraft);
+          updateConversationDraft({
+            text: pending.previousDraft,
+            images: draftImagesRef.current,
+          });
           setError(`回到此处失败：${event.message}`);
           return;
         }
@@ -5115,6 +5124,7 @@ export function App() {
     const pending = {
       commandId,
       messageId,
+      previousDraft: draftRef.current,
     };
     updatePendingConversationTruncation(pending);
     setError("");

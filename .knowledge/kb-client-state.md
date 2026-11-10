@@ -1,6 +1,6 @@
 # 客户端状态
 
-`updated: 2026-10-17`
+`updated: 2026-11-10`
 
 ## 这个模块是干什么的
 
@@ -130,7 +130,7 @@ ServerEvent
 - 当前 observation 中新的 `sessionId + conversationId` 展示目标与同一目标的增量更新属于两个滚动观察边界：有内容的 cache/preview 在首次提交时就无动画地直接定位到最新消息，不能先从顶部绘制再等待权威 snapshot；未 ready 且无内容的目标仍等 snapshot hydrate 后执行首次定位。随后同一 conversation 的 preview focus 升级为 executable focus 不重新初始化滚动；用户未脱离跟随时由舒适区吸收 snapshot 差异，已主动向上滚动时则保持控制权。切到其它 conversation 再返回，或 observation sessionId 改变，仍是新的展示目标并重新定位。
 - transcript 使用 14px 的紧凑正文，并与 composer 共用响应式内容宽度：从原有 780px 阅读宽度随视口扩展，最高 1280px；窄屏仍由最小侧边距接管，不能产生横向溢出。assistant Markdown 的标题、段落、嵌套列表、引用、表格和代码只在 `.markdown` 内建立统一阅读节奏；宽表格与长代码由自身横向滚动承接，不能撑宽 transcript。
 - assistant 的正文、思考和工具调用按真实到达顺序保存为 ordered parts；连续正文合并为正文块，连续思考或工具调用合并为一个默认收起的“工作过程”高层折叠区，即使只有一项也进入该区。`peek_session`、`send_session_message`、`wait_for_session`、`abort_session`、`delete_session` 的折叠摘要和 activity summary 用当前项目 lookup 显示会话标题，同名或 truncated authority 下的最终标题附 `#first8`；折叠文本和 native tooltip 都不得泄漏 raw UUID，只有展开的 ToolDetails 保留原始 conversationId。多目标 send 与 wait 都在折叠摘要中投影全部目标，绝不提升为 Commitment 或拿第一个目标冒充整体。历史 JSONL 中的 `request_edit_budget` 仍从既有 tool args/result 派生为常显 `CommitmentCard`，并从相邻工作过程移除以免重复；新 run 不再产生该工具或额度投影。兼容卡片只属于原 conversation，可展开复用原始 ToolDetails，不新增 reducer、protocol 或持久 Commitment 真相，重连仍由 JSONL toolCall/toolResult 恢复。历史详情、wire 截断和工具时间线可保留有界的 `piwebEditBudget` 事实，以便旧转录可读；它们不参与当前写入授权。折叠摘要必须实时反映内部状态：优先显示正在执行的工具动作与目标，其次显示当前思考预览；完成后显示最近一步动作、步骤数与工具调用数，仅当最近一步工具失败时显示错误态，历史失败不能压过后续进展。展开后以紧凑时间线保留思考/工具的原始顺序，思考和工具组仍各自可折叠；工具展开后每个工具仍是独立折叠项，以本地化动作、目标和状态概括调用，展开单项后按字段递归展示最终 args/result。正文、跨会话卡片和压缩项都会打断 activity 聚合，不能再把整轮思考/工具统一提到回复顶部。思考正文复用 Markdown 解析、清洗与排版，但折叠摘要只用纯文本预览，不能暴露 Markdown 标记噪声；内置工具优先提取文本输出，Agent 会话工具优先展示结构化 details，不能把宿主 JSON 包装直接暴露给用户。历史 Agent 的回复正文仍使用同一分隔线折叠语言；idle 时只保持最后一条 Agent 回复正文展开，新 run 期间同时保持当前 run 的相邻物理 assistant 段及它之前最近一条回复正文展开，直到 run 完成后才折叠旧正文。
-- 每条 user 与 assistant 正文在既有消息间距中提供低干扰复制按钮，读取原始文本/Markdown 而不是渲染后的 HTML；assistant 操作组位于消息左下方，user 操作组保持右下方。“回到此处”只属于 user 消息，并先明确确认将彻底删除本条及之后所有消息。操作组必须使用内容宽度且禁止换行，不能被短 user bubble 压成竖排。运行中、恢复未完成、存在排队 prompt 或已有截断 pending 时禁用破坏性按钮。
+- 每条 user 与 assistant 正文在既有消息间距中提供低干扰复制按钮，读取原始文本/Markdown 而不是渲染后的 HTML；assistant 操作组位于消息左下方，user 操作组保持右下方。“回到此处”只属于 user 消息，并先明确确认将彻底删除本条及之后所有消息。操作组必须使用内容宽度且禁止换行，不能被短 user bubble 压成竖排。运行中、恢复未完成、存在排队 prompt 或已有截断 pending 时禁用破坏性按钮。发送回退命令时 composer 锁定并预览所选消息原文；服务端拒绝时恢复点击前的用户草稿，不能让失败的回退吞掉草稿。
 - 截断只维护一个 `sessionId + commandId + conversationId + messageId` pending；命令成功发出后，composer 立即用所选 user 原文覆盖现有草稿，但客户端不先行 splice transcript，只接受匹配 focus 的服务端 snapshot 作为新内容，再用匹配 commandId 的 completion/error 结算等待态。命令未能发出时不得改写草稿。等待期间 composer、切换和新建会话禁用；断线属于未知结果，必须提示恢复后核对。
 - 认证、设置和扩展交互拥有模态焦点边界。
 - 会话角色快照中的工具权限是执行真相；客户端不保存全局工具模式偏好，也不提供项目级权限切换。

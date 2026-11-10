@@ -1,6 +1,6 @@
 # 项目与持久会话
 
-`updated: 2026-10-17`
+`updated: 2026-11-10`
 
 ## 这个模块是干什么的
 
@@ -91,7 +91,7 @@ focus 切换先 exact open：warm actor 直接复用；cold actor 在取得 writ
 “回到此处”是当前 conversation 内的物理后缀截断，不是 branch 或浏览器隐藏：
 
 - snapshot 的 user ID 直接对应 Pi message entry，assistant 聚合 ID 的 `assistant:` 后缀对应该聚合首个物理 message entry；所选 entry 及其后 context-bearing branch entry 会删除，更早行保持字节不变。唯一 ledger 例外是 suffix 中的 `piweb.message_delivery_receipt.v1` 及其引用的 `piweb.run_settlement.v1`：它们必须原子保留并重挂到 retained parent，避免 rewind 令已投递消息或已结算 run 复活；这种只为 receipt 保留的已剪枝 settlement 必须剥离 output metrics，不能把已删除 run 的 UI 速率复活。
-- 若 anchor 是浏览器投递的 raw user，紧邻其父的 `piweb.browser_prompt_delivery.v1` 与对应 `piweb.browser_prompt_admission.v1` 也必须一起移除；否则截断后 orphan delivery marker 不再证明已投递，ledger 会把 admission 误判为 pending 并在后续 run 自动重放已删除的用户消息。
+- 若 anchor 是浏览器投递的 raw user，只移除紧邻其父的 `piweb.browser_prompt_delivery.v1`（它在 active branch 上唯一的子项就是 anchor）；对应 admission 保持原字节。admission 与 delivery 之间常有挂在 admission 下的保留记录：首条消息的 system 记录、Stop 暂停后新 prompt 的 LoopList re-arm、插话前 Agent 已完成的工作、连续排队的另一 admission，也可能被 compaction 引用，所以删除或改挂 admission 都会断链。截断不得把任何输入从“已投递”变回 pending：截断前不 pending、截断后 pending 的每个 admission（anchor 自身，以及在 anchor 前接收、在其后投递的排队输入）都以追加的 `piweb.browser_prompt_withdrawal.v1` 结算（data 沿用 admission 的 promptId/runId），否则后续 run 或重启会自动重放；截断前已 pending 的保留输入保持 pending。追加顺序为 retained prefix → withdrawals → 保留的 receipt/settlement，首个父项是最后一条保留记录；写盘前复核 pending 集合不增长，否则拒绝。被回退输入的原文/图片因此仍以隐藏 admission 留在 JSONL，但不进入 provider context、history 工具或 UI；同 promptId 重连会得到 `prompt_withdrawn`，而不是被当成新输入再次接收。
 - 只允许 idle actor 执行；目标还有 queued/processing inbox 时拒绝，避免截断恢复账本后重复投递。已经送达其它 conversation 的外部效果不回滚。
 - store 在项目会话串行边界内用既有 exact-target proof 重新证明唯一合法 header claim 与目标完整正文；一次 inspection 的物理 entries 与非空原始行配对，复用解析结果并保留 retained 行原字节。候选仍须完整验证，临时文件写完后复验规范路径及完整 fingerprint（dev/ino/size/mtimeNs/ctimeNs），再原子替换；非 message、inactive branch、已观察到的身份冲突、文件变化、链接或损坏都拒绝覆盖。此边界不提供跨进程目录锁，proof 结束后的外部 namespace 变化仍可能在提交后的发现阶段才被检测。
 - 目标 rewrite 不以所有无关正文或 SDK 全量索引为授权前提；提交后复用目录 discovery 更新展示与成员观察，不把发现缓存升格为 writer/open 授权或完整正文证明。Agent 全量列表与 audit 仍走独立的 full proof；cascade delete 使用上述目标批次证明。

@@ -41,10 +41,11 @@ import {
   MAX_WORKSPACE_SESSION_REPAIR_FILES,
 } from "../shared/protocol.js";
 import {
-  BROWSER_PROMPT_ADMISSION_CUSTOM_TYPE,
   BROWSER_PROMPT_DELIVERY_CUSTOM_TYPE,
   CONVERSATION_META_CUSTOM_TYPE,
+  createBrowserPromptWithdrawalEntry,
   createConversationMetaEntry,
+  inspectBrowserPromptLedger,
   parseConversationLineage,
   parseConversationMetaEntry,
   parseReservedConversationEntry,
@@ -2725,30 +2726,32 @@ export class ProjectStore {
       const retainedEntryIds = new Set(
         activeBranch.slice(0, anchorIndex).map(({ id }) => id),
       );
-      // A delivered browser prompt has admission -> delivery marker -> raw user
-      // entry. Rewinding from that user removes the raw entry but its two
-      // preceding markers would otherwise survive in the retained prefix; the
-      // admission would then be mistaken for undelivered work and replayed.
-      const deliveryMarker = parsedEntries.find(({ id }) => id === anchor.parentId);
+      // A delivered browser prompt is admission -> ... -> delivery marker ->
+      // raw user entry. The delivery marker's only active child is the anchor,
+      // so it leaves with it. The admission stays byte-for-byte: other kept
+      // entries (a system message, a LoopList re-arm, steered work, another
+      // admission) can hang under it, and it may also sit under a compaction.
+      const deliveryMarker = activeBranch[anchorIndex - 1];
       if (
-        deliveryMarker?.type === "custom"
+        deliveryMarker?.id === anchor.parentId
+        && deliveryMarker.type === "custom"
         && deliveryMarker.customType === BROWSER_PROMPT_DELIVERY_CUSTOM_TYPE
-        && isRecord(deliveryMarker.data)
-        && typeof deliveryMarker.data.promptId === "string"
       ) {
-        const promptId = deliveryMarker.data.promptId;
-        const admissionMarker = parsedEntries.find((entry) => (
-          entry.type === "custom"
-          && entry.customType === BROWSER_PROMPT_ADMISSION_CUSTOM_TYPE
-          && isRecord(entry.data)
-          && entry.data.promptId === promptId
-        ));
-        if (admissionMarker === undefined) {
-          throw new Error(`Browser prompt admission not found for rewind anchor: ${entryId}`);
-        }
         retainedEntryIds.delete(deliveryMarker.id);
-        retainedEntryIds.delete(admissionMarker.id);
       }
+      const retainedEntries = parsedEntries.filter(
+        ({ id }) => retainedEntryIds.has(id),
+      );
+      // Cutting a delivery marker must never turn input back into pending work:
+      // the anchor's own prompt, and any prompt admitted before the anchor but
+      // delivered after it, would otherwise be replayed. Settle each one with a
+      // withdrawal. Input that was already pending stays pending.
+      const pendingBefore = new Set(
+        target.inspection.pendingBrowserPrompts.map(({ promptId }) => promptId),
+      );
+      const withdrawnPrompts = inspectBrowserPromptLedger(retainedEntries)
+        .pending
+        .filter(({ promptId }) => !pendingBefore.has(promptId));
       const receiptTargetRunIds = new Set<string>();
       for (const entry of parsedEntries) {
         const reserved = parseReservedConversationEntry(entry);
@@ -2763,7 +2766,26 @@ export class ProjectStore {
           retainedLines.push(lines[index + 1]!);
         }
       }
-      let retainedParentId = activeBranch[anchorIndex - 1]?.id ?? null;
+      let retainedParentId = retainedEntries.at(-1)?.id ?? null;
+      const usedEntryIds = new Set(parsedEntries.map(({ id }) => id));
+      const withdrawnAt = new Date().toISOString();
+      for (const { promptId, runId } of withdrawnPrompts) {
+        let withdrawalId: string;
+        do {
+          withdrawalId = randomUUID().slice(0, 8);
+        } while (usedEntryIds.has(withdrawalId));
+        usedEntryIds.add(withdrawalId);
+        const withdrawal = createBrowserPromptWithdrawalEntry({ promptId, runId });
+        retainedLines.push(JSON.stringify({
+          type: "custom",
+          customType: withdrawal.customType,
+          data: withdrawal.data,
+          id: withdrawalId,
+          parentId: retainedParentId,
+          timestamp: withdrawnAt,
+        }));
+        retainedParentId = withdrawalId;
+      }
       for (const entry of parsedEntries) {
         const entryId = entry.id;
         if (retainedEntryIds.has(entryId)) continue;
@@ -2798,7 +2820,14 @@ export class ProjectStore {
         retainedParentId = entryId;
       }
       const next = `${retainedLines.join("\n")}\n`;
-      validatePiSessionFile(next, safePath, conversationId);
+      const resurrected = inspectPiSessionFile(next, safePath, conversationId)
+        .pendingBrowserPrompts
+        .filter(({ promptId }) => !pendingBefore.has(promptId));
+      if (resurrected.length > 0) {
+        throw new Error(
+          `Rewind would replay delivered browser input: ${resurrected[0]!.promptId}`,
+        );
+      }
 
       const temporaryPath = join(
         this.sessionDir,

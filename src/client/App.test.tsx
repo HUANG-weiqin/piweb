@@ -7124,6 +7124,65 @@ describe("App", () => {
     expect(restoredInput).toHaveValue("需要保留吗？");
   });
 
+  it("gives the user's own draft back when the server refuses a rewind", () => {
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    render(<App />);
+    const sessionId = startFromSetup();
+    const userMessageId = "91bbd4c8-29ff-4598-b672-e62354411398";
+    act(() => {
+      socketMock.emit?.({
+        type: "state",
+        state: {
+          sessionId,
+          cwd: "E:\\work",
+          busy: false,
+          thinkingLevel: "off",
+          toolMode: "full_access",
+          availableThinkingLevels: ["off"],
+          selectedModel: { provider: "provider", id: "model" },
+          providers: [],
+        },
+      });
+      socketMock.emit?.({
+        type: "conversation_snapshot",
+        sessionId,
+        conversationId: CONVERSATION_ID,
+        items: snapshotItems([{
+          id: userMessageId,
+          role: "user",
+          text: "旧消息",
+          thinking: "",
+          tools: [],
+        }]),
+        window: { omittedBefore: false, startsMidTurn: false, contentTruncated: false },
+      });
+    });
+    const input = screen.getByRole("textbox", { name: "给 Pi 发送消息" });
+    fireEvent.change(input, { target: { value: "我自己的草稿" } });
+
+    fireEvent.click(screen.getByRole("button", {
+      name: "回到此处，删除这条及之后的消息",
+    }));
+    const command = latestCommand("truncate_conversation");
+    expect(input).toHaveValue("旧消息");
+
+    act(() => {
+      socketMock.emit?.({
+        type: "error",
+        scope: "command",
+        operation: "truncate_conversation",
+        commandId: command.commandId,
+        sessionId,
+        message: "rewind refused",
+      });
+    });
+
+    expect(screen.getByText(/回到此处失败：rewind refused/)).toBeInTheDocument();
+    const restored = screen.getByRole("textbox", { name: "给 Pi 发送消息" });
+    expect(restored).toBeEnabled();
+    expect(restored).toHaveValue("我自己的草稿");
+  });
+
   it("keeps rewind disabled until a settled user message has durable history identity", () => {
     vi.spyOn(window, "confirm").mockReturnValue(true);
     render(<App />);
