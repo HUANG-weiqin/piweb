@@ -21,6 +21,7 @@
 | 让 Claude Code 等外部 Agent 读写会话、协作派活 | [MCP 桥](kb-mcp-bridge.md) |
 | 配置端点、模型目录、API Key 形态或 models.json | [自定义提供商](kb-custom-providers.md) |
 | 配置本机语言服务、查询定义/引用或同步磁盘 | [LSP](kb-lsp.md) |
+| 新增主题、改配色/风格，或证明改动没影响其它主题 | [主题分层](kb-theming.md) |
 | UI 修改后如何验收真实交互 | [UI 开发流程](kb-ui-development-workflow.md)，静态布局另见[视觉校验](kb-visual-validation.md) |
 
 ## 页面与权威归属
@@ -37,6 +38,7 @@
 | [kb-tool-policy.md](kb-tool-policy.md) | source-aware 授权、只读 Bash 审查、Notebook 与 LoopList 首次写入门 |
 | [kb-lsp.md](kb-lsp.md) | 本机 stdio 配置、共享连接、磁盘同步和只读语义查询 |
 | [kb-mcp-bridge.md](kb-mcp-bridge.md) | 外部 Agent 的 MCP 工具、短连接、对话框边界与协议同步义务 |
+| [kb-theming.md](kb-theming.md) | 主题清单、配色/风格/色调分层、装饰兜底与跨主题零变化验证 |
 | [kb-ui-development-workflow.md](kb-ui-development-workflow.md) | 开发、隔离预览、测试与真实输入验收 |
 | [kb-visual-validation.md](kb-visual-validation.md) | 无头 fixture 的布局/焦点/reduced-motion 检查及证明范围 |
 | [_templet.md](_templet.md) | 新页模板（沿用现有文件名） |

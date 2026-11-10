@@ -1,6 +1,6 @@
 # 浏览器视觉验证
 
-`updated: 2026-10-06`
+`updated: 2026-11-11`
 
 ## 用途
 
@@ -62,7 +62,15 @@ npm run visual:verify -- --fixture --motion --viewport 1440x900
 npm run visual:verify -- --fixture --motion --reduced-motion --viewport 1440x900
 ```
 
-motion 模式只驱动三个已有生产接缝：模型按钮按下的 PUNCH、会话组展开指示的 SLASH、context compaction `DONE` 的 STAMP。脚本通过浏览器原生 CSS/Animation 协议冻结实际 transition/animation 的中间帧，不在产品 DOM 中加入测试 class。每个接缝输出 start/mid/settled（reduced 下为 start/instant/settled）局部 PNG，并在 manifest 记录实际 property、duration、easing、布局 box、展开时 DOM 是否已挂载、自然完成时的 iteration/fill，以及 settled 后仍活跃的 motion；证据 motion 会先完成并接受断言，再由脚本清理。该证据是开发期产物，不进入生产 bundle。
+motion 模式只驱动三个已有生产接缝：模型按钮按下的 PUNCH、会话组展开指示的 SLASH、context compaction `DONE` 的 STAMP。脚本通过浏览器原生 CSS/Animation 协议冻结实际 transition/animation 的中间帧，不在产品 DOM 中加入测试 class。每个接缝输出 start/mid/settled（reduced 下为 start/instant/settled）局部 PNG，并在 manifest 记录实际 property、duration、easing、布局 box、展开时 DOM 是否已挂载、自然完成时的 iteration/fill，以及 settled 后仍活跃的 motion；证据 motion 会先完成并接受断言，再由脚本清理。该证据是开发期产物，不进入生产 bundle。期望的 duration 从当前主题的 `--motion-punch-duration`、`--motion-slash-duration`、`--motion-stamp-duration` 读取；某个值为 `0ms` 表示该主题关闭了这个动作，脚本跳过它并在 manifest 的 `skipped` 中记录。
+
+fixture 模式可加 `--theme <id>` 选择主题（id 来自共享 `COLOR_SCHEMES`），脚本经 DEV-only `?theme=<id>` 应用主题，并在截图前确认 `data-color-scheme` 已生效；manifest 记录 theme 与 skin。不带 fixture 时该选项被拒绝，因为真实页面的主题来自用户偏好。
+
+```bash
+npm run visual:verify -- --fixture --theme code-dark --surfaces=all
+```
+
+证明某个主题改动没有影响其它主题时，用 `npm run theme:snapshot` 对比计算样式，见[主题分层](kb-theming.md#证明其它主题没变)。
 
 ## 通过条件
 
