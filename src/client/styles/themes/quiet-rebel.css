@@ -30,6 +30,8 @@ html[data-color-scheme="quiet-rebel"] {
   --danger-soft: #3a2221;
   --focus: #9cb7c9;
   --scheme-rebel-black: #141719;
+  --scheme-rebel-rail-black: #141719;
+  --scheme-rebel-sidebar-black: #141719;
   --scheme-rebel-rail-raised: #1d2225;
   --scheme-rebel-app-raised: #1d2225;
   --scheme-rebel-overlay-raised: #1d2225;
@@ -66,4 +68,6 @@ html[data-color-scheme="quiet-rebel"] {
   --link-tint: #286da8;
   --scrim-heavy: rgb(19 18 14 / 74%);
   --status-pending-text: #b98014;
+  --code-inline-text: var(--scheme-rebel-black);
+  --code-inline-bg: var(--scheme-rebel-paper);
 }

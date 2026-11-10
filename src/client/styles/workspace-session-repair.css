@@ -55,7 +55,7 @@
 
 .workspace-session-repair-issue-heading code,
 .workspace-session-repair-backups strong {
-  font-weight: 700;
+  font-weight: var(--fw-700);
 }
 
 .workspace-session-repair-consent {

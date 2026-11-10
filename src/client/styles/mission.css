@@ -21,7 +21,7 @@
   border-radius: 0;
   color: var(--rebel-paper-muted);
   background: var(--rebel-black);
-  font: 800 var(--fs-9) var(--font-label);
+  font: var(--fw-800) var(--fs-9) var(--font-label);
   letter-spacing: calc(0.04em * var(--tracking-scale));
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -75,7 +75,7 @@
   min-width: 0;
   margin: 0;
   color: var(--rebel-paper-muted);
-  font: 800 var(--fs-9) var(--font-label);
+  font: var(--fw-800) var(--fs-9) var(--font-label);
   overflow-wrap: anywhere;
 }
 
@@ -105,7 +105,7 @@
   border-radius: 0;
   color: var(--rebel-paper-muted);
   background: var(--rebel-black);
-  font: 800 var(--fs-9) var(--font-label);
+  font: var(--fw-800) var(--fs-9) var(--font-label);
 }
 
 .workspace-changes-header button:not(:disabled):hover {
@@ -152,7 +152,7 @@
   padding: 2px 5px;
   border: 1px solid var(--rebel-line);
   color: var(--rebel-paper-muted);
-  font: 800 var(--fs-8) var(--font-label);
+  font: var(--fw-800) var(--fs-8) var(--font-label);
   letter-spacing: calc(0.04em * var(--tracking-scale));
 }
 
@@ -164,7 +164,7 @@
 .workspace-change-path {
   min-width: 0;
   color: var(--rebel-paper);
-  font: 600 var(--fs-10)/1.45 var(--font-mono);
+  font: var(--fw-600) var(--fs-10)/1.45 var(--font-mono);
   overflow-wrap: anywhere;
 }
 
@@ -268,7 +268,7 @@
     margin: 0 0 3px;
     color: var(--rebel-red);
     font-size: var(--fs-9);
-    font-weight: 900;
+    font-weight: var(--fw-900);
     letter-spacing: calc(0.24em * var(--tracking-scale));
   }
 
@@ -276,7 +276,7 @@
     margin-left: auto;
     color: var(--rebel-paper-muted);
     font-size: var(--fs-8);
-    font-weight: 900;
+    font-weight: var(--fw-900);
     letter-spacing: calc(0.05em * var(--tracking-scale));
     white-space: nowrap;
   }
@@ -300,9 +300,9 @@
 
   .mission-command-title-row h2 {
     margin: 0;
-    font-size: clamp(15px, 1.15vw, 19px);
-    font-style: italic;
-    font-weight: 850;
+    font-size: min(var(--type-max), clamp(15px, 1.15vw, 19px));
+    font-style: var(--decor-italic, normal);
+    font-weight: var(--fw-850);
     letter-spacing: calc(-0.02em * var(--tracking-scale));
     line-height: 1;
   }
@@ -317,8 +317,8 @@
   .mission-objective-count strong {
     color: var(--rebel-red);
     font-size: var(--fs-25);
-    font-style: italic;
-    font-weight: 950;
+    font-style: var(--decor-italic, normal);
+    font-weight: var(--fw-950);
     letter-spacing: calc(-0.05em * var(--tracking-scale));
     line-height: 0.8;
   }
@@ -326,7 +326,7 @@
   .mission-objective-count span {
     color: var(--rebel-paper-muted);
     font-size: var(--fs-6);
-    font-weight: 850;
+    font-weight: var(--fw-850);
     letter-spacing: calc(0.08em * var(--tracking-scale));
     line-height: 1.45;
   }
@@ -377,14 +377,14 @@
   .mission-objective-copy small {
     color: var(--rebel-paper-muted);
     font-size: var(--fs-8);
-    font-weight: 900;
+    font-weight: var(--fw-900);
     letter-spacing: calc(0.11em * var(--tracking-scale));
   }
 
   .mission-objective-copy > span {
     overflow-wrap: anywhere;
     font-size: var(--fs-11);
-    font-weight: 700;
+    font-weight: var(--fw-700);
     line-height: 1.42;
   }
 
@@ -446,7 +446,7 @@
   .mission-section-heading h3 {
     margin: 0;
     font-size: var(--fs-10);
-    font-weight: 900;
+    font-weight: var(--fw-900);
     letter-spacing: calc(0.11em * var(--tracking-scale));
   }
 
@@ -489,7 +489,7 @@
     margin: 10px 0 0;
     padding-top: 8px;
     border-top: 1px solid color-mix(in srgb, var(--rebel-paper) 22%, transparent);
-    font: 800 var(--fs-8) var(--font-label);
+    font: var(--fw-800) var(--fs-8) var(--font-label);
     letter-spacing: calc(0.1em * var(--tracking-scale));
   }
 

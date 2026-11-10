@@ -14,6 +14,8 @@ html[data-skin="rebel"] {
   --font-display: Georgia, serif;
   --type-scale: 1;
   --type-shift: 0px;
+  --type-max: 1000px;
+  --weight-max: 1000;
   --radius-scale: 1;
   --radius-pill: 999px;
   --stroke-scale: 1;
@@ -37,6 +39,7 @@ html[data-skin="rebel"] {
 }
 
 html[data-skin="rebel"] {
+  --decor-italic: italic;
   --decor-clip-composer: polygon(9px 0, 100% 0, calc(100% - 8px) 100%, 0 100%, 0 10px);
   --decor-clip-composer-command-label: polygon(0 0, 100% 0, calc(100% - 15px) 100%, 0 100%);
   --decor-clip-send-button: polygon(8px 0, 100% 0, calc(100% - 7px) 100%, 0 100%);

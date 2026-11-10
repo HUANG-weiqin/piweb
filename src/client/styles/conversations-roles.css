@@ -2,7 +2,7 @@
 
 .workspace-rail,
 .conversation-sidebar {
-  --rebel-black: var(--scheme-rebel-black);
+  --rebel-black: var(--scheme-rebel-rail-black);
   --rebel-raised: var(--scheme-rebel-rail-raised);
   --rebel-paper: var(--scheme-rebel-paper);
   --rebel-paper-muted: var(--scheme-rebel-paper-muted);
@@ -10,6 +10,10 @@
   --rebel-red: var(--scheme-rebel-red);
   --rebel-red-dark: var(--scheme-rebel-red-dark);
   --rebel-line: var(--scheme-rebel-rail-line);
+}
+
+.conversation-sidebar {
+  --rebel-black: var(--scheme-rebel-sidebar-black);
 }
 
 .workspace-rail {
@@ -37,7 +41,7 @@
   place-items: center;
   border-bottom: 0;
   color: var(--rebel-paper);
-  font: 900 italic var(--fs-30)/1 var(--font-display);
+  font: var(--fw-900) var(--decor-italic, normal) var(--fs-30)/1 var(--font-display);
   transform: var(--decor-transform-workspace-rail-brand, none);
 }
 
@@ -90,7 +94,7 @@
   box-shadow: none;
   clip-path: none;
   font-size: var(--fs-15);
-  font-weight: 800;
+  font-weight: var(--fw-800);
   text-align: left;
   transition:
     color 100ms var(--motion-steps-2),
@@ -166,8 +170,8 @@
   position: relative;
   z-index: 1;
   font-size: var(--fs-27);
-  font-style: italic;
-  font-weight: 950;
+  font-style: var(--decor-italic, normal);
+  font-weight: var(--fw-950);
   letter-spacing: calc(-0.08em * var(--tracking-scale));
   line-height: 1;
 }
@@ -217,7 +221,7 @@
   border-radius: 0;
   color: var(--rebel-paper);
   background: transparent;
-  font: 700 var(--fs-13)/13px var(--font-label-sans);
+  font: var(--fw-700) var(--fs-13)/13px var(--font-label-sans);
   opacity: 0;
   pointer-events: none;
   transform: scale(0.82) var(--decor-transform-workspace-rail-close-hidden, rotate(0deg));
@@ -274,7 +278,7 @@
 
 .workspace-rail-warning {
   width: 16px;
-  font: 800 var(--fs-10)/1 var(--font-label-sans);
+  font: var(--fw-800) var(--fs-10)/1 var(--font-label-sans);
 }
 
 .workspace-rail-busy {
@@ -292,12 +296,12 @@
 .workspace-rail-attention {
   min-width: 17px;
   padding: 0 3px;
-  font: 800 var(--fs-9)/1 var(--font-label-sans);
+  font: var(--fw-800) var(--fs-9)/1 var(--font-label-sans);
 }
 
 .workspace-rail-unknown {
   width: 17px;
-  font: 800 var(--fs-9)/1 var(--font-label-sans);
+  font: var(--fw-800) var(--fs-9)/1 var(--font-label-sans);
 }
 
 .workspace-rail-add {
@@ -342,7 +346,7 @@
 
 .workspace-placeholder-content h1 {
   color: inherit;
-  font-size: clamp(26px, 4vw, 38px);
+  font-size: min(var(--type-max), clamp(26px, 4vw, 38px));
 }
 
 .workspace-placeholder-content > p:not(.eyebrow) {
@@ -369,12 +373,12 @@
   color: var(--on-accent);
   background: var(--accent);
   box-shadow: var(--shadow-sm);
-  font: 700 var(--fs-32) var(--font-display);
+  font: var(--fw-700) var(--fs-32) var(--font-display);
 }
 
 .workspace-placeholder-mark.warning {
   background: var(--danger-solid);
-  font: 800 var(--fs-28) var(--font-label-sans);
+  font: var(--fw-800) var(--fs-28) var(--font-label-sans);
 }
 
 .workspace-placeholder-actions {
@@ -518,9 +522,9 @@
   overflow: hidden;
   color: var(--rebel-red);
   font-family: inherit;
-  font-size: clamp(32px, 12.5cqi, 40px);
-  font-style: italic;
-  font-weight: 950;
+  font-size: min(var(--type-max), clamp(32px, 12.5cqi, 40px));
+  font-style: var(--decor-italic, normal);
+  font-weight: var(--fw-950);
   letter-spacing: calc(-0.035em * var(--tracking-scale));
   line-height: 0.82;
   text-shadow: none;
@@ -535,7 +539,7 @@
   border: 1px solid var(--rebel-red);
   color: var(--rebel-red);
   font-size: var(--fs-9);
-  font-weight: 900;
+  font-weight: var(--fw-900);
   letter-spacing: calc(0.06em * var(--tracking-scale));
   line-height: 1;
   white-space: nowrap;
@@ -713,8 +717,8 @@
   align-self: start;
   color: var(--sidebar-ordinal-text);
   font-size: var(--fs-40);
-  font-style: italic;
-  font-weight: 950;
+  font-style: var(--decor-italic, normal);
+  font-weight: var(--fw-950);
   letter-spacing: calc(-0.1em * var(--tracking-scale));
   line-height: 0.9;
   transform: var(--decor-transform-conversation-sidebar-ordinal, none);
@@ -735,7 +739,7 @@
   gap: 6px;
   color: var(--rebel-paper-muted);
   font-size: var(--fs-8);
-  font-weight: 800;
+  font-weight: var(--fw-800);
   letter-spacing: calc(0.14em * var(--tracking-scale));
   line-height: 1;
 }
@@ -771,7 +775,7 @@
   overflow: hidden;
   color: var(--rebel-paper);
   font-size: var(--fs-14);
-  font-weight: 900;
+  font-weight: var(--fw-900);
   letter-spacing: calc(-0.02em * var(--tracking-scale));
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -786,7 +790,7 @@
   overflow: hidden;
   color: var(--rebel-black);
   font-size: var(--fs-16);
-  font-weight: 900;
+  font-weight: var(--fw-900);
   line-height: 1.18;
   text-overflow: ellipsis;
   white-space: normal;
@@ -838,13 +842,13 @@
 
 .conversation-sidebar-item.hierarchy-member .conversation-sidebar-title {
   font-size: var(--fs-12);
-  font-weight: 800;
+  font-weight: var(--fw-800);
 }
 
 .conversation-sidebar-item.hierarchy-member.selected .conversation-sidebar-title {
   color: var(--rebel-black);
   font-size: var(--fs-13);
-  font-weight: 850;
+  font-weight: var(--fw-850);
 }
 
 .conversation-sidebar-item.hierarchy-member .conversation-sidebar-conversation > * {
@@ -881,7 +885,7 @@
   background: transparent;
   clip-path: none;
   font-size: 0;
-  font-weight: 900;
+  font-weight: var(--fw-900);
   letter-spacing: calc(0.08em * var(--tracking-scale));
   line-height: 1;
 }
@@ -960,7 +964,7 @@
   border: 1px solid var(--rebel-paper-muted);
   color: var(--rebel-paper-muted);
   font-size: var(--fs-8);
-  font-weight: 900;
+  font-weight: var(--fw-900);
   line-height: 1;
   white-space: nowrap;
 }
@@ -985,7 +989,7 @@
   background: transparent;
   clip-path: none;
   font-size: var(--fs-11);
-  font-weight: 900;
+  font-weight: var(--fw-900);
   line-height: 1;
 }
 
@@ -1009,7 +1013,7 @@
 .conversation-sidebar-role {
   max-width: 100px;
   overflow: hidden;
-  font-weight: 800;
+  font-weight: var(--fw-800);
   text-overflow: ellipsis;
   text-transform: uppercase;
   white-space: nowrap;
@@ -1024,7 +1028,7 @@
   border: 0;
   border-radius: 0;
   background: transparent;
-  font-weight: 850;
+  font-weight: var(--fw-850);
   letter-spacing: calc(0.06em * var(--tracking-scale));
   text-transform: uppercase;
 }
@@ -1110,7 +1114,7 @@
   border-radius: 0;
   color: var(--rebel-paper-muted);
   background: transparent;
-  font-weight: 400;
+  font-weight: var(--fw-400);
   text-align: left;
   transition: color 100ms var(--motion-steps-2);
 }
@@ -1129,7 +1133,7 @@
   min-width: 0;
   overflow: hidden;
   font-size: var(--fs-9);
-  font-weight: 750;
+  font-weight: var(--fw-750);
   letter-spacing: calc(0.01em * var(--tracking-scale));
   line-height: 1.45;
   text-overflow: ellipsis;
@@ -1197,8 +1201,8 @@
   padding-left: 12px;
   color: var(--rebel-paper-muted);
   font-size: var(--fs-8);
-  font-style: italic;
-  font-weight: 900;
+  font-style: var(--decor-italic, normal);
+  font-weight: var(--fw-900);
   letter-spacing: calc(0.08em * var(--tracking-scale));
   text-overflow: ellipsis;
   text-transform: uppercase;
@@ -1274,7 +1278,7 @@
   font-family: var(--font-label);
   font-size: var(--fs-13);
   font-style: normal;
-  font-weight: 800;
+  font-weight: var(--fw-800);
   letter-spacing: calc(0.05em * var(--tracking-scale));
   transform: none;
 }
@@ -1356,7 +1360,7 @@
 }
 
 .role-selection-header h1 {
-  font-size: clamp(28px, 4vw, 44px);
+  font-size: min(var(--type-max), clamp(28px, 4vw, 44px));
 }
 
 .role-selection-header p:not(.eyebrow) {
@@ -1420,7 +1424,7 @@
 
 .role-card-add-icon {
   font-size: var(--fs-42);
-  font-weight: 300;
+  font-weight: var(--fw-300);
   line-height: 1;
 }
 

@@ -134,14 +134,14 @@
   margin-top: 4px;
   color: var(--accent);
   font-size: var(--fs-11);
-  font-weight: 750;
+  font-weight: var(--fw-750);
   line-height: 1.45;
 }
 
 .settings-menu-chevron {
   color: var(--muted);
   font-size: var(--fs-32);
-  font-weight: 300;
+  font-weight: var(--fw-300);
   line-height: 1;
 }
 
@@ -310,7 +310,7 @@
   color: var(--muted);
   background: var(--soft);
   font-size: var(--fs-11);
-  font-weight: 750;
+  font-weight: var(--fw-750);
   white-space: nowrap;
 }
 
@@ -357,7 +357,7 @@
   color: var(--muted);
   background: var(--soft);
   font-size: var(--fs-11);
-  font-weight: 800;
+  font-weight: var(--fw-800);
 }
 
 .provider-summary {
@@ -452,7 +452,7 @@
   border-radius: 0;
   color: inherit;
   background: transparent;
-  font-weight: 450;
+  font-weight: var(--fw-450);
   text-align: left;
 }
 
@@ -631,7 +631,7 @@
   padding: 0;
   color: var(--muted);
   font-size: var(--fs-11);
-  font-weight: 750;
+  font-weight: var(--fw-750);
   letter-spacing: calc(0.08em * var(--tracking-scale));
   text-transform: uppercase;
 }
@@ -858,7 +858,7 @@
   color: inherit;
   background: transparent;
   border-color: transparent;
-  font-weight: 550;
+  font-weight: var(--fw-550);
   text-align: left;
 }
 
@@ -945,7 +945,7 @@
   color: inherit;
   background: var(--soft);
   border-color: var(--line);
-  font-weight: 550;
+  font-weight: var(--fw-550);
   text-align: left;
 }
 

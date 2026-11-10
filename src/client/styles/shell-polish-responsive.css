@@ -57,7 +57,7 @@
   content: "PROJECT";
   font-family: var(--font-label);
   font-size: var(--fs-8);
-  font-weight: 900;
+  font-weight: var(--fw-900);
   letter-spacing: calc(0.16em * var(--tracking-scale));
 }
 
@@ -121,7 +121,7 @@
   content: "SETTINGS";
   font-family: var(--font-label);
   font-size: var(--fs-8);
-  font-weight: 900;
+  font-weight: var(--fw-900);
   letter-spacing: calc(0.16em * var(--tracking-scale));
   line-height: 1;
 }
@@ -178,7 +178,7 @@
 
   .topbar-conversation-title {
     gap: 4px;
-    font-size: clamp(14px, 2vw, 20px);
+    font-size: min(var(--type-max), clamp(14px, 2vw, 20px));
   }
 
   .topbar-conversation-metadata {
@@ -392,7 +392,7 @@
   color: var(--rebel-paper);
   background: var(--rebel-black);
   content: "LOCAL // WORKSPACE";
-  font: 850 var(--fs-8)/1.2 var(--font-label);
+  font: var(--fw-850) var(--fs-8)/1.2 var(--font-label);
   letter-spacing: calc(0.12em * var(--tracking-scale));
 }
 
@@ -410,16 +410,16 @@
   box-shadow: var(--decor-shadow-logo, none);
   clip-path: var(--decor-clip-logo-mark, none);
   font-family: var(--font-display);
-  font-style: italic;
-  font-weight: 900;
+  font-style: var(--decor-italic, normal);
+  font-weight: var(--fw-900);
 }
 
 .setup-brand h1,
 .empty h1,
 .workspace-placeholder-content h1,
 .role-selection-header h1 {
-  font-style: italic;
-  font-weight: 950;
+  font-style: var(--decor-italic, normal);
+  font-weight: var(--fw-950);
   letter-spacing: calc(-0.055em * var(--tracking-scale));
   text-transform: uppercase;
 }
@@ -473,8 +473,8 @@
   box-shadow: var(--decor-shadow-button, none);
   font-family: var(--font-label);
   font-size: var(--fs-11);
-  font-style: italic;
-  font-weight: 900;
+  font-style: var(--decor-italic, normal);
+  font-weight: var(--fw-900);
   letter-spacing: calc(0.04em * var(--tracking-scale));
 }
 
@@ -571,7 +571,7 @@
 .role-selection-header h1 {
   max-width: 760px;
   color: var(--rebel-paper);
-  font-size: clamp(32px, 4.6vw, 58px);
+  font-size: min(var(--type-max), clamp(32px, 4.6vw, 58px));
 }
 
 .role-selection-header p:not(.eyebrow) {
@@ -629,8 +629,8 @@
 .role-card-heading {
   color: var(--rebel-black);
   font-size: var(--fs-20);
-  font-style: italic;
-  font-weight: 950;
+  font-style: var(--decor-italic, normal);
+  font-weight: var(--fw-950);
   text-transform: uppercase;
 }
 
@@ -643,7 +643,7 @@
   padding-top: 9px;
   border-top: 1px solid color-mix(in srgb, var(--rebel-black) 28%, var(--rebel-paper));
   font-size: var(--fs-10);
-  font-weight: 800;
+  font-weight: var(--fw-800);
   letter-spacing: calc(0.04em * var(--tracking-scale));
   text-transform: uppercase;
 }
@@ -701,8 +701,8 @@
 .drawer-header h2 {
   color: var(--rebel-paper);
   font-size: var(--fs-27);
-  font-style: italic;
-  font-weight: 950;
+  font-style: var(--decor-italic, normal);
+  font-weight: var(--fw-950);
   letter-spacing: calc(-0.045em * var(--tracking-scale));
   text-transform: uppercase;
 }
@@ -762,7 +762,7 @@
   background: transparent;
   font-family: var(--font-label);
   font-size: var(--fs-9);
-  font-weight: 900;
+  font-weight: var(--fw-900);
   letter-spacing: calc(0.08em * var(--tracking-scale));
   text-transform: uppercase;
 }
@@ -885,8 +885,8 @@
 .modal-header h2 {
   color: var(--rebel-paper);
   font-size: var(--fs-23);
-  font-style: italic;
-  font-weight: 950;
+  font-style: var(--decor-italic, normal);
+  font-weight: var(--fw-950);
   letter-spacing: calc(-0.04em * var(--tracking-scale));
   text-transform: uppercase;
 }
@@ -925,7 +925,7 @@
   box-shadow: var(--decor-shadow-modal-button, none);
   font-family: var(--font-label);
   font-size: var(--fs-11);
-  font-weight: 850;
+  font-weight: var(--fw-850);
 }
 
 .modal button:not(:disabled):hover,
@@ -997,7 +997,7 @@
   padding: 17px;
   color: var(--rebel-paper);
   background: var(--rebel-black);
-  font-weight: 900;
+  font-weight: var(--fw-900);
 }
 
 .modal.role-manager-dialog {
@@ -1094,7 +1094,7 @@
   border-left: var(--stroke-7) solid var(--rebel-paper);
   color: var(--rebel-paper);
   background: var(--rebel-red-dark);
-  font: 850 var(--fs-10)/1.4 var(--font-label);
+  font: var(--fw-850) var(--fs-10)/1.4 var(--font-label);
   letter-spacing: calc(0.07em * var(--tracking-scale));
   text-align: center;
   text-transform: uppercase;
@@ -1120,7 +1120,7 @@
   clip-path: var(--decor-clip-toast, none);
   font-family: var(--font-label);
   font-size: var(--fs-11);
-  font-weight: 750;
+  font-weight: var(--fw-750);
 }
 
 .notice-toast.warning {
@@ -1360,14 +1360,14 @@
   .mobile-page-header h1,
   .mobile-chat-identity strong {
     color: var(--rebel-paper);
-    font: 800 var(--fs-16)/1.2 var(--font-label);
+    font: var(--fw-800) var(--fs-16)/1.2 var(--font-label);
   }
 
   .mobile-page-header small,
   .mobile-chat-identity small {
     margin-bottom: 3px;
     color: var(--rebel-red);
-    font: 800 var(--fs-11)/1 var(--font-label-sans);
+    font: var(--fw-800) var(--fs-11)/1 var(--font-label-sans);
     letter-spacing: calc(0.08em * var(--tracking-scale));
   }
 
@@ -1380,7 +1380,7 @@
     border-radius: 0;
     color: var(--rebel-paper);
     background: var(--rebel-raised);
-    font: 800 var(--fs-11)/1 var(--font-label);
+    font: var(--fw-800) var(--fs-11)/1 var(--font-label);
   }
 
   .workspace-rail {
@@ -1449,7 +1449,7 @@
     display: block;
     overflow: hidden;
     color: var(--rebel-paper);
-    font: 800 var(--fs-15)/1.2 var(--font-label);
+    font: var(--fw-800) var(--fs-15)/1.2 var(--font-label);
     text-overflow: ellipsis;
     white-space: nowrap;
   }
@@ -1481,7 +1481,7 @@
     border: 0;
     font-family: var(--font-label);
     font-size: var(--fs-13);
-    font-weight: 800;
+    font-weight: var(--fw-800);
     letter-spacing: calc(0.05em * var(--tracking-scale));
   }
 
@@ -1650,7 +1650,7 @@
     color: var(--rebel-paper-muted);
     background: var(--rebel-raised);
     font-size: var(--fs-9);
-    font-weight: 800;
+    font-weight: var(--fw-800);
     letter-spacing: calc(0.07em * var(--tracking-scale));
   }
 
@@ -1718,7 +1718,7 @@
   .mobile-sheet-header h2 {
     margin: 0;
     color: var(--rebel-paper);
-    font: 800 var(--fs-17)/1 var(--font-label);
+    font: var(--fw-800) var(--fs-17)/1 var(--font-label);
   }
 
   .mobile-sheet-header button {

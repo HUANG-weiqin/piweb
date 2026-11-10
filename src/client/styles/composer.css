@@ -23,7 +23,7 @@
   box-shadow: none;
   font-family: var(--font-label);
   font-size: var(--fs-10);
-  font-weight: 900;
+  font-weight: var(--fw-900);
   letter-spacing: calc(0.05em * var(--tracking-scale));
 }
 
@@ -57,7 +57,7 @@
 .app-shell .bash-activity-strip strong {
   color: var(--rebel-paper);
   font-size: inherit;
-  font-weight: 800;
+  font-weight: var(--fw-800);
 }
 
 .app-shell .bash-activity-strip.cleanup-unknown {
@@ -100,7 +100,7 @@
   color: var(--status-active-text);
   background: var(--rebel-black);
   font-size: var(--fs-8);
-  font-weight: 900;
+  font-weight: var(--fw-900);
   letter-spacing: calc(0.06em * var(--tracking-scale));
 }
 
@@ -118,7 +118,7 @@
   color: var(--rebel-paper-muted);
   background: transparent;
   font-size: var(--fs-10);
-  font-weight: 800;
+  font-weight: var(--fw-800);
   letter-spacing: calc(0.04em * var(--tracking-scale));
 }
 
@@ -165,7 +165,7 @@
 
 .app-shell .loop-list-title {
   color: var(--rebel-paper);
-  font-weight: 900;
+  font-weight: var(--fw-900);
   letter-spacing: calc(0.05em * var(--tracking-scale));
   text-transform: uppercase;
 }
@@ -321,9 +321,9 @@
   color: var(--rebel-paper);
   background: var(--rebel-black);
   clip-path: var(--decor-clip-composer-command-label, none);
-  font-size: clamp(15px, 1.2vw, 19px);
-  font-style: italic;
-  font-weight: 900;
+  font-size: min(var(--type-max), clamp(15px, 1.2vw, 19px));
+  font-style: var(--decor-italic, normal);
+  font-weight: var(--fw-900);
   letter-spacing: calc(-0.035em * var(--tracking-scale));
   line-height: 1;
 }
@@ -359,7 +359,7 @@
   box-shadow: none;
   caret-color: var(--rebel-red);
   font-size: var(--fs-15);
-  font-weight: 650;
+  font-weight: var(--fw-650);
   line-height: 1.45;
 }
 
@@ -396,8 +396,8 @@
   clip-path: var(--decor-clip-send-button, none);
   font-family: var(--font-label);
   font-size: var(--fs-12);
-  font-style: italic;
-  font-weight: 900;
+  font-style: var(--decor-italic, normal);
+  font-weight: var(--fw-900);
   letter-spacing: calc(0.07em * var(--tracking-scale));
 }
 
@@ -438,7 +438,7 @@
   color: var(--rebel-red);
   font-family: var(--font-mono);
   font-size: var(--fs-9);
-  font-weight: 950;
+  font-weight: var(--fw-950);
   letter-spacing: calc(0.11em * var(--tracking-scale));
   line-height: 1;
 }
@@ -447,7 +447,7 @@
   min-width: 0;
   overflow: hidden;
   color: var(--rebel-paper);
-  font-weight: 850;
+  font-weight: var(--fw-850);
   text-overflow: ellipsis;
   text-transform: uppercase;
   white-space: nowrap;
@@ -545,7 +545,7 @@
   margin-right: 6px;
   color: var(--rebel-red);
   font-size: var(--fs-9);
-  font-weight: 950;
+  font-weight: var(--fw-950);
   letter-spacing: calc(0.1em * var(--tracking-scale));
   content: "CONTEXT";
 }

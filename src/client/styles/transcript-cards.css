@@ -66,14 +66,14 @@
 .session-message-direction,
 .session-message-status {
   font-size: var(--fs-11);
-  font-weight: 800;
+  font-weight: var(--fw-800);
 }
 
 .session-message-peer {
   overflow: hidden;
   color: var(--text);
   font-size: var(--fs-12);
-  font-weight: 650;
+  font-weight: var(--fw-650);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -154,7 +154,7 @@
 .session-message-summary-label {
   color: var(--text);
   font-size: var(--fs-11);
-  font-weight: 800;
+  font-weight: var(--fw-800);
 }
 
 .session-message-summary-copy {
@@ -250,7 +250,7 @@
   gap: 9px;
   color: var(--rebel-paper);
   font-size: var(--fs-12);
-  font-weight: 900;
+  font-weight: var(--fw-900);
   letter-spacing: calc(0.04em * var(--tracking-scale));
   text-transform: uppercase;
 }
@@ -264,8 +264,8 @@
   clip-path: var(--decor-clip-brand-mark, none);
   font-family: var(--font-display);
   font-size: var(--fs-25);
-  font-style: italic;
-  font-weight: 900;
+  font-style: var(--decor-italic, normal);
+  font-weight: var(--fw-900);
   transform: var(--decor-transform-brand-mark, none);
 }
 
@@ -275,7 +275,7 @@
   color: var(--rebel-paper-muted);
   font-family: var(--font-label);
   font-size: var(--fs-8);
-  font-weight: 500;
+  font-weight: var(--fw-500);
   letter-spacing: 0;
   text-transform: none;
 }
@@ -300,9 +300,9 @@
   z-index: 1;
   align-self: center;
   color: var(--rebel-red);
-  font-size: clamp(54px, 4.3vw, 70px);
-  font-style: italic;
-  font-weight: 950;
+  font-size: min(var(--type-max), clamp(54px, 4.3vw, 70px));
+  font-style: var(--decor-italic, normal);
+  font-weight: var(--fw-950);
   letter-spacing: calc(-0.1em * var(--tracking-scale));
   line-height: 0.8;
   text-shadow: var(--decor-shadow-session-ordinal-strong, none);
@@ -320,7 +320,7 @@
   color: var(--rebel-red);
   font-family: var(--font-label);
   font-size: var(--fs-9);
-  font-weight: 900;
+  font-weight: var(--fw-900);
   letter-spacing: calc(0.16em * var(--tracking-scale));
   line-height: 1;
 }
@@ -332,9 +332,9 @@
   gap: 8px;
   overflow: hidden;
   color: var(--rebel-paper);
-  font-size: clamp(24px, 2.05vw, 33px);
-  font-style: italic;
-  font-weight: 950;
+  font-size: min(var(--type-max), clamp(24px, 2.05vw, 33px));
+  font-style: var(--decor-italic, normal);
+  font-weight: var(--fw-950);
   letter-spacing: calc(-0.055em * var(--tracking-scale));
   line-height: 1.08;
 }
@@ -354,7 +354,7 @@
   color: var(--rebel-paper-muted);
   font-size: 0.47em;
   font-style: normal;
-  font-weight: 750;
+  font-weight: var(--fw-750);
   letter-spacing: calc(-0.02em * var(--tracking-scale));
 }
 
@@ -378,7 +378,7 @@
   color: var(--rebel-paper-muted);
   font-family: var(--font-label);
   font-size: var(--fs-9);
-  font-weight: 750;
+  font-weight: var(--fw-750);
   letter-spacing: calc(0.08em * var(--tracking-scale));
   line-height: 1.2;
   text-transform: uppercase;
@@ -408,7 +408,7 @@
   color: var(--rebel-on-oxide);
   font-family: var(--font-label);
   font-size: var(--fs-8);
-  font-weight: 950;
+  font-weight: var(--fw-950);
   letter-spacing: calc(0.15em * var(--tracking-scale));
 }
 
@@ -416,8 +416,8 @@
   max-width: 100%;
   overflow: hidden;
   font-size: var(--fs-14);
-  font-style: italic;
-  font-weight: 950;
+  font-style: var(--decor-italic, normal);
+  font-weight: var(--fw-950);
   letter-spacing: calc(-0.035em * var(--tracking-scale));
   line-height: 1.05;
   text-overflow: ellipsis;
@@ -449,7 +449,7 @@
   background: var(--rebel-raised);
   font-family: var(--font-label);
   font-size: var(--fs-9);
-  font-weight: 700;
+  font-weight: var(--fw-700);
   letter-spacing: calc(0.02em * var(--tracking-scale));
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -510,7 +510,7 @@
   padding-left: 12px;
   font-family: var(--font-label);
   font-size: var(--fs-8);
-  font-weight: 850;
+  font-weight: var(--fw-850);
   letter-spacing: calc(0.14em * var(--tracking-scale));
 }
 
@@ -519,8 +519,8 @@
   overflow: hidden;
   color: var(--rebel-paper);
   font-size: var(--fs-13);
-  font-style: italic;
-  font-weight: 900;
+  font-style: var(--decor-italic, normal);
+  font-weight: var(--fw-900);
   letter-spacing: calc(-0.015em * var(--tracking-scale));
   text-overflow: ellipsis;
   text-transform: uppercase;
@@ -532,7 +532,7 @@
   color: var(--rebel-paper-muted);
   font-family: var(--font-label);
   font-size: var(--fs-8);
-  font-weight: 850;
+  font-weight: var(--fw-850);
   letter-spacing: calc(0.1em * var(--tracking-scale));
 }
 
@@ -552,7 +552,7 @@
   color: var(--rebel-paper);
   background: transparent;
   font-size: var(--fs-15);
-  font-weight: 650;
+  font-weight: var(--fw-650);
 }
 
 .transcript .message.user .message-event-actor {
@@ -572,7 +572,7 @@
   border-radius: 0;
   color: var(--rebel-paper);
   background: var(--rebel-red-dark);
-  font-weight: 750;
+  font-weight: var(--fw-750);
 }
 
 .transcript .message-actions {
@@ -625,14 +625,14 @@
 
 .transcript .compaction-actor {
   color: var(--rebel-paper);
-  font-style: italic;
-  font-weight: 900;
+  font-style: var(--decor-italic, normal);
+  font-weight: var(--fw-900);
 }
 
 .transcript .compaction-label {
   overflow: hidden;
   color: var(--rebel-paper);
-  font-weight: 750;
+  font-weight: var(--fw-750);
   text-overflow: ellipsis;
 }
 
@@ -642,7 +642,7 @@
 
 .transcript .compaction-state {
   color: var(--rebel-red);
-  font-weight: 900;
+  font-weight: var(--fw-900);
   text-align: right;
 }
 
@@ -706,7 +706,7 @@
   box-shadow: none;
   transform: none;
   transition: none;
-  font: 800 var(--fs-9)/1 var(--font-label);
+  font: var(--fw-800) var(--fs-9)/1 var(--font-label);
   letter-spacing: calc(0.07em * var(--tracking-scale));
   vertical-align: middle;
   white-space: nowrap;
@@ -736,8 +736,8 @@
 
 .transcript .markdown :not(pre) > code {
   border-radius: 0;
-  color: var(--rebel-black);
-  background: var(--rebel-paper);
+  color: var(--code-inline-text);
+  background: var(--code-inline-bg);
 }
 
 .transcript .markdown pre {
@@ -827,14 +827,14 @@
   font-family: var(--font-label);
   font-size: var(--fs-8);
   font-style: normal;
-  font-weight: 900;
+  font-weight: var(--fw-900);
   letter-spacing: calc(0.11em * var(--tracking-scale));
 }
 
 .transcript .activity-group-label {
   color: var(--rebel-paper);
   font-size: var(--fs-12);
-  font-weight: 800;
+  font-weight: var(--fw-800);
 }
 
 .transcript .assistant-activity-group.is-active .activity-group-label,
@@ -874,7 +874,7 @@
 
 .transcript .activity-group-status::after {
   font-size: var(--fs-8);
-  font-weight: 900;
+  font-weight: var(--fw-900);
   letter-spacing: calc(0.1em * var(--tracking-scale));
 }
 
@@ -941,7 +941,7 @@
   color: var(--rebel-paper);
   font-family: var(--font-label);
   font-size: var(--fs-11);
-  font-weight: 800;
+  font-weight: var(--fw-800);
 }
 
 .transcript .activity-timeline > .thinking > summary::after,
@@ -986,7 +986,7 @@
   background: var(--rebel-raised);
   font-family: var(--font-label);
   font-size: var(--fs-10);
-  font-weight: 850;
+  font-weight: var(--fw-850);
   letter-spacing: calc(0.05em * var(--tracking-scale));
 }
 
@@ -1034,7 +1034,7 @@
   color: var(--rebel-paper);
   font-family: var(--font-label);
   font-size: var(--fs-10);
-  font-weight: 850;
+  font-weight: var(--fw-850);
   letter-spacing: calc(0.04em * var(--tracking-scale));
 }
 
@@ -1064,7 +1064,7 @@
 
 .transcript .tool-status::after {
   font-size: var(--fs-8);
-  font-weight: 900;
+  font-weight: var(--fw-900);
   letter-spacing: calc(0.09em * var(--tracking-scale));
 }
 
@@ -1159,7 +1159,7 @@
   color: var(--rebel-red);
   font-family: var(--font-label);
   font-size: var(--fs-8);
-  font-weight: 900;
+  font-weight: var(--fw-900);
   letter-spacing: calc(0.12em * var(--tracking-scale));
 }
 
@@ -1210,7 +1210,7 @@
   box-shadow: none;
   font-family: var(--font-label);
   font-size: var(--fs-9);
-  font-weight: 850;
+  font-weight: var(--fw-850);
   letter-spacing: calc(0.05em * var(--tracking-scale));
 }
 
@@ -1288,15 +1288,15 @@
 
 .transcript .commitment-budget-metric strong {
   font-size: var(--fs-38);
-  font-style: italic;
-  font-weight: 950;
+  font-style: var(--decor-italic, normal);
+  font-weight: var(--fw-950);
   letter-spacing: calc(-0.08em * var(--tracking-scale));
 }
 
 .transcript .commitment-budget-metric > span > span {
   color: var(--rebel-red);
   font-size: var(--fs-18);
-  font-weight: 900;
+  font-weight: var(--fw-900);
 }
 
 .transcript .commitment-budget-metric small {
@@ -1304,7 +1304,7 @@
   color: var(--rebel-paper-muted);
   font-family: var(--font-label);
   font-size: var(--fs-7);
-  font-weight: 850;
+  font-weight: var(--fw-850);
   letter-spacing: calc(0.12em * var(--tracking-scale));
 }
 
@@ -1324,8 +1324,8 @@
 .transcript .commitment-copy strong {
   color: var(--rebel-black);
   font-size: var(--fs-15);
-  font-style: italic;
-  font-weight: 900;
+  font-style: var(--decor-italic, normal);
+  font-weight: var(--fw-900);
 }
 
 .transcript .commitment-card.is-error .commitment-copy strong {
@@ -1464,7 +1464,7 @@
   box-shadow: none;
   font-family: var(--font-label);
   font-size: var(--fs-9);
-  font-weight: 850;
+  font-weight: var(--fw-850);
   letter-spacing: calc(0.05em * var(--tracking-scale));
   text-decoration: none;
 }
