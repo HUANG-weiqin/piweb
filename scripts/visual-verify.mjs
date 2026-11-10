@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
@@ -142,11 +142,29 @@ const requestedSurfaceName = Object.hasOwn(
   : undefined;
 const requestedSurfaceGroup = requestedSurfaceName
   ?? (normalizedSurfaceOption === "ALL" ? "all" : normalizedSurfaceOption);
+// The appearance page shows one card per wire color scheme; --theme must name one.
+const colorSchemes = readColorSchemes();
+function readColorSchemes() {
+  const source = readFileSync(join(repoRoot, "src", "shared", "protocol.ts"), "utf8");
+  const match = /export const COLOR_SCHEMES = \[([^\]]*)\]/.exec(source);
+  if (!match) throw new Error("COLOR_SCHEMES not found in src/shared/protocol.ts");
+  return [...match[1].matchAll(/"([^"]+)"/g)].map((entry) => entry[1]);
+}
+const requestedTheme = args.get("theme");
+const themeId = typeof requestedTheme === "string" && requestedTheme.trim() !== ""
+  ? requestedTheme.trim()
+  : null;
+// Single helper for every fixture URL (workbench and secondary surfaces).
+// `theme` is appended only when --fixture is active and --theme was given.
+function fixtureUrlWith(url, params) {
+  const next = new URL(url);
+  for (const [key, value] of Object.entries(params)) next.searchParams.set(key, value);
+  if (visualFixture && themeId) next.searchParams.set("theme", themeId);
+  return next.toString();
+}
 let baseUrl = String(args.get("url") ?? "http://127.0.0.1:5173/");
 if (visualFixture) {
-  const fixtureUrl = new URL(baseUrl);
-  fixtureUrl.searchParams.set("fixture", surfaceMode ? "secondary" : "workbench");
-  baseUrl = fixtureUrl.toString();
+  baseUrl = fixtureUrlWith(baseUrl, { fixture: surfaceMode ? "secondary" : "workbench" });
 }
 const requestedViewport = args.get("viewport");
 const viewports = requestedViewport
@@ -274,9 +292,39 @@ function secondarySurfaceSelector(surface) {
 }
 
 function secondarySurfaceUrl(surface) {
-  const url = new URL(baseUrl);
-  url.searchParams.set("surface", surface);
-  return url.toString();
+  return fixtureUrlWith(baseUrl, { surface });
+}
+
+async function assertFixtureTheme(client) {
+  if (!themeId) return;
+  const applied = await client.evaluate("document.documentElement.dataset.colorScheme ?? null");
+  if (applied !== themeId) throw new Error(`Fixture did not apply theme ${themeId}`);
+}
+
+function parseMotionDurationMs(name, raw) {
+  const text = String(raw ?? "").trim();
+  if (text === "0") return 0;
+  const match = /^(\d+(?:\.\d+)?)(ms|s)$/i.exec(text);
+  if (!match) throw new Error(`${name} motion token is not a time: "${text}"`);
+  const value = Number(match[1]) * (match[2].toLowerCase() === "s" ? 1000 : 1);
+  if (!Number.isFinite(value)) throw new Error(`${name} motion token is not finite: "${text}"`);
+  return value;
+}
+
+async function readMotionDurations(client) {
+  const raw = await client.evaluate(`(() => {
+    const style = getComputedStyle(document.documentElement);
+    return {
+      PUNCH: style.getPropertyValue("--motion-punch-duration"),
+      SLASH: style.getPropertyValue("--motion-slash-duration"),
+      STAMP: style.getPropertyValue("--motion-stamp-duration"),
+    };
+  })()`);
+  return {
+    PUNCH: parseMotionDurationMs("PUNCH", raw.PUNCH),
+    SLASH: parseMotionDurationMs("SLASH", raw.SLASH),
+    STAMP: parseMotionDurationMs("STAMP", raw.STAMP),
+  };
 }
 
 async function waitForSecondarySurface(client, surface) {
@@ -1465,7 +1513,7 @@ async function inspectMobileSettings(client, scrolled = false) {
         issues.push("Settings HOME exposes dedicated-page controls");
       }
     } else if (route === "appearance") {
-      if (options.length !== 2) issues.push("expected two single-column theme cards");
+      if (options.length !== ${colorSchemes.length}) issues.push("expected ${colorSchemes.length} single-column theme cards");
     } else if (route === "model-connections") {
       if (!drawer?.querySelector('select[aria-label="提供商"]')) issues.push("model provider control is missing");
     } else {
@@ -1698,6 +1746,7 @@ async function captureViewport(client, outputPath, width, height, index, surface
   let diagnostics;
   if (surfaceMode) {
     await waitForSecondarySurface(client, surface.surface);
+    await assertFixtureTheme(client);
     const usesWorkbench = [
       "context-tooltip",
       "activity-expanded",
@@ -1758,6 +1807,7 @@ async function captureViewport(client, outputPath, width, height, index, surface
     diagnostics = await inspectSecondarySurface(client, surface);
     diagnostics.interaction = interaction;
   } else if (visualFixture) {
+    await assertFixtureTheme(client);
     if (width <= 600) {
       return exerciseMobileWorkbench(client, outputPath, width, height, index, { capture: true });
     }
@@ -2137,156 +2187,170 @@ async function forcePseudoState(client, selector, states) {
 
 async function captureMotionEvidence(client, outputPath, width, height) {
   const cases = [];
+  // Read the theme's motion tokens once; the fixture page is ready at this point.
+  const durationsMs = await readMotionDurations(client);
+  const skipped = Object.entries(durationsMs)
+    .filter(([, duration]) => duration === 0)
+    .map(([name]) => name);
+  for (const name of skipped) console.log(`skipped: ${name} disabled by theme`);
 
-  const punchSelector = ".app-shell .model-button";
-  const punchFrames = [await captureMotionFrame(
-    client,
-    outputPath,
-    "motion-punch-01-start.png",
-    ".topbar-controls",
-    punchSelector,
-  )];
-  const punchNodeId = await forcePseudoState(client, punchSelector, ["hover", "active"]);
-  if (!reducedMotion) await seekMotion(client, punchSelector, 0.5);
-  punchFrames.push(await captureMotionFrame(
-    client,
-    outputPath,
-    `motion-punch-02-${reducedMotion ? "instant" : "mid"}.png`,
-    ".topbar-controls",
-    punchSelector,
-  ));
-  const punchCompletion = await finishMotion(client, punchSelector);
-  punchFrames.push({
-    ...(await captureMotionFrame(
+  if (durationsMs.PUNCH > 0) {
+    const punchSelector = ".app-shell .model-button";
+    const punchFrames = [await captureMotionFrame(
       client,
       outputPath,
-      "motion-punch-03-settled.png",
+      "motion-punch-01-start.png",
       ".topbar-controls",
       punchSelector,
-    )),
-    completedMotions: punchCompletion,
-  });
-  assertMotionCase("PUNCH", punchFrames, 110, reducedMotion);
-  await client.call("CSS.forcePseudoState", {
-    nodeId: punchNodeId,
-    forcedPseudoClasses: [],
-  });
-  await cancelMotion(client, punchSelector);
-  cases.push({
-    name: "PUNCH",
-    trigger: "model access :active",
-    frames: punchFrames,
-  });
-
-  const slashSelector = ".conversation-group-disclosure";
-  await client.evaluate(`(async () => {
-    const disclosure = document.querySelector(${JSON.stringify(slashSelector)});
-    if (!disclosure) throw new Error('SLASH disclosure missing');
-    if (disclosure.getAttribute('aria-expanded') !== 'false') disclosure.click();
-    await new Promise((resolveFrame) => requestAnimationFrame(resolveFrame));
-  })()`);
-  await cancelMotion(client, slashSelector);
-  const slashFrames = [await captureMotionFrame(
-    client,
-    outputPath,
-    "motion-slash-01-start.png",
-    ".conversation-sidebar",
-    slashSelector,
-    "::before",
-    ".conversation-group-chevron",
-  )];
-  await client.evaluate(`(async () => {
-    document.querySelector(${JSON.stringify(slashSelector)})?.click();
-    await new Promise((resolveFrame) => requestAnimationFrame(resolveFrame));
-  })()`);
-  if (!reducedMotion) await seekMotion(client, slashSelector, 0.5);
-  slashFrames.push(await captureMotionFrame(
-    client,
-    outputPath,
-    `motion-slash-02-${reducedMotion ? "instant" : "mid"}.png`,
-    ".conversation-sidebar",
-    slashSelector,
-    "::before",
-    ".conversation-group-chevron",
-  ));
-  if (slashFrames[1].state.expanded !== "true" || !slashFrames[1].state.membersPresent) {
-    throw new Error("SLASH delayed the expanded state or member DOM");
-  }
-  const slashCompletion = await finishMotion(client, slashSelector);
-  slashFrames.push({
-    ...(await captureMotionFrame(
+    )];
+    const punchNodeId = await forcePseudoState(client, punchSelector, ["hover", "active"]);
+    if (!reducedMotion) await seekMotion(client, punchSelector, 0.5);
+    punchFrames.push(await captureMotionFrame(
       client,
       outputPath,
-      "motion-slash-03-settled.png",
+      `motion-punch-02-${reducedMotion ? "instant" : "mid"}.png`,
+      ".topbar-controls",
+      punchSelector,
+    ));
+    const punchCompletion = await finishMotion(client, punchSelector);
+    punchFrames.push({
+      ...(await captureMotionFrame(
+        client,
+        outputPath,
+        "motion-punch-03-settled.png",
+        ".topbar-controls",
+        punchSelector,
+      )),
+      completedMotions: punchCompletion,
+    });
+    assertMotionCase("PUNCH", punchFrames, durationsMs.PUNCH, reducedMotion);
+    await client.call("CSS.forcePseudoState", {
+      nodeId: punchNodeId,
+      forcedPseudoClasses: [],
+    });
+    await cancelMotion(client, punchSelector);
+    cases.push({
+      name: "PUNCH",
+      trigger: "model access :active",
+      frames: punchFrames,
+    });
+  }
+
+  if (durationsMs.SLASH > 0) {
+    const slashSelector = ".conversation-group-disclosure";
+    await client.evaluate(`(async () => {
+      const disclosure = document.querySelector(${JSON.stringify(slashSelector)});
+      if (!disclosure) throw new Error('SLASH disclosure missing');
+      if (disclosure.getAttribute('aria-expanded') !== 'false') disclosure.click();
+      await new Promise((resolveFrame) => requestAnimationFrame(resolveFrame));
+    })()`);
+    await cancelMotion(client, slashSelector);
+    const slashFrames = [await captureMotionFrame(
+      client,
+      outputPath,
+      "motion-slash-01-start.png",
       ".conversation-sidebar",
       slashSelector,
       "::before",
       ".conversation-group-chevron",
-    )),
-    completedMotions: slashCompletion,
-  });
-  assertMotionCase("SLASH", slashFrames, 150, reducedMotion);
-  await cancelMotion(client, slashSelector);
-  cases.push({
-    name: "SLASH",
-    trigger: "conversation group expand",
-    frames: slashFrames,
-  });
-
-  const stampSelector = ".transcript .compaction-state";
-  const stampFrames = [await captureMotionFrame(
-    client,
-    outputPath,
-    "motion-stamp-01-start.png",
-    ".compaction-marker",
-    stampSelector,
-    "::after",
-  )];
-  await client.evaluate(`(async () => {
-    const element = document.querySelector(${JSON.stringify(stampSelector)});
-    if (!element) throw new Error('STAMP target missing');
-    element.classList.remove('compaction-state');
-    void element.offsetWidth;
-    element.classList.add('compaction-state');
-    await new Promise((resolveFrame) => requestAnimationFrame(resolveFrame));
-  })()`);
-  if (!reducedMotion) await seekMotion(client, stampSelector, 0.5);
-  stampFrames.push(await captureMotionFrame(
-    client,
-    outputPath,
-    `motion-stamp-02-${reducedMotion ? "instant" : "mid"}.png`,
-    ".compaction-marker",
-    stampSelector,
-    "::after",
-  ));
-  const stampCompletion = await finishMotion(client, stampSelector);
-  stampFrames.push({
-    ...(await captureMotionFrame(
+    )];
+    await client.evaluate(`(async () => {
+      document.querySelector(${JSON.stringify(slashSelector)})?.click();
+      await new Promise((resolveFrame) => requestAnimationFrame(resolveFrame));
+    })()`);
+    if (!reducedMotion) await seekMotion(client, slashSelector, 0.5);
+    slashFrames.push(await captureMotionFrame(
       client,
       outputPath,
-      "motion-stamp-03-settled.png",
+      `motion-slash-02-${reducedMotion ? "instant" : "mid"}.png`,
+      ".conversation-sidebar",
+      slashSelector,
+      "::before",
+      ".conversation-group-chevron",
+    ));
+    if (slashFrames[1].state.expanded !== "true" || !slashFrames[1].state.membersPresent) {
+      throw new Error("SLASH delayed the expanded state or member DOM");
+    }
+    const slashCompletion = await finishMotion(client, slashSelector);
+    slashFrames.push({
+      ...(await captureMotionFrame(
+        client,
+        outputPath,
+        "motion-slash-03-settled.png",
+        ".conversation-sidebar",
+        slashSelector,
+        "::before",
+        ".conversation-group-chevron",
+      )),
+      completedMotions: slashCompletion,
+    });
+    assertMotionCase("SLASH", slashFrames, durationsMs.SLASH, reducedMotion);
+    await cancelMotion(client, slashSelector);
+    cases.push({
+      name: "SLASH",
+      trigger: "conversation group expand",
+      frames: slashFrames,
+    });
+  }
+
+  if (durationsMs.STAMP > 0) {
+    const stampSelector = ".transcript .compaction-state";
+    const stampFrames = [await captureMotionFrame(
+      client,
+      outputPath,
+      "motion-stamp-01-start.png",
       ".compaction-marker",
       stampSelector,
       "::after",
-    )),
-    completedMotions: stampCompletion,
-  });
-  assertMotionCase("STAMP", stampFrames, 130, reducedMotion);
-  if (["opacity", "transform"].some((property) =>
-    stampFrames[0].state.visualStyle[property]
-      !== stampFrames[2].state.visualStyle[property])) {
-    throw new Error("STAMP retained a visual effect after completion");
+    )];
+    await client.evaluate(`(async () => {
+      const element = document.querySelector(${JSON.stringify(stampSelector)});
+      if (!element) throw new Error('STAMP target missing');
+      element.classList.remove('compaction-state');
+      void element.offsetWidth;
+      element.classList.add('compaction-state');
+      await new Promise((resolveFrame) => requestAnimationFrame(resolveFrame));
+    })()`);
+    if (!reducedMotion) await seekMotion(client, stampSelector, 0.5);
+    stampFrames.push(await captureMotionFrame(
+      client,
+      outputPath,
+      `motion-stamp-02-${reducedMotion ? "instant" : "mid"}.png`,
+      ".compaction-marker",
+      stampSelector,
+      "::after",
+    ));
+    const stampCompletion = await finishMotion(client, stampSelector);
+    stampFrames.push({
+      ...(await captureMotionFrame(
+        client,
+        outputPath,
+        "motion-stamp-03-settled.png",
+        ".compaction-marker",
+        stampSelector,
+        "::after",
+      )),
+      completedMotions: stampCompletion,
+    });
+    assertMotionCase("STAMP", stampFrames, durationsMs.STAMP, reducedMotion);
+    if (["opacity", "transform"].some((property) =>
+      stampFrames[0].state.visualStyle[property]
+        !== stampFrames[2].state.visualStyle[property])) {
+      throw new Error("STAMP retained a visual effect after completion");
+    }
+    await cancelMotion(client, stampSelector);
+    cases.push({
+      name: "STAMP",
+      trigger: "terminal compaction DONE state",
+      frames: stampFrames,
+    });
   }
-  await cancelMotion(client, stampSelector);
-  cases.push({
-    name: "STAMP",
-    trigger: "terminal compaction DONE state",
-    frames: stampFrames,
-  });
 
   return {
     viewport: [width, height],
     reducedMotion,
+    durationsMs,
+    skipped: skipped.map((name) => `${name} disabled by theme`),
     cases,
   };
 }
@@ -2326,6 +2390,11 @@ async function stopBrowser(child) {
 async function main() {
   if (surfaceMode && !visualFixture) throw new Error("--surfaces requires --fixture");
   if (motionEvidence && !visualFixture) throw new Error("--motion requires --fixture");
+  if (args.has("theme") && themeId === null) throw new Error("--theme requires a value");
+  if (themeId && !visualFixture) throw new Error("--theme requires --fixture");
+  if (themeId && !colorSchemes.includes(themeId)) {
+    throw new Error(`--theme must be one of: ${colorSchemes.join(", ")}`);
+  }
   if (surfaceMode && (surfaceOption === true
     || typeof surfaceOption !== "string"
     || surfaceOption.trim() === "")) {
@@ -2433,6 +2502,9 @@ async function main() {
       }
     }
     const setupFlow = visualFixture ? null : await checkSetupFlow(client);
+    const rootSkin = visualFixture
+      ? await client.evaluate("document.documentElement.dataset.skin ?? null")
+      : null;
     client.close();
 
     const manifest = {
@@ -2440,6 +2512,8 @@ async function main() {
       url: baseUrl,
       browser,
       reducedMotion,
+      theme: themeId,
+      skin: rootSkin,
       ...(visualFixture
         ? surfaceMode
           ? { fixture: "secondary", surfaceGroup: requestedSurfaceGroup }
