@@ -254,16 +254,7 @@
   gap: 4px;
   padding: 5px;
   border: 1px solid var(--line-strong);
-  background: #141719;
 }
-
-.color-scheme-swatch i:nth-child(1) { background: #181c1e; }
-.color-scheme-swatch i:nth-child(2) { background: #1d2225; }
-.color-scheme-swatch i:nth-child(3) { background: #d97965; }
-.classic-rebel-swatch { background: #171a1b; }
-.classic-rebel-swatch i:nth-child(1) { background: #1d2222; }
-.classic-rebel-swatch i:nth-child(2) { background: #d8d1c1; }
-.classic-rebel-swatch i:nth-child(3) { background: #b94f43; }
 
 .preference-unsaved {
   display: flex;

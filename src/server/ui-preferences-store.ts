@@ -2,7 +2,11 @@ import { randomUUID } from "node:crypto";
 import { readFile, mkdir, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname, basename, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import type { ColorScheme, UiPreferences } from "../shared/protocol.js";
+import {
+  COLOR_SCHEMES,
+  type ColorScheme,
+  type UiPreferences,
+} from "../shared/protocol.js";
 
 export const UI_PREFERENCES_VERSION = 1;
 export const DEFAULT_UI_PREFERENCES: Readonly<UiPreferences> = Object.freeze({
@@ -24,7 +28,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function isColorScheme(value: unknown): value is ColorScheme {
-  return value === "quiet-rebel" || value === "classic-rebel";
+  return typeof value === "string"
+    && (COLOR_SCHEMES as readonly string[]).includes(value);
 }
 
 function parseDocument(raw: string): UiPreferencesDocument {

@@ -1,14 +1,10 @@
 import type { RefObject } from "react";
 import type { ColorScheme, PublicState } from "../../../shared/protocol";
+import { THEMES } from "../../lib/theme-registry";
 import type {
   CustomProviderMutationResult,
   CustomProvidersView,
 } from "./CustomProvidersSettingsPage";
-
-const COLOR_SCHEME_LABELS: Record<ColorScheme, string> = {
-  "quiet-rebel": "Quiet Rebel",
-  "classic-rebel": "Classic Rebel",
-};
 
 export function appearanceSummary(
   colorScheme: ColorScheme,
@@ -16,7 +12,7 @@ export function appearanceSummary(
   unsaved: boolean,
 ): string {
   const status = pending ? "正在保存" : unsaved ? "尚未保存" : "已保存";
-  return `${COLOR_SCHEME_LABELS[colorScheme]} · ${status}`;
+  return `${THEMES[colorScheme].name} · ${status}`;
 }
 
 export function modelConnectionsSummary(

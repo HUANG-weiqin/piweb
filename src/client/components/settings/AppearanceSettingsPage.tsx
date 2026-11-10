@@ -1,4 +1,5 @@
 import type { ColorScheme } from "../../../shared/protocol";
+import { THEME_LIST } from "../../lib/theme-registry";
 
 interface AppearanceSettingsPageProps {
   colorScheme: ColorScheme;
@@ -30,32 +31,23 @@ export function AppearanceSettingsPage({
     </div>
     <fieldset className="color-scheme-options" disabled={colorSchemePending}>
       <legend>选择配色</legend>
-      <label className="color-scheme-option">
+      {THEME_LIST.map((theme) => <label className="color-scheme-option" key={theme.id}>
         <input
           type="radio"
           name="color-scheme"
-          value="quiet-rebel"
-          checked={colorScheme === "quiet-rebel"}
-          onChange={() => onColorSchemeChange("quiet-rebel")}
+          value={theme.id}
+          checked={colorScheme === theme.id}
+          onChange={() => onColorSchemeChange(theme.id)}
         />
-        <span className="color-scheme-swatch quiet-rebel-swatch" aria-hidden="true">
-          <i /><i /><i />
+        <span
+          className="color-scheme-swatch"
+          style={{ background: theme.swatch.frame }}
+          aria-hidden="true"
+        >
+          {theme.swatch.chips.map((chip, index) => <i key={index} style={{ background: chip }} />)}
         </span>
-        <span><strong>Quiet Rebel</strong><small>低对比深色，保留克制的氧化红强调</small></span>
-      </label>
-      <label className="color-scheme-option">
-        <input
-          type="radio"
-          name="color-scheme"
-          value="classic-rebel"
-          checked={colorScheme === "classic-rebel"}
-          onChange={() => onColorSchemeChange("classic-rebel")}
-        />
-        <span className="color-scheme-swatch classic-rebel-swatch" aria-hidden="true">
-          <i /><i /><i />
-        </span>
-        <span><strong>Classic Rebel</strong><small>原有的高反差暗色与纸张色</small></span>
-      </label>
+        <span><strong>{theme.name}</strong><small>{theme.description}</small></span>
+      </label>)}
     </fieldset>
     {colorSchemePending && <p className="inline-status" role="status">正在保存配色…</p>}
     {colorSchemeUnsaved && !colorSchemePending && <div className="preference-unsaved">

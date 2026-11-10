@@ -907,6 +907,9 @@ describe("App", () => {
       "data-color-scheme",
       "classic-rebel",
     );
+    // Skin and tone follow the registry together with the palette.
+    expect(document.documentElement).toHaveAttribute("data-skin", "rebel");
+    expect(document.documentElement).toHaveAttribute("data-tone", "poster");
     const command = latestCommand("set_color_scheme");
     expect(command.colorScheme).toBe("classic-rebel");
     expect(screen.getByRole("radio", { name: /Quiet Rebel/ })).toBeDisabled();
@@ -928,6 +931,7 @@ describe("App", () => {
       "data-color-scheme",
       "quiet-rebel",
     );
+    expect(document.documentElement).toHaveAttribute("data-tone", "quiet");
     expect(screen.getByRole("radio", { name: /Quiet Rebel/ })).toBeChecked();
   });
 

@@ -1783,17 +1783,18 @@
   }
 }
 
-/* Quiet Rebel keeps everyday work surfaces dark and reserves oxide for edges
-   and primary actions. Classic Rebel intentionally retains the poster palette. */
-html:not([data-color-scheme="classic-rebel"]) .conversation-sidebar-item.selected::before {
+/* Quiet tone (data-tone="quiet", declared per theme in the theme registry) keeps
+   everyday work surfaces dark, colors run states by role, and reserves the accent
+   for edges and primary actions. Poster tone keeps the paper-and-oxide mapping. */
+html[data-tone="quiet"] .conversation-sidebar-item.selected::before {
   background: var(--intent-soft);
 }
 
-html:not([data-color-scheme="classic-rebel"]) .conversation-sidebar-item.selected::after {
+html[data-tone="quiet"] .conversation-sidebar-item.selected::after {
   background: var(--intent);
 }
 
-html:not([data-color-scheme="classic-rebel"])
+html[data-tone="quiet"]
   .conversation-sidebar-item.selected :is(
     .conversation-sidebar-title,
     .conversation-sidebar-primary,
@@ -1803,58 +1804,58 @@ html:not([data-color-scheme="classic-rebel"])
   color: var(--rebel-paper);
 }
 
-html:not([data-color-scheme="classic-rebel"])
+html[data-tone="quiet"]
   .conversation-sidebar-item.selected .conversation-sidebar-kind {
   color: var(--rebel-paper-muted);
 }
 
-html:not([data-color-scheme="classic-rebel"])
+html[data-tone="quiet"]
   .conversation-sidebar-item.selected .conversation-sidebar-ordinal {
   color: var(--intent);
 }
 
-html:not([data-color-scheme="classic-rebel"]) .topbar-conversation-status {
+html[data-tone="quiet"] .topbar-conversation-status {
   color: var(--intent);
   background: var(--intent-soft);
 }
 
-html:not([data-color-scheme="classic-rebel"]) .topbar-conversation-status > span {
+html[data-tone="quiet"] .topbar-conversation-status > span {
   color: var(--intent);
 }
 
-html:not([data-color-scheme="classic-rebel"]) .topbar-conversation-status.status-idle {
+html[data-tone="quiet"] .topbar-conversation-status.status-idle {
   color: var(--rebel-paper);
   background: var(--rebel-raised);
 }
 
-html:not([data-color-scheme="classic-rebel"])
+html[data-tone="quiet"]
   .topbar-conversation-status.status-idle > span {
   color: var(--rebel-paper-muted);
 }
 
-html:not([data-color-scheme="classic-rebel"])
+html[data-tone="quiet"]
   .mission-objective.is-active {
   color: var(--intent);
   background: var(--intent-soft);
 }
 
-html:not([data-color-scheme="classic-rebel"])
+html[data-tone="quiet"]
   .mission-objective.is-active :is(.mission-objective-mark, .mission-objective-copy small) {
   border-color: var(--intent);
   color: var(--intent);
   background: var(--intent);
 }
 
-html:not([data-color-scheme="classic-rebel"])
+html[data-tone="quiet"]
   .conversation-activity-indicator:is(.activity-running, .activity-queued) {
   border-color: var(--intent);
   color: var(--intent);
   background: var(--intent-soft);
 }
 
-html:not([data-color-scheme="classic-rebel"])
+html[data-tone="quiet"]
   .conversation-activity-indicator.activity-waiting,
-html:not([data-color-scheme="classic-rebel"])
+html[data-tone="quiet"]
   .conversation-sidebar-item.activity-waiting.selected .conversation-activity-indicator {
   border-color: var(--warning);
   color: var(--warning);
@@ -1862,50 +1863,50 @@ html:not([data-color-scheme="classic-rebel"])
   box-shadow: none;
 }
 
-html:not([data-color-scheme="classic-rebel"])
+html[data-tone="quiet"]
   .conversation-activity-indicator.activity-cancelling {
   color: var(--danger);
   background: var(--danger-soft);
 }
 
-html:not([data-color-scheme="classic-rebel"]) .app-shell .composer,
-html:not([data-color-scheme="classic-rebel"]) .app-shell .composer-actions {
+html[data-tone="quiet"] .app-shell .composer,
+html[data-tone="quiet"] .app-shell .composer-actions {
   color: var(--rebel-paper);
   background: var(--rebel-raised);
 }
 
-html:not([data-color-scheme="classic-rebel"]) .app-shell .composer textarea {
+html[data-tone="quiet"] .app-shell .composer textarea {
   color: var(--rebel-paper);
   background: var(--rebel-raised);
 }
 
-html:not([data-color-scheme="classic-rebel"])
+html[data-tone="quiet"]
   .app-shell .composer:focus-within textarea {
   background: var(--soft);
 }
 
-html:not([data-color-scheme="classic-rebel"])
+html[data-tone="quiet"]
   .app-shell .composer textarea::placeholder {
   color: var(--rebel-paper-muted);
 }
 
-html:not([data-color-scheme="classic-rebel"])
+html[data-tone="quiet"]
   .transcript .commitment-card.is-edit-budget > summary {
   color: var(--rebel-paper);
   background: var(--rebel-raised);
 }
 
-html:not([data-color-scheme="classic-rebel"])
+html[data-tone="quiet"]
   .transcript .commitment-card.is-edit-budget > summary strong {
   color: var(--intent);
 }
 
-html:not([data-color-scheme="classic-rebel"]) .drawer {
+html[data-tone="quiet"] .drawer {
   background:
     var(--decor-bg-drawer-non-classic, var(--rebel-black));
 }
 
-html:not([data-color-scheme="classic-rebel"])
+html[data-tone="quiet"]
   .modal:not(.role-manager-dialog):not(.conversation-role-dialog) {
   border-color: var(--rebel-line);
   color: var(--rebel-paper);
@@ -1913,13 +1914,13 @@ html:not([data-color-scheme="classic-rebel"])
   box-shadow: var(--decor-shadow-modal-tinted, none);
 }
 
-html:not([data-color-scheme="classic-rebel"])
+html[data-tone="quiet"]
   .modal:not(.role-manager-dialog):not(.conversation-role-dialog)
   :is(.modal-description, .progress, small, .directory-browser-note) {
   color: var(--rebel-paper-muted);
 }
 
-html:not([data-color-scheme="classic-rebel"])
+html[data-tone="quiet"]
   .modal:not(.role-manager-dialog):not(.conversation-role-dialog)
   :is(input, textarea, select, .directory-browser-location code, .directory-browser-list) {
   border-color: var(--rebel-line);
@@ -1927,34 +1928,34 @@ html:not([data-color-scheme="classic-rebel"])
   background: var(--panel-strong);
 }
 
-html:not([data-color-scheme="classic-rebel"])
+html[data-tone="quiet"]
   .modal:not(.role-manager-dialog):not(.conversation-role-dialog)
   :is(button.ghost, .option-button, .directory-browser-entry) {
   color: var(--rebel-paper);
 }
 
-html:not([data-color-scheme="classic-rebel"])
+html[data-tone="quiet"]
   .modal:not(.role-manager-dialog):not(.conversation-role-dialog)
   .directory-browser-entry:not(:disabled):hover {
   color: var(--rebel-paper);
   background: var(--soft-hover);
 }
 
-html:not([data-color-scheme="classic-rebel"])
+html[data-tone="quiet"]
   :is(.inline-status.success, .status-badge.success) {
   border-color: var(--success);
   color: var(--success);
   background: var(--success-soft);
 }
 
-html:not([data-color-scheme="classic-rebel"])
+html[data-tone="quiet"]
   :is(.inline-status.error, .credential-confirm, .directory-browser-error) {
   border-color: var(--danger);
   color: var(--danger);
   background: var(--danger-soft);
 }
 
-html:not([data-color-scheme="classic-rebel"])
+html[data-tone="quiet"]
   :is(.topbar-conversation-status, .mobile-chat-identity small):is(
     .status-queued,
     .status-waiting
@@ -1963,23 +1964,23 @@ html:not([data-color-scheme="classic-rebel"])
   background: var(--warning-soft);
 }
 
-html:not([data-color-scheme="classic-rebel"])
+html[data-tone="quiet"]
   .topbar-conversation-status:is(.status-queued, .status-waiting) > span {
   color: var(--warning);
 }
 
-html:not([data-color-scheme="classic-rebel"])
+html[data-tone="quiet"]
   :is(.topbar-conversation-status, .mobile-chat-identity small).status-cancelling {
   color: var(--danger);
   background: var(--danger-soft);
 }
 
-html:not([data-color-scheme="classic-rebel"])
+html[data-tone="quiet"]
   .topbar-conversation-status.status-cancelling > span {
   color: var(--danger);
 }
 
-html:not([data-color-scheme="classic-rebel"])
+html[data-tone="quiet"]
   .mobile-chat-identity small:is(
     .status-in-progress,
     .status-active,
@@ -1988,24 +1989,24 @@ html:not([data-color-scheme="classic-rebel"])
   color: var(--intent);
 }
 
-html:not([data-color-scheme="classic-rebel"])
+html[data-tone="quiet"]
   .workspace-rail-item.running:not(.active) {
   background: var(--intent-soft);
 }
 
-html:not([data-color-scheme="classic-rebel"])
+html[data-tone="quiet"]
   .workspace-rail-item.running:not(.active) :is(.workspace-rail-state, .workspace-rail-busy) {
   color: var(--intent);
   background: var(--intent);
 }
 
-html:not([data-color-scheme="classic-rebel"])
+html[data-tone="quiet"]
   .transcript .message-event-header.is-running .message-event-state {
   color: var(--intent);
   background: var(--intent-soft);
 }
 
-html:not([data-color-scheme="classic-rebel"])
+html[data-tone="quiet"]
   .transcript .assistant-activity-group.is-active :is(
     .activity-group-label,
     .activity-group-status
@@ -2013,41 +2014,41 @@ html:not([data-color-scheme="classic-rebel"])
   color: var(--intent);
 }
 
-html:not([data-color-scheme="classic-rebel"])
+html[data-tone="quiet"]
   .transcript .assistant-activity-group.is-complete .activity-group-status,
-html:not([data-color-scheme="classic-rebel"])
+html[data-tone="quiet"]
   .transcript .tool-done .tool-status {
   color: var(--success);
 }
 
-html:not([data-color-scheme="classic-rebel"])
+html[data-tone="quiet"]
   .transcript .assistant-activity-group.is-error :is(
     .activity-group-label,
     .activity-group-status
   ),
-html:not([data-color-scheme="classic-rebel"])
+html[data-tone="quiet"]
   .transcript .tool-error .tool-status {
   color: var(--danger);
 }
 
-html:not([data-color-scheme="classic-rebel"])
+html[data-tone="quiet"]
   .transcript .tool-running .tool-status {
   color: var(--intent);
 }
 
-html:not([data-color-scheme="classic-rebel"])
+html[data-tone="quiet"]
   .transcript .tool-pending .tool-status {
   color: var(--warning);
 }
 
-html:not([data-color-scheme="classic-rebel"])
+html[data-tone="quiet"]
   .transcript .message.error {
   border-left-color: var(--danger);
   color: var(--danger);
   background: var(--danger-soft);
 }
 
-html:not([data-color-scheme="classic-rebel"])
+html[data-tone="quiet"]
   .transcript .commitment-card > summary {
   border-color: var(--rebel-line);
   border-left-color: var(--intent);
@@ -2055,12 +2056,12 @@ html:not([data-color-scheme="classic-rebel"])
   background: var(--rebel-raised);
 }
 
-html:not([data-color-scheme="classic-rebel"])
+html[data-tone="quiet"]
   .transcript .commitment-card.is-warning > summary {
   border-left-color: var(--warning);
 }
 
-html:not([data-color-scheme="classic-rebel"])
+html[data-tone="quiet"]
   .transcript .commitment-card.is-error > summary {
   border-color: var(--rebel-line);
   border-left-color: var(--danger);
@@ -2068,70 +2069,70 @@ html:not([data-color-scheme="classic-rebel"])
   background: var(--danger-soft);
 }
 
-html:not([data-color-scheme="classic-rebel"])
+html[data-tone="quiet"]
   .transcript .commitment-card > summary:hover {
   background: var(--soft-hover);
 }
 
-html:not([data-color-scheme="classic-rebel"])
+html[data-tone="quiet"]
   .transcript .commitment-card.is-error > summary:hover {
   background: color-mix(in srgb, var(--danger-soft) 82%, var(--soft-hover));
 }
 
-html:not([data-color-scheme="classic-rebel"])
+html[data-tone="quiet"]
   .transcript > .session-message-card:is(.state-failed, .state-aborted) {
   border-left-color: var(--danger);
   background: var(--danger-soft);
 }
 
-html:not([data-color-scheme="classic-rebel"])
+html[data-tone="quiet"]
   .app-shell .pending-admission-item {
   border-left-color: var(--warning);
 }
 
-html:not([data-color-scheme="classic-rebel"])
+html[data-tone="quiet"]
   .app-shell .pending-admission-status {
   border-color: var(--warning);
   color: var(--warning);
 }
 
-html:not([data-color-scheme="classic-rebel"])
+html[data-tone="quiet"]
   .app-shell .loop-list-status.executing,
-html:not([data-color-scheme="classic-rebel"])
+html[data-tone="quiet"]
   .app-shell .loop-list-item.active .loop-list-item-marker {
   border-color: var(--intent);
   color: var(--intent);
 }
 
-html:not([data-color-scheme="classic-rebel"])
+html[data-tone="quiet"]
   .app-shell .loop-list-item.active .loop-list-item-text {
   color: color-mix(in srgb, var(--intent) 82%, var(--rebel-paper));
 }
 
-html:not([data-color-scheme="classic-rebel"])
+html[data-tone="quiet"]
   .app-shell .loop-list-status.completed {
   color: var(--success);
 }
 
-html:not([data-color-scheme="classic-rebel"])
+html[data-tone="quiet"]
   .app-shell .loop-list-item.completed .loop-list-item-marker,
-html:not([data-color-scheme="classic-rebel"])
+html[data-tone="quiet"]
   .mission-objective.is-completed .mission-objective-mark {
   border-color: var(--success);
   color: var(--on-accent);
   background: var(--success);
 }
 
-html:not([data-color-scheme="classic-rebel"])
+html[data-tone="quiet"]
   .mobile-chat-header button:not(:disabled):hover,
-html:not([data-color-scheme="classic-rebel"])
+html[data-tone="quiet"]
   .mobile-composer-launchers button[aria-expanded="true"] {
   border-color: var(--intent);
   color: var(--intent);
   background: var(--intent-soft);
 }
 
-html:not([data-color-scheme="classic-rebel"])
+html[data-tone="quiet"]
   .mobile-composer-launchers button[aria-expanded="true"] span {
   color: var(--intent);
 }

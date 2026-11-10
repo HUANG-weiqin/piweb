@@ -44,10 +44,6 @@ const SECONDARY_SURFACE_NAMES = [
 ];
 
 const DEFAULT_THEMES = ["quiet-rebel", "classic-rebel"];
-const DEFAULT_SKIN_MAP = {
-  "quiet-rebel": "rebel",
-  "classic-rebel": "rebel",
-};
 
 const PROPERTIES = [
   "color",
@@ -298,16 +294,6 @@ function parseList(value) {
     .filter(Boolean);
 }
 
-function parseSkinMap(value) {
-  const map = {};
-  for (const pair of parseList(value)) {
-    const [id, skin] = pair.split("=").map((part) => part.trim());
-    if (!id || !skin) throw new Error(`Invalid --skin-map entry: ${pair}`);
-    map[id] = skin;
-  }
-  return map;
-}
-
 async function waitForFixture(client, scene, timeoutMs = 20_000) {
   const readyExpression = scene.fixture === "workbench"
     ? `!!document.querySelector('[data-visual-fixture="populated-workbench"] .loop-list-toggle')`
@@ -346,14 +332,16 @@ async function prepareWorkbench(client, scene) {
   }
 }
 
-async function captureScene(client, scene, theme, skin) {
+async function captureScene(client, scene, theme) {
   await client.call("Emulation.setDeviceMetricsOverride", {
     width: scene.width,
     height: scene.height,
     deviceScaleFactor: 1,
     mobile: false,
   });
-  const navigation = await client.call("Page.navigate", { url: scene.url });
+  const themedUrl = new URL(scene.url);
+  themedUrl.searchParams.set("theme", theme);
+  const navigation = await client.call("Page.navigate", { url: themedUrl.toString() });
   if (navigation.errorText) throw new Error(`Navigation failed for ${scene.name}: ${navigation.errorText}`);
   await new Promise((resolveDelay) => setTimeout(resolveDelay, 600));
   await waitForFixture(client, scene);
@@ -362,8 +350,9 @@ async function captureScene(client, scene, theme, skin) {
   const expression = `(async () => {
     const frame = () => new Promise((resolveFrame) => requestAnimationFrame(() => resolveFrame()));
     const sleep = (ms) => new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
-    document.documentElement.dataset.colorScheme = ${JSON.stringify(theme)};
-    document.documentElement.dataset.skin = ${JSON.stringify(skin)};
+    if (document.documentElement.dataset.colorScheme !== ${JSON.stringify(theme)}) {
+      throw new Error("fixture did not apply theme " + ${JSON.stringify(theme)} + " (unknown theme id?)");
+    }
     await frame();
     await frame();
     await sleep(300);
@@ -387,7 +376,6 @@ async function capture(options) {
 
   const themes = options.has("themes") ? parseList(options.get("themes")) : DEFAULT_THEMES;
   if (themes.length === 0) throw new Error("--themes is empty");
-  const skinMap = { ...DEFAULT_SKIN_MAP, ...(options.has("skin-map") ? parseSkinMap(options.get("skin-map")) : {}) };
   const sceneFilters = options.has("scenes") ? parseList(options.get("scenes")) : null;
 
   let scenes = buildScenes(url);
@@ -431,14 +419,13 @@ async function capture(options) {
     let elementTotal = 0;
     for (const [index, scene] of scenes.entries()) {
       for (const theme of themes) {
-        const skin = skinMap[theme] ?? theme;
         const stepStarted = Date.now();
-        const record = await captureScene(client, scene, theme, skin);
+        const record = await captureScene(client, scene, theme);
         const count = Object.keys(record).length;
         elementTotal += count;
         scenesOut[`${scene.name}|${theme}`] = record;
         console.log(
-          `[${index + 1}/${scenes.length}] ${scene.name} | ${theme} (skin ${skin}): ${count} entries, ${Date.now() - stepStarted} ms`,
+          `[${index + 1}/${scenes.length}] ${scene.name} | ${theme}: ${count} entries, ${Date.now() - stepStarted} ms`,
         );
       }
     }
@@ -588,7 +575,7 @@ async function main() {
     await compare(positional, options);
   } else {
     throw new Error(
-      "Usage:\n  node scripts/theme-snapshot.mjs capture --url <url> --out <file.json> [--themes a,b] [--scenes x,y] [--skin-map id=skin,...]\n  node scripts/theme-snapshot.mjs compare <a.json> <b.json> [--limit 40]",
+      "Usage:\n  node scripts/theme-snapshot.mjs capture --url <url> --out <file.json> [--themes a,b] [--scenes x,y]\n  node scripts/theme-snapshot.mjs compare <a.json> <b.json> [--limit 40]",
     );
   }
 }

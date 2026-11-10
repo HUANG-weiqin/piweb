@@ -90,6 +90,7 @@ import {
 } from "./lib/phone-history-route";
 import { PiSocket } from "./lib/socket";
 import { readStoredString, writeStoredString } from "./lib/storage";
+import { applyTheme } from "./lib/theme-registry";
 import {
   createTransitionTimingOwner,
   type ClientTransitionObservation,
@@ -922,7 +923,7 @@ export function App() {
   };
   const visibleColorScheme = unsavedColorScheme ?? committedColorScheme;
   useLayoutEffect(() => {
-    document.documentElement.dataset.colorScheme = visibleColorScheme;
+    applyTheme(document.documentElement, visibleColorScheme);
   }, [visibleColorScheme]);
   const [roleManagerOpen, setRoleManagerOpen] = useState(false);
   const [roleManagerInitialRoleId, setRoleManagerInitialRoleId] =
