@@ -45,10 +45,10 @@ export const THEMES: Readonly<Record<ColorScheme, ThemeDefinition>> = {
   "code-dark": {
     id: "code-dark",
     name: "Code Dark",
-    description: "编辑器式平直深色：直角、细线、无装饰，蓝色强调",
+    description: "编辑器式平直深色：直角、细线、无装饰，天蓝强调",
     skin: "code",
     tone: "quiet",
-    swatch: { frame: "#1e1e1e", chips: ["#252526", "#cccccc", "#007acc"] },
+    swatch: { frame: "#121314", chips: ["#191a1b", "#bfbfbf", "#3994bc"] },
   },
 };
 

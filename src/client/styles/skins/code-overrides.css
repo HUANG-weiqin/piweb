@@ -54,6 +54,16 @@ html[data-skin="code"] :is(
   --rebel-black: var(--foreground);
 }
 
+/* The page-wide button rule paints the add-role card with black, which the swap
+   above turns light. At rest it is a dashed outline on the page instead; its
+   hover keeps the swapped raised fill. */
+html[data-skin="code"] .role-selection-page .role-card-add:not(:hover) {
+  border-color: var(--line-strong);
+  border-style: dashed;
+  color: var(--foreground);
+  background: transparent;
+}
+
 /* Inside the role dialogs black also paints blocks (header, buttons, selected
    row) under paper text, which the swap would turn light. Map those blocks to
    their editor equivalents instead. */
@@ -92,9 +102,14 @@ html[data-skin="code"] :is(.modal.role-manager-dialog, .modal.conversation-role-
   background: var(--intent-soft);
 }
 
-/* Brand edge strips under the title bar and on the mission header. */
+/* Brand edge strips under the title bar, on the mission header and on the left
+   edge of full-page screens, and the small tab bar on top of each role card. */
 html[data-skin="code"] .app-shell .topbar::after,
-html[data-skin="code"] .mission-command-header::after {
+html[data-skin="code"] .mission-command-header::after,
+html[data-skin="code"] .setup-shell::before,
+html[data-skin="code"] .workspace-placeholder::before,
+html[data-skin="code"] .role-selection-page::before,
+html[data-skin="code"] .role-card::before {
   background: transparent;
 }
 
