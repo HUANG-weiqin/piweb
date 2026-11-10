@@ -1,0 +1,45 @@
+/*
+ * Code skin: a flat editor look. System UI font, a compressed type ramp
+ * (small labels grow, large display text shrinks), near-square corners,
+ * thin strokes, no letter tracking, short eased motion and one soft widget
+ * shadow for floating surfaces. It defines no Rebel decoration tokens, so
+ * clip shapes, tilts, hard shadows and gradients all fall back to neutral.
+ */
+
+html[data-skin="code"] {
+  --font-ui: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI", system-ui, "Ubuntu", "Droid Sans", sans-serif;
+  --font-label: var(--font-ui);
+  --font-label-sans: var(--font-ui);
+  --font-mono: Consolas, "Cascadia Code", "Courier New", monospace;
+  --font-display: var(--font-ui);
+  /* font-size = reference * 0.5 + 6.5px: 8px -> 10.5px, 13px -> 13px, 27px -> 20px. */
+  --type-scale: 0.5;
+  --type-shift: 6.5px;
+  /* Display headings and numerals stop at editor-title size; weights stop at semibold. */
+  --type-max: 20px;
+  --weight-max: 600;
+  --radius-scale: 0.25;
+  --radius-pill: 999px;
+  --stroke-scale: 0.5;
+  --tracking-scale: 0;
+  --motion-punch-duration: 100ms;
+  --motion-slash-duration: 120ms;
+  /* The compaction stamp is a Rebel gesture; 0ms turns it off. */
+  --motion-stamp-duration: 0ms;
+  --motion-hit-easing: ease-out;
+  --motion-steps-2: ease-out;
+  --motion-steps-3: ease-out;
+  --shadow-widget: 0 0 8px 2px rgb(0 0 0 / 36%);
+  --shadow-sm: none;
+  --shadow-lg: var(--shadow-widget);
+  --shadow-card: none;
+  --shadow-card-2: none;
+  --shadow-panel: none;
+  --shadow-composer: none;
+  --shadow-sidebar: none;
+  --shadow-drawer: var(--shadow-widget);
+  --shadow-sheet: var(--shadow-widget);
+  --shadow-float: var(--shadow-widget);
+  /* Title bar sits on the side-bar shade, like an editor's tab strip. */
+  --decor-bg-topbar: var(--scheme-rebel-rail-black);
+}

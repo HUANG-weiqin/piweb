@@ -139,9 +139,10 @@ export const MAX_TRANSITION_DIAGNOSTIC_PHASE_MS = 60 * 60 * 1_000;
 // v75: exact-focus local file reads return bounded inert bytes, separate from image previews.
 // v76: providers project an API-key capability independently from subscription
 // OAuth login, so a provider that supports both offers both entry points.
-export const PROTOCOL_VERSION = 76;
+// v77: the code-dark color scheme joins the user UI preference enum.
+export const PROTOCOL_VERSION = 77;
 export const OBSERVATION_FATAL_CLOSE_CODE = 4002;
-export const COLOR_SCHEMES = ["quiet-rebel", "classic-rebel"] as const;
+export const COLOR_SCHEMES = ["quiet-rebel", "classic-rebel", "code-dark"] as const;
 export type ColorScheme = typeof COLOR_SCHEMES[number];
 export interface UiPreferences {
   colorScheme: ColorScheme;

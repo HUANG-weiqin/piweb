@@ -1,0 +1,77 @@
+/*
+ * Code Dark palette: VS Code's default "Dark+" workbench colors (values read
+ * from the editor's own theme files and color registry; the matching VS Code
+ * key is noted where it is not obvious). Colors only; shapes and decoration
+ * belong to the skin. The --scheme-rebel-* names are the shared region roles
+ * every palette fills: black = main surface (editor), rail-black = workspace
+ * rail (activity bar), sidebar-black = conversation list (side bar),
+ * raised = lifted surfaces, paper = primary text, red = brand accent.
+ */
+
+html[data-color-scheme="code-dark"] {
+  color-scheme: dark;
+  --foreground: #cccccc; /* foreground */
+  --canvas: #1e1e1e; /* editor.background */
+  --panel: #252526; /* sideBar / editorWidget / tabs strip */
+  --panel-strong: #3c3c3c; /* input.background */
+  --soft: #2a2d2e; /* list.hoverBackground */
+  --soft-hover: #37373d; /* list.inactiveSelectionBackground */
+  --line: #303031; /* widget.border */
+  --line-strong: #454545; /* menu.border */
+  --muted: #9d9d9d; /* descriptionForeground over the editor */
+  --intent: #3794ff; /* textLink / info */
+  --intent-soft: #04395e; /* list.activeSelectionBackground */
+  --intent-line: #007fd4; /* focusBorder */
+  --accent: #0e639c; /* button.background */
+  --accent-hover: #1177bb; /* button.hoverBackground */
+  --on-accent: #ffffff;
+  --success: #89d185; /* charts.green */
+  --success-soft: #1f3322;
+  --warning: #cca700; /* editorWarning.foreground */
+  --warning-soft: #352a05; /* inputValidation.warningBackground */
+  --danger: #f48771; /* errorForeground */
+  --danger-solid: #be1100; /* inputValidation.errorBorder */
+  --danger-soft: #5a1d1d; /* inputValidation.errorBackground */
+  --focus: #007fd4; /* focusBorder */
+  --scheme-rebel-black: #1e1e1e; /* editor.background */
+  --scheme-rebel-rail-black: #333333; /* activityBar.background */
+  --scheme-rebel-sidebar-black: #252526; /* sideBar.background */
+  --scheme-rebel-rail-raised: #2a2d2e; /* list.hoverBackground */
+  --scheme-rebel-app-raised: #252526; /* editorWidget.background */
+  --scheme-rebel-overlay-raised: #252526; /* quickInput / menu */
+  --scheme-rebel-paper: #cccccc; /* foreground */
+  --scheme-rebel-paper-muted: #9d9d9d;
+  --scheme-rebel-on-oxide: #ffffff;
+  --scheme-rebel-red: #007acc; /* statusBar / activityBarBadge */
+  --scheme-rebel-red-dark: #0e639c; /* button.background */
+  --scheme-rebel-rail-line: #3c3c3c;
+  --scheme-rebel-line: #303031; /* widget.border */
+  --cleanup-warning-text: #d7ba7d; /* textPreformat.foreground */
+  --cleanup-warning-strong: #e2c08d;
+  --status-active-text: #3794ff;
+  --loop-active-text: #9cdcfe;
+  --paper-lift: #ffffff;
+  --running-soft: rgb(55 148 255 / 12%);
+  --hover-veil: rgb(255 255 255 / 5%);
+  --scrollbar-thumb: rgb(121 121 121 / 40%); /* scrollbarSlider.background */
+  --sidebar-ordinal-text: #858585; /* editorLineNumber.foreground */
+  --sidebar-selected-kind-text: #cccccc;
+  --sidebar-meta-text: #a6a6a6; /* tab.inactiveForeground */
+  --sidebar-selected-meta-text: #d4d4d4;
+  --sidebar-action-text: #c5c5c5; /* icon.foreground */
+  --sidebar-selected-action-text: #ffffff;
+  --scrim-light: rgb(0 0 0 / 40%);
+  --on-danger: #ffffff;
+  --danger-shade: #000000;
+  --toast-text: #ffffff;
+  --toast-close-bg: rgb(255 255 255 / 8%);
+  --toast-close-hover-bg: rgb(255 255 255 / 16%);
+  --scrim-black-heavy: rgb(0 0 0 / 70%);
+  --scrim-black-mid: rgb(0 0 0 / 50%);
+  --status-error-text: #f14c4c; /* editorError.foreground */
+  --link-tint: #3794ff; /* textLink.foreground */
+  --scrim-heavy: rgb(0 0 0 / 60%);
+  --status-pending-text: #cca700;
+  --code-inline-text: #d7ba7d; /* textPreformat.foreground */
+  --code-inline-bg: rgb(255 255 255 / 10%); /* textPreformat.background */
+}

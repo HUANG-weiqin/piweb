@@ -1,0 +1,137 @@
+/*
+ * Code skin component overrides: the few editor cues the token layer cannot
+ * express. Loaded after all component CSS so equal-specificity selectors win.
+ * Rules here repaint only (background, color, outline, a decorative pseudo
+ * element's own box); they never move or resize content, so layout stays the
+ * same as every other skin. Colors still come from the palette.
+ */
+
+/* Workspace rail as an activity bar: the active item is marked by a 2px bar on
+   its left edge in the item's own text color, not by a filled block. */
+html[data-skin="code"] .workspace-rail-item.active::before {
+  inset: 0 auto 0 0;
+  width: 2px;
+  background: currentColor;
+}
+
+html[data-skin="code"] .workspace-rail-item:not(.active) {
+  color: var(--muted);
+}
+
+html[data-skin="code"] .workspace-rail-item:not(.active):not(:disabled):hover {
+  color: var(--foreground);
+}
+
+/* A running workspace is shown by its busy marker, not by a selection fill. */
+html[data-skin="code"] .workspace-rail-item.running:not(.active) {
+  background: transparent;
+}
+
+/* Selected conversation reads as a focused list row: fill plus a 1px focus
+   outline, without the offset accent block. */
+html[data-skin="code"] .conversation-sidebar-item.selected::before {
+  box-shadow: inset 0 0 0 1px var(--focus);
+}
+
+html[data-skin="code"] .conversation-sidebar-item.selected::after {
+  background: transparent;
+}
+
+/* Poster surfaces (setup card, role cards, role dialogs) use paper as the
+   surface and black as the ink. An editor has no light surfaces, so inside them
+   the two roles swap: paper becomes the raised panel, black the text. Hover,
+   disabled and button mixes follow from the same two roles. */
+html[data-skin="code"] :is(
+  .setup-card,
+  .role-card,
+  .role-card-add,
+  .role-selection-page button.ghost,
+  .workspace-placeholder button.ghost,
+  .modal.role-manager-dialog,
+  .modal.conversation-role-dialog
+) {
+  --rebel-paper: var(--scheme-rebel-app-raised);
+  --rebel-black: var(--foreground);
+}
+
+/* Inside the role dialogs black also paints blocks (header, buttons, selected
+   row) under paper text, which the swap would turn light. Map those blocks to
+   their editor equivalents instead. */
+html[data-skin="code"] :is(.modal.role-manager-dialog, .modal.conversation-role-dialog) .modal-header,
+html[data-skin="code"] :is(.modal.role-manager-dialog, .modal.conversation-role-dialog) .modal-header :is(h1, h2, h3) {
+  color: var(--foreground);
+  background: transparent;
+}
+
+/* The setup card's main action is a primary button. */
+html[data-skin="code"] .setup-card button:not(.ghost) {
+  color: var(--on-accent);
+  background: var(--accent);
+}
+
+html[data-skin="code"] .setup-card button:not(.ghost):not(:disabled):hover {
+  background: var(--accent-hover);
+}
+
+html[data-skin="code"] :is(.modal.role-manager-dialog, .modal.conversation-role-dialog) :is(button, .primary-link) {
+  color: var(--foreground);
+  background: var(--soft-hover);
+}
+
+html[data-skin="code"] :is(.modal.role-manager-dialog, .modal.conversation-role-dialog) .danger-button {
+  color: var(--on-danger);
+  background: var(--danger-solid);
+}
+
+html[data-skin="code"] :is(.modal.role-manager-dialog, .modal.conversation-role-dialog) .role-manager-list button:not(:disabled):hover {
+  background: var(--soft);
+}
+
+html[data-skin="code"] :is(.modal.role-manager-dialog, .modal.conversation-role-dialog) .role-manager-list button.selected {
+  color: var(--on-accent);
+  background: var(--intent-soft);
+}
+
+/* Brand edge strips under the title bar and on the mission header. */
+html[data-skin="code"] .app-shell .topbar::after,
+html[data-skin="code"] .mission-command-header::after {
+  background: transparent;
+}
+
+/* Titles, labels and values are plain text in an editor; the brand color stays
+   for actions, badges and marks. Run states keep the intent color. */
+html[data-skin="code"] .conversation-sidebar-header h2,
+html[data-skin="code"] .transcript .message.user .message-event-actor,
+html[data-skin="code"] .transcript .tool-section h4,
+html[data-skin="code"] .transcript .tool-result-details h5,
+html[data-skin="code"] .mission-objective-count strong,
+html[data-skin="code"] .mission-context-rate strong,
+html[data-skin="code"] .mission-context-threshold strong,
+html[data-skin="code"] .conversation-group-disclosure[aria-expanded="true"] .conversation-group-chevron {
+  color: var(--foreground);
+}
+
+html[data-skin="code"] .app-shell .brand > span:last-child::before,
+html[data-skin="code"] .topbar-session-ordinal,
+html[data-skin="code"] .topbar-conversation-eyebrow,
+html[data-skin="code"] .topbar-conversation-metadata > span + span::before,
+html[data-skin="code"] .app-shell .model-button::before,
+html[data-skin="code"] .transcript .commitment-eyebrow,
+html[data-skin="code"] .mission-command-kicker,
+html[data-skin="code"] .app-shell .composer-meta-key,
+html[data-skin="code"] .app-shell .composer-meta .context-summary::before {
+  color: var(--muted);
+}
+
+html[data-skin="code"] .transcript .compaction-state {
+  color: var(--success);
+}
+
+/* Primary action uses the editor's button color rather than the brand blue. */
+html[data-skin="code"] .app-shell .send:not(.stop) {
+  background: var(--accent);
+}
+
+html[data-skin="code"] .app-shell .send:not(.stop):not(:disabled):hover {
+  background: var(--accent-hover);
+}

@@ -5,7 +5,7 @@ import { COLOR_SCHEMES, type ColorScheme } from "../../shared/protocol";
  * size/radius/stroke/tracking dials, motion and elevation, plus any decoration
  * of its own. Decoration tokens a skin leaves undefined fall back to neutral.
  */
-export type ThemeSkin = "rebel";
+export type ThemeSkin = "rebel" | "code";
 
 /**
  * How work surfaces and run states are colored.
@@ -41,6 +41,14 @@ export const THEMES: Readonly<Record<ColorScheme, ThemeDefinition>> = {
     skin: "rebel",
     tone: "poster",
     swatch: { frame: "#171a1b", chips: ["#1d2222", "#d8d1c1", "#b94f43"] },
+  },
+  "code-dark": {
+    id: "code-dark",
+    name: "Code Dark",
+    description: "编辑器式平直深色：直角、细线、无装饰，蓝色强调",
+    skin: "code",
+    tone: "quiet",
+    swatch: { frame: "#1e1e1e", chips: ["#252526", "#cccccc", "#007acc"] },
   },
 };
 
