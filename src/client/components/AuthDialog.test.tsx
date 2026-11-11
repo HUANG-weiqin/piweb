@@ -101,6 +101,27 @@ describe("AuthDialog", () => {
       .toHaveAttribute("href", "https://example.test/device");
   });
 
+  it("submits a blank answer when the prompt allows it", () => {
+    const onRespond = vi.fn();
+    render(<AuthDialog
+      requestId="enterprise-request"
+      request={{
+        kind: "prompt",
+        message: "GitHub Enterprise URL/domain (blank for github.com)",
+        placeholder: "company.ghe.com",
+        allowEmpty: true,
+        secret: false,
+      }}
+      onRespond={onRespond}
+      onCancel={() => undefined}
+    />);
+
+    const submit = screen.getByRole("button", { name: "继续" });
+    expect(submit).toBeEnabled();
+    fireEvent.click(submit);
+    expect(onRespond).toHaveBeenCalledWith("enterprise-request", { value: "" });
+  });
+
   it("renders secret prompts as password inputs", () => {
     const onRespond = vi.fn();
     render(<AuthDialog

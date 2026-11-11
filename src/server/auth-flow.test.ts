@@ -35,9 +35,9 @@ describe("AuthFlowBroker", () => {
       ] },
     ];
     const expected = [
-      { kind: "prompt", message: "Code?", placeholder: "text", secret: false },
-      { kind: "prompt", message: "Token?", placeholder: "secret", secret: true },
-      { kind: "manual", message: "Callback?", placeholder: "manual" },
+      { kind: "prompt", message: "Code?", placeholder: "text", allowEmpty: true, secret: false },
+      { kind: "prompt", message: "Token?", placeholder: "secret", allowEmpty: true, secret: true },
+      { kind: "manual", message: "Callback?", placeholder: "manual", allowEmpty: true },
       { kind: "select", message: "Account?", options: [{ id: "one", label: "One" }] },
     ];
 

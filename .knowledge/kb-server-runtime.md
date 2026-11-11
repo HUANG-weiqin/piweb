@@ -191,6 +191,7 @@
 - OAuth/extension UI 这类同步 emitter 的请求必须先登记 pending waiter 再发事件；emit 抛错时要删除 waiter 并拒绝请求，避免同步回答丢失或残留悬挂状态。
 - 项目信任和当前 focus 的 extension hook 也可能在首个 PublicState 前等待浏览器；扩展 UI 回答同样不能排 actor queue，也不能要求 PublicState 已存在。
 - OAuth flow 由 authFlowId 关联；pending/cancelled tombstone 保证在 flow 创建前收到的 cancel 也能阻止它启动。宿主不能调用会在 provider 返回后自行同步 credential 的 `ModelRuntime.login()`；必须从 baseline provider 的 `auth.oauth` 取 login，在配置队列外传入 `AuthInteraction` 获取 credential，再复验 flow 未取消，并用 flow 开始时取得的一次性 provider revision 进入共享队列通过 `CredentialStore.modify` 提交。这样忽略 abort 的 provider 只能返回一个未提交值，且旧 flow 不能覆盖后来开始的 API Key、logout 或 OAuth intent。
+- Pi 1 的 `AuthPrompt` 没有“必填”标记：空回答是合法输入，由 provider 自己校验（GitHub Copilot 留空即 github.com，Bedrock 的确认步骤只等回车）。Pi 自带登录框总能提交空值，所以 `AuthFlowBroker` 把 `text/secret/manual_code` 一律映射为 `allowEmpty: true`，浏览器不得拦截空回答。
 - `tool_execution_start` 发生在 SDK 参数校验与 host 策略之前，不能解释成副作用已经开始。
 - sessionId/focusId/runId 不得复用，否则迟到命令会形成 ABA；连接 view 与 conversation actor 会显式拒绝复用。
 - `close` 与 `error` 都可能触发 dispose，清理必须幂等。

@@ -86,6 +86,10 @@ export class AuthFlowBroker {
     pending.onAbort = undefined;
   }
 
+  // Pi 1 prompts carry no "required" flag: an empty answer is valid input and
+  // the provider validates it (GitHub Copilot reads blank as github.com, the
+  // Bedrock step waits for a bare Enter). Pi's own login dialog always submits,
+  // so the browser must never block an empty answer either.
   private toRequest(prompt: AuthPrompt): AuthRequest {
     switch (prompt.type) {
       case "text":
@@ -93,6 +97,7 @@ export class AuthFlowBroker {
           kind: "prompt",
           message: prompt.message,
           placeholder: prompt.placeholder,
+          allowEmpty: true,
           secret: false,
         };
       case "secret":
@@ -100,6 +105,7 @@ export class AuthFlowBroker {
           kind: "prompt",
           message: prompt.message,
           placeholder: prompt.placeholder,
+          allowEmpty: true,
           secret: true,
         };
       case "manual_code":
@@ -107,6 +113,7 @@ export class AuthFlowBroker {
           kind: "manual",
           message: prompt.message,
           placeholder: prompt.placeholder,
+          allowEmpty: true,
         };
       case "select":
         return {
